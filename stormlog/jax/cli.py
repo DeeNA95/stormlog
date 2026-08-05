@@ -168,6 +168,7 @@ def _tracking_memory_capability(results: Any) -> Dict[str, Any]:
         ),
     }
 
+
 def _resolve_mlflow_config(args: argparse.Namespace) -> Any:
     config = mlflow_config_from_namespace(args)
     if not config.enabled:
