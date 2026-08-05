@@ -129,6 +129,25 @@ python -m examples.scenarios.wandb_training_smoke --device cuda --wandb-mode off
 python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 -m examples.scenarios.torchrun_ddp_reference
 ```
 
+### Exporting to MLflow
+
+The `track` and `diagnose` commands can export their summaries, tables,
+dashboards, and artifacts to MLflow instead of W&B using the `--mlflow*` flags
+(install with `pip install 'stormlog[mlflow]'`):
+
+```bash
+gpumemprof track --duration 60 --mlflow \
+  --mlflow-experiment stormlog-smoke \
+  --mlflow-tracking-uri file:./mlruns \
+  --mlflow-run-name my-run \
+  --mlflow-log-artifacts
+gpumemprof diagnose --mlflow --mlflow-experiment stormlog-smoke
+```
+
+`--mlflow-tracking-uri file:./mlruns` is the offline equivalent of
+`--wandb-mode offline`; omit it to log to the server configured by the
+`MLFLOW_TRACKING_URI` environment variable.
+
 ### When to use them
 
 - `cpu_telemetry_scenario`: validate CPU-only telemetry export
@@ -137,7 +156,8 @@ python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 -m examples.scenar
 - `tf_end_to_end_scenario`: validate TensorFlow monitor, track, analyze, and diagnose flow together
 - `wandb_training_smoke`: run a short real PyTorch training loop that writes a
   summary bundle, an append-only sink, offline W&B files, and structured phase
-  boundaries you can reload in `gpumemprof analyze` and the TUI
+  boundaries you can reload in `gpumemprof analyze` and the TUI (the same
+  outputs can be exported to MLflow with `--mlflow*` flags on the CLI)
 - `torchrun_ddp_reference`: run a reference single-node DDP training job
   derived from the official PyTorch `torchrun` tutorial pattern, with one
   telemetry sink per rank and a shared distributed summary

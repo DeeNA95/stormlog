@@ -127,6 +127,13 @@ tfmemprof info
 tfmemprof diagnose --duration 0 --output ./tf_diag
 ```
 
+Optional MLflow export check (requires `pip install 'stormlog[mlflow]'`):
+
+```bash
+gpumemprof track --duration 10 --interval 0.5 --output track.json --format json \
+  --mlflow --mlflow-experiment stormlog-smoke --mlflow-tracking-uri file:./mlruns
+```
+
 ## CI behavior in this repo
 
 The current CI workflow at `.github/workflows/ci.yml` runs:
