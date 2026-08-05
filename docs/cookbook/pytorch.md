@@ -69,6 +69,15 @@ This recipe was validated from a source checkout against a JarvisLabs L4
 container using `examples.scenarios.wandb_training_smoke` in `wandb offline`
 mode.
 
+> **Prefer MLflow?** Stormlog also ships an optional MLflow exporter with the
+> same surface as W&B (metrics/tags, alert and timeline tables, dashboard HTML,
+> plots, attribution previews, and artifacts). Install with
+> `pip install 'stormlog[mlflow]'` and pass `--mlflow`,
+> `--mlflow-experiment <name>`, `--mlflow-run-name <name>`,
+> `--mlflow-tracking-uri file:./mlruns` (offline mode), and
+> `--mlflow-log-artifacts` to any `gpumemprof`, `jaxmemprof`, or `tfmemprof`
+> `track`/`diagnose` command instead of the `--wandb*` flags below.
+
 Use it when you need one short real training run that proves:
 
 - CUDA training is actually happening
