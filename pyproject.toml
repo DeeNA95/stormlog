@@ -62,6 +62,9 @@ infer-tokenizers = [
 wandb = [
     "wandb>=0.19.0",
 ]
+mlflow = [
+    "mlflow>=2.4.0",
+]
 jax = [
     "jax>=0.4.20",
     "protobuf>=6.31.1",
@@ -81,6 +84,7 @@ all = [
     "textual>=0.57.0",
     "pyfiglet>=1.0.2",
     "wandb>=0.19.0",
+    "mlflow>=2.4.0",
     "jax>=0.4.20",
     "protobuf>=6.31.1",
 ]
@@ -248,6 +252,8 @@ module = [
     "rich.*",
     "wandb",
     "wandb.*",
+    "mlflow",
+    "mlflow.*",
     "torchvision",
     "torchvision.*",
 ]

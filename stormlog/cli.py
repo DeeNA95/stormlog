@@ -17,6 +17,13 @@ try:
     from .phases import summarize_phase_resolution
 except ImportError:  # pragma: no cover - phase package may land in another slice
     summarize_phase_resolution = None  # type: ignore[assignment]
+from .mlflow_integration import (
+    add_mlflow_arguments,
+    ensure_mlflow_available,
+    export_diagnose_bundle_to_mlflow,
+    export_tracking_run_to_mlflow,
+    mlflow_config_from_namespace,
+)
 from .telemetry_sink import TelemetrySinkConfig
 from .utils import (
     _detect_gpu_hardware,
@@ -165,6 +172,22 @@ def _resolve_wandb_config_or_exit(args: argparse.Namespace) -> Any:
 
 def _warn_wandb_export_failure(command_name: str, exc: Exception) -> None:
     print(f"Warning: {command_name} W&B export skipped: {exc}", file=sys.stderr)
+
+
+def _resolve_mlflow_config_or_exit(args: argparse.Namespace) -> Any:
+    config = mlflow_config_from_namespace(args)
+    if not config.enabled:
+        return config
+    try:
+        ensure_mlflow_available(config)
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    return config
+
+
+def _warn_mlflow_export_failure(command_name: str, exc: Exception) -> None:
+    print(f"Warning: {command_name} MLflow export skipped: {exc}", file=sys.stderr)
 
 
 def main() -> None:
@@ -359,6 +382,7 @@ Cookbook:
         help="Maximum retained telemetry sink size in MB (default: 512)",
     )
     add_wandb_arguments(track_parser)
+    add_mlflow_arguments(track_parser)
 
     # Analyze command
     analyze_parser = subparsers.add_parser("analyze", help="Analyze profiling results")
@@ -429,6 +453,7 @@ Cookbook:
         help="Maximum CUDA allocator history entries to retain (default: 100000)",
     )
     add_wandb_arguments(diagnose_parser)
+    add_mlflow_arguments(diagnose_parser)
 
     # Parse arguments
     args = parser.parse_args()
@@ -710,6 +735,7 @@ def cmd_track(args: argparse.Namespace) -> None:
     duration = args.duration
     interval = args.interval
     wandb_config = _resolve_wandb_config_or_exit(args)
+    mlflow_config = _resolve_mlflow_config_or_exit(args)
     job_id = getattr(args, "job_id", None)
     rank = getattr(args, "rank", None)
     local_rank = getattr(args, "local_rank", None)
@@ -904,6 +930,22 @@ def cmd_track(args: argparse.Namespace) -> None:
             print("W&B export completed.")
         except Exception as exc:
             _warn_wandb_export_failure("gpumemprof track", exc)
+
+    if mlflow_config.enabled:
+        try:
+            export_tracking_run_to_mlflow(
+                mlflow_config,
+                command_name="gpumemprof-track",
+                session_summary=tracker.get_session_summary(),
+                stats=stats,
+                events=tracker.get_events(),
+                output_path=args.output,
+                telemetry_sink_dir=getattr(args, "telemetry_sink_dir", None),
+                oom_dump_path=getattr(tracker, "last_oom_dump_path", None),
+            )
+            print("MLflow export completed.")
+        except Exception as exc:
+            _warn_mlflow_export_failure("gpumemprof track", exc)
 
 
 def _json_default(value: Any) -> Any:
@@ -1233,6 +1275,7 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         return 1
 
     wandb_config = _resolve_wandb_config_or_exit(args)
+    mlflow_config = _resolve_mlflow_config_or_exit(args)
     command_line = " ".join(sys.argv)
     (run_diagnose,) = _import_runtime_symbols(
         ".diagnose", ("run_diagnose",), "The diagnose command"
@@ -1295,6 +1338,17 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
             print("W&B export completed.")
         except Exception as exc:
             _warn_wandb_export_failure("gpumemprof diagnose", exc)
+
+    if mlflow_config.enabled:
+        try:
+            export_diagnose_bundle_to_mlflow(
+                mlflow_config,
+                command_name="gpumemprof-diagnose",
+                artifact_dir=artifact_dir,
+            )
+            print("MLflow export completed.")
+        except Exception as exc:
+            _warn_mlflow_export_failure("gpumemprof diagnose", exc)
 
     return int(exit_code)
 

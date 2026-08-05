@@ -20,6 +20,13 @@ except ImportError:
     TF_AVAILABLE = False
     tf = None
 
+from stormlog.mlflow_integration import (
+    add_mlflow_arguments,
+    ensure_mlflow_available,
+    export_diagnose_bundle_to_mlflow,
+    export_tracking_run_to_mlflow,
+    mlflow_config_from_namespace,
+)
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from stormlog.telemetry_sink import TelemetrySinkConfig
 from stormlog.wandb_integration import (
@@ -96,6 +103,22 @@ def _resolve_wandb_config(args: argparse.Namespace) -> Any:
 
 def _warn_wandb_export_failure(command_name: str, exc: Exception) -> None:
     print(f"Warning: {command_name} W&B export skipped: {exc}", file=sys.stderr)
+
+
+def _resolve_mlflow_config(args: argparse.Namespace) -> Any:
+    config = mlflow_config_from_namespace(args)
+    if not config.enabled:
+        return config
+    try:
+        ensure_mlflow_available(config)
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return None
+    return config
+
+
+def _warn_mlflow_export_failure(command_name: str, exc: Exception) -> None:
+    print(f"Warning: {command_name} MLflow export skipped: {exc}", file=sys.stderr)
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -286,6 +309,9 @@ def cmd_track(args: argparse.Namespace) -> int:
     wandb_config = _resolve_wandb_config(args)
     if wandb_config is None:
         return 1
+    mlflow_config = _resolve_mlflow_config(args)
+    if mlflow_config is None:
+        return 1
 
     print("Starting background memory tracking...")
     job_id = getattr(args, "job_id", None)
@@ -423,6 +449,22 @@ def cmd_track(args: argparse.Namespace) -> int:
                 print("W&B export completed.")
             except Exception as exc:
                 _warn_wandb_export_failure("tfmemprof track", exc)
+
+        if mlflow_config.enabled:
+            try:
+                export_tracking_run_to_mlflow(
+                    mlflow_config,
+                    command_name="tfmemprof-track",
+                    session_summary=tracker.get_session_summary(),
+                    stats=final_stats,
+                    events=results.events,
+                    output_path=args.output,
+                    telemetry_sink_dir=getattr(args, "telemetry_sink_dir", None),
+                    oom_dump_path=None,
+                )
+                print("MLflow export completed.")
+            except Exception as exc:
+                _warn_mlflow_export_failure("tfmemprof track", exc)
 
     return 0
 
@@ -587,6 +629,9 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     wandb_config = _resolve_wandb_config(args)
     if wandb_config is None:
         return 1
+    mlflow_config = _resolve_mlflow_config(args)
+    if mlflow_config is None:
+        return 1
 
     command_line = " ".join(sys.argv)
     try:
@@ -639,6 +684,17 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
             print("W&B export completed.")
         except Exception as exc:
             _warn_wandb_export_failure("tfmemprof diagnose", exc)
+
+    if mlflow_config.enabled:
+        try:
+            export_diagnose_bundle_to_mlflow(
+                mlflow_config,
+                command_name="tfmemprof-diagnose",
+                artifact_dir=artifact_dir,
+            )
+            print("MLflow export completed.")
+        except Exception as exc:
+            _warn_mlflow_export_failure("tfmemprof diagnose", exc)
 
     return exit_code
 
@@ -763,6 +819,7 @@ Cookbook:
         help="Maximum retained telemetry sink size in MB (default: 512)",
     )
     add_wandb_arguments(track_parser)
+    add_mlflow_arguments(track_parser)
 
     # Analyze command
     analyze_parser = subparsers.add_parser("analyze", help="Analyze profiling results")
@@ -810,6 +867,7 @@ Cookbook:
         help="Sampling interval for timeline (default: 0.5)",
     )
     add_wandb_arguments(diagnose_parser)
+    add_mlflow_arguments(diagnose_parser)
 
     args = parser.parse_args()
 
