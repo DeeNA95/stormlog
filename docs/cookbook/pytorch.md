@@ -74,7 +74,7 @@ mode.
 > plots, attribution previews, and artifacts). Install with
 > `pip install 'stormlog[mlflow]'` and pass `--mlflow`,
 > `--mlflow-experiment <name>`, `--mlflow-run-name <name>`,
-> `--mlflow-tracking-uri file:./mlruns` (offline mode), and
+> `--mlflow-tracking-uri sqlite:///mlflow.db` (offline mode), and
 > `--mlflow-log-artifacts` to any `gpumemprof`, `jaxmemprof`, or `tfmemprof`
 > `track`/`diagnose` command instead of the `--wandb*` flags below.
 

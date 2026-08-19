@@ -9,6 +9,7 @@ summary/metric/tag writing.
 
 from __future__ import annotations
 
+import sys
 import tempfile
 from dataclasses import dataclass
 from importlib import import_module
@@ -21,6 +22,10 @@ from ..session import SessionSummary
 MLFLOW_INSTALL_GUIDANCE = (
     "MLflow integration requires optional dependencies. "
     "Install with `pip install 'stormlog[mlflow]'`."
+)
+
+_IDENTITY_TAG_KEYS = frozenset(
+    {"stormlog_rank", "stormlog_local_rank", "stormlog_world_size"}
 )
 
 
@@ -143,15 +148,25 @@ def resolve_run(
 
     if config.tracking_uri is not None:
         mlflow.set_tracking_uri(config.tracking_uri)
+        if config.tracking_uri.startswith("file:"):
+            print(
+                "Hint: a file: tracking URI requires MLFLOW_ALLOW_FILE_STORE=true "
+                "on MLflow >= 3; consider sqlite:///mlflow.db for offline storage.",
+                file=sys.stderr,
+            )
 
     experiment = config.experiment or "stormlog"
     mlflow.set_experiment(experiment)
 
-    start_kwargs: dict[str, Any] = {
-        "run_name": config.run_name or _default_run_name(command_name, session_summary),
-    }
+    start_kwargs: dict[str, Any] = {}
     if config.run_id is not None:
         start_kwargs["run_id"] = config.run_id
+        if config.run_name is not None:
+            start_kwargs["run_name"] = config.run_name
+    else:
+        start_kwargs["run_name"] = config.run_name or _default_run_name(
+            command_name, session_summary
+        )
 
     run = mlflow.start_run(**start_kwargs)
     tags: dict[str, Any] = dict(session_summary_fields(session_summary))
@@ -171,9 +186,11 @@ def update_summary(mlflow: Any, payload: Mapping[str, Any]) -> None:
     for key, value in payload.items():
         if value is None:
             continue
-        if isinstance(value, bool):
+        if key in _IDENTITY_TAG_KEYS:
+            mlflow.set_tag(key, str(value))
+        elif isinstance(value, bool):
             mlflow.set_tag(key, "true" if value else "false")
-        elif isinstance(value, (int, float)) and not isinstance(value, complex):
+        elif isinstance(value, (int, float)):
             mlflow.log_metric(key, float(value))
         else:
             mlflow.set_tag(key, str(value))

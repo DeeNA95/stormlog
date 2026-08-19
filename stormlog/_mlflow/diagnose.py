@@ -8,6 +8,7 @@ from typing import Any, Mapping
 from .._wandb.core import (
     read_json_if_exists,
     session_slug,
+    session_summary_fields,
     session_summary_from_manifest,
 )
 from .._wandb.diagnose import diagnose_metrics, diagnose_summary_fields
@@ -16,7 +17,6 @@ from .core import (
     MlflowExportConfig,
     log_directory_artifact,
     resolve_run,
-    session_summary_fields,
     update_summary,
 )
 

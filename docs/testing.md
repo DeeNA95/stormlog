@@ -131,7 +131,7 @@ Optional MLflow export check (requires `pip install 'stormlog[mlflow]'`):
 
 ```bash
 gpumemprof track --duration 10 --interval 0.5 --output track.json --format json \
-  --mlflow --mlflow-experiment stormlog-smoke --mlflow-tracking-uri file:./mlruns
+  --mlflow --mlflow-experiment stormlog-smoke --mlflow-tracking-uri sqlite:///mlflow.db
 ```
 
 ## CI behavior in this repo

@@ -314,6 +314,12 @@ def test_export_tracking_run_logs_metrics_tables_and_artifacts(
     assert fake_mlflow.metrics["stormlog_chart_point_count"] == [(3.0, None)]
     assert "stormlog_backend" not in fake_mlflow.metrics  # strings go to tags
     assert fake_mlflow.tags["stormlog_backend"] == "cuda"
+    assert fake_mlflow.tags["stormlog_rank"] == "2"
+    assert fake_mlflow.tags["stormlog_local_rank"] == "0"
+    assert fake_mlflow.tags["stormlog_world_size"] == "8"
+    assert "stormlog_rank" not in fake_mlflow.metrics
+    assert "stormlog_local_rank" not in fake_mlflow.metrics
+    assert "stormlog_world_size" not in fake_mlflow.metrics
     assert fake_mlflow.tags["stormlog_attribution_html_file"] == (
         "cuda_allocator_state_history_annotated.html"
     )
@@ -582,7 +588,33 @@ def test_tracking_resumes_existing_run_id(
 
     assert fake_mlflow.start_kwargs is not None
     assert fake_mlflow.start_kwargs["run_id"] == "existing-run-1"
-    assert fake_mlflow.start_kwargs["run_name"].startswith("stormlog-track-")
+    assert "run_name" not in fake_mlflow.start_kwargs
+    assert fake_mlflow.end_calls == 1
+
+
+def test_tracking_resume_forwards_explicit_run_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_mlflow = _install_fake_mlflow(monkeypatch)
+    _block_matplotlib(monkeypatch)
+
+    export_tracking_run_to_mlflow(
+        mlflow_config_from_namespace(
+            Namespace(
+                mlflow=True,
+                mlflow_run_id="existing-run-1",
+                mlflow_run_name="explicit rename",
+            )
+        ),
+        command_name="stormlog-track",
+        session_summary=create_session_summary(source="stormlog.tracker"),
+        stats={"peak_memory": 128},
+        events=[],
+    )
+
+    assert fake_mlflow.start_kwargs is not None
+    assert fake_mlflow.start_kwargs["run_id"] == "existing-run-1"
+    assert fake_mlflow.start_kwargs["run_name"] == "explicit rename"
     assert fake_mlflow.end_calls == 1
 
 

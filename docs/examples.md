@@ -138,15 +138,17 @@ dashboards, and artifacts to MLflow instead of W&B using the `--mlflow*` flags
 ```bash
 gpumemprof track --duration 60 --mlflow \
   --mlflow-experiment stormlog-smoke \
-  --mlflow-tracking-uri file:./mlruns \
+  --mlflow-tracking-uri sqlite:///mlflow.db \
   --mlflow-run-name my-run \
   --mlflow-log-artifacts
 gpumemprof diagnose --mlflow --mlflow-experiment stormlog-smoke
 ```
 
-`--mlflow-tracking-uri file:./mlruns` is the offline equivalent of
+`--mlflow-tracking-uri sqlite:///mlflow.db` is the offline equivalent of
 `--wandb-mode offline`; omit it to log to the server configured by the
-`MLFLOW_TRACKING_URI` environment variable.
+`MLFLOW_TRACKING_URI` environment variable. Note that a local `file:./mlruns`
+URI requires `MLFLOW_ALLOW_FILE_STORE=true` on MLflow >= 3, where the
+filesystem tracking backend is in maintenance mode.
 
 ### When to use them
 
