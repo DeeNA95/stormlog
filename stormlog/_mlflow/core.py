@@ -151,7 +151,7 @@ def resolve_run(
         if config.tracking_uri.startswith("file:"):
             print(
                 "Hint: a file: tracking URI requires MLFLOW_ALLOW_FILE_STORE=true "
-                "on MLflow >= 3; consider sqlite:///mlflow.db for offline storage.",
+                "on MLflow >= 3.13.0; consider sqlite:///mlflow.db for offline storage.",
                 file=sys.stderr,
             )
 

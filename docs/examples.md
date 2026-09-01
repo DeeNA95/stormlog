@@ -147,7 +147,7 @@ gpumemprof diagnose --mlflow --mlflow-experiment stormlog-smoke
 `--mlflow-tracking-uri sqlite:///mlflow.db` is the offline equivalent of
 `--wandb-mode offline`; omit it to log to the server configured by the
 `MLFLOW_TRACKING_URI` environment variable. Note that a local `file:./mlruns`
-URI requires `MLFLOW_ALLOW_FILE_STORE=true` on MLflow >= 3, where the
+URI requires `MLFLOW_ALLOW_FILE_STORE=true` on MLflow >= 3.13.0, where the
 filesystem tracking backend is in maintenance mode.
 
 ### When to use them
