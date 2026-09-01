@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Mapping
+from uuid import uuid4
 
 from .._wandb.core import default_group, session_summary_fields
 from ..session import SessionSummary
@@ -178,6 +179,11 @@ def resolve_run(
     run = mlflow.start_run(**start_kwargs)
     mlflow.set_tags(tags)
     return mlflow, run, True
+
+
+def new_export_artifact_prefix(session_slug: str) -> str:
+    """Return a unique artifact prefix so retries never append to prior tables."""
+    return f"stormlog-exports/{session_slug}/{uuid4().hex}"
 
 
 def update_summary(mlflow: Any, payload: Mapping[str, Any]) -> None:

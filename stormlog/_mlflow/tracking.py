@@ -37,6 +37,7 @@ from .core import (
     log_directory_artifact,
     log_file_artifact,
     materialize_html_file,
+    new_export_artifact_prefix,
     resolve_run,
     update_summary,
 )
@@ -65,6 +66,7 @@ def export_tracking_run_to_mlflow(
         session_summary=session_summary,
     )
     safe_session = session_slug(session_summary)
+    artifact_prefix = new_export_artifact_prefix(safe_session)
     output_file = coerce_existing_file(output_path)
     sink_dir = coerce_existing_dir(telemetry_sink_dir)
     oom_dir = coerce_existing_dir(oom_dump_path)
@@ -82,12 +84,13 @@ def export_tracking_run_to_mlflow(
         log_tracking_time_series(mlflow, timeline_rows)
 
         if config.log_tables:
-            log_alerts_table(mlflow, events)
+            log_alerts_table(mlflow, events, artifact_prefix=artifact_prefix)
             update_summary(
                 mlflow,
                 log_tracking_visualizations(
                     mlflow,
                     timeline_rows,
+                    artifact_prefix=artifact_prefix,
                     session_slug=safe_session,
                     dashboard_root=_tracking_dashboard_root(output_file, sink_dir),
                     allow_artifact_logging=config.log_artifacts,
@@ -133,6 +136,7 @@ def export_tracking_run_to_mlflow(
                 log_attribution_outputs(
                     mlflow,
                     root=attribution_dir,
+                    artifact_prefix=artifact_prefix,
                     session_slug=safe_session,
                     allow_artifact_logging=config.log_artifacts,
                 ),
@@ -142,7 +146,12 @@ def export_tracking_run_to_mlflow(
             mlflow.end_run()
 
 
-def log_alerts_table(mlflow: Any, events: Sequence[Any]) -> None:
+def log_alerts_table(
+    mlflow: Any,
+    events: Sequence[Any],
+    *,
+    artifact_prefix: str,
+) -> None:
     rows: list[list[Any]] = []
     for event in events:
         event_type = event_value(event, "event_type") or event_value(event, "type")
@@ -174,7 +183,7 @@ def log_alerts_table(mlflow: Any, events: Sequence[Any]) -> None:
     ]
     mlflow.log_table(
         data=_rows_as_columns(columns, rows[-250:]),
-        artifact_file="stormlog_alerts.json",
+        artifact_file=f"{artifact_prefix}/stormlog_alerts.json",
     )
 
 
@@ -199,6 +208,7 @@ def log_tracking_visualizations(
     mlflow: Any,
     rows: Sequence[Mapping[str, Any]],
     *,
+    artifact_prefix: str,
     session_slug: str,
     dashboard_root: Path | None,
     allow_artifact_logging: bool,
@@ -235,7 +245,7 @@ def log_tracking_visualizations(
     ]
     mlflow.log_table(
         data=_rows_as_columns(columns, data_rows),
-        artifact_file="stormlog_memory_timeline.json",
+        artifact_file=f"{artifact_prefix}/stormlog_memory_timeline.json",
     )
 
     log_memory_plots(mlflow, rows)

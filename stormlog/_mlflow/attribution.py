@@ -9,10 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Mapping
 
-from .._wandb.attribution import (
-    build_attribution_preview_html,
-    tensor_attribution_rows,
-)
+from .._wandb.attribution import build_attribution_preview_html, tensor_attribution_rows
 from .._wandb.core import read_json_if_exists
 from ..cuda_native_debug import (
     ALLOCATION_ATTRIBUTION_FILENAME,
@@ -27,6 +24,7 @@ def log_attribution_outputs(
     mlflow: Any,
     *,
     root: Path,
+    artifact_prefix: str,
     session_slug: str,
     allow_artifact_logging: bool = False,
 ) -> dict[str, Any]:
@@ -66,7 +64,7 @@ def log_attribution_outputs(
                 "shape": [str(row[4]) for row in tensor_rows[:200]],
                 "dtype": [str(row[5]) for row in tensor_rows[:200]],
             },
-            artifact_file="stormlog_tensor_attribution.json",
+            artifact_file=f"{artifact_prefix}/stormlog_tensor_attribution.json",
         )
         summary_fields["stormlog_tensor_attribution_rows"] = len(tensor_rows)
 

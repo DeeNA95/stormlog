@@ -334,9 +334,15 @@ def test_export_tracking_run_logs_metrics_tables_and_artifacts(
     assert len(fake_mlflow.metrics["stormlog_timeline_allocated_bytes"]) == 3
 
     table_files = {artifact_file for _, artifact_file in fake_mlflow.tables}
-    assert "stormlog_alerts.json" in table_files
-    assert "stormlog_memory_timeline.json" in table_files
-    assert "stormlog_tensor_attribution.json" in table_files
+    table_prefixes = {artifact_file.rsplit("/", 1)[0] for artifact_file in table_files}
+    assert len(table_prefixes) == 1
+    table_prefix = table_prefixes.pop()
+    assert table_prefix.startswith("stormlog-exports/session-12345678/")
+    assert {artifact_file.rsplit("/", 1)[1] for artifact_file in table_files} == {
+        "stormlog_alerts.json",
+        "stormlog_memory_timeline.json",
+        "stormlog_tensor_attribution.json",
+    }
 
     text_files = {artifact_file for _, artifact_file in fake_mlflow.texts}
     assert "stormlog_tracking_dashboard.html" in text_files
@@ -448,9 +454,9 @@ def test_export_diagnose_bundle_logs_summary_and_artifact(
     assert fake_mlflow.tags["stormlog_attribution_html_file"] == (
         "cuda_allocator_state_history_annotated.html"
     )
-    assert {artifact_file for _, artifact_file in fake_mlflow.tables} == {
-        "stormlog_diagnostic_suggestions.json"
-    }
+    assert len(fake_mlflow.tables) == 1
+    assert fake_mlflow.tables[0][1].startswith("stormlog-exports/diag-12345678/")
+    assert fake_mlflow.tables[0][1].endswith("/stormlog_diagnostic_suggestions.json")
     assert {artifact_file for _, artifact_file in fake_mlflow.texts} == {
         "stormlog_attribution_preview.html"
     }
@@ -545,9 +551,9 @@ def test_attribution_inline_logging_respects_log_artifacts_flag(
     assert {artifact_file for _, artifact_file in fake_mlflow.texts} == {
         "stormlog_attribution_preview.html"
     }
-    assert {artifact_file for _, artifact_file in fake_mlflow.tables} == {
-        "stormlog_tensor_attribution.json"
-    }
+    assert len(fake_mlflow.tables) == 1
+    assert fake_mlflow.tables[0][1].startswith("stormlog-exports/")
+    assert fake_mlflow.tables[0][1].endswith("/stormlog_tensor_attribution.json")
 
 
 def test_export_uses_active_mlflow_run_without_creating_another(
@@ -627,6 +633,46 @@ def test_tracking_resume_forwards_explicit_run_name(
     assert fake_mlflow.start_kwargs["run_id"] == "existing-run-1"
     assert fake_mlflow.start_kwargs["run_name"] == "explicit rename"
     assert fake_mlflow.end_calls == 1
+
+
+def test_repeated_exports_use_distinct_table_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_mlflow = _install_fake_mlflow(monkeypatch)
+    _block_matplotlib(monkeypatch)
+    config = mlflow_config_from_namespace(Namespace(mlflow=True))
+    summary = create_session_summary(
+        source="stormlog.tracker",
+        session_id="retry-session",
+    )
+    events = [
+        {
+            "timestamp": 1.0,
+            "event_type": "sample",
+            "memory_allocated": 128,
+            "memory_reserved": 256,
+            "device_used": 256,
+            "device_total": 1024,
+        }
+    ]
+
+    for _ in range(2):
+        export_tracking_run_to_mlflow(
+            config,
+            command_name="stormlog-track",
+            session_summary=summary,
+            stats={"peak_memory": 128},
+            events=events,
+        )
+
+    table_paths = [artifact_file for _, artifact_file in fake_mlflow.tables]
+    assert len(table_paths) == 2
+    assert len(set(table_paths)) == 2
+    assert all(
+        path.startswith("stormlog-exports/retry-session/")
+        and path.endswith("/stormlog_memory_timeline.json")
+        for path in table_paths
+    )
 
 
 def test_memory_plots_are_skipped_when_matplotlib_is_unavailable(

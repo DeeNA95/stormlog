@@ -16,6 +16,7 @@ from .attribution import log_attribution_outputs
 from .core import (
     MlflowExportConfig,
     log_directory_artifact,
+    new_export_artifact_prefix,
     resolve_run,
     update_summary,
 )
@@ -40,6 +41,8 @@ def export_diagnose_bundle_to_mlflow(
     manifest = read_json_if_exists(bundle_dir / "manifest.json")
     diagnostic_summary = read_json_if_exists(bundle_dir / "diagnostic_summary.json")
     session_summary = session_summary_from_manifest(manifest)
+    safe_session = session_slug(session_summary)
+    artifact_prefix = new_export_artifact_prefix(safe_session)
 
     mlflow, run, managed = resolve_run(
         config,
@@ -55,12 +58,16 @@ def export_diagnose_bundle_to_mlflow(
         )
 
         if config.log_tables:
-            log_suggestions_table(mlflow, diagnostic_summary)
+            log_suggestions_table(
+                mlflow,
+                diagnostic_summary,
+                artifact_prefix=artifact_prefix,
+            )
 
         if config.log_artifacts:
             log_directory_artifact(
                 mlflow,
-                artifact_path=f"stormlog-diagnose-{session_slug(session_summary)}",
+                artifact_path=f"stormlog-diagnose-{safe_session}",
                 path=bundle_dir,
             )
 
@@ -70,7 +77,8 @@ def export_diagnose_bundle_to_mlflow(
                 log_attribution_outputs(
                     mlflow,
                     root=bundle_dir,
-                    session_slug=session_slug(session_summary),
+                    artifact_prefix=artifact_prefix,
+                    session_slug=safe_session,
                     allow_artifact_logging=config.log_artifacts,
                 ),
             )
@@ -82,6 +90,8 @@ def export_diagnose_bundle_to_mlflow(
 def log_suggestions_table(
     mlflow: Any,
     diagnostic_summary: Mapping[str, Any] | None,
+    *,
+    artifact_prefix: str,
 ) -> None:
     if not isinstance(diagnostic_summary, Mapping):
         return
@@ -93,5 +103,5 @@ def log_suggestions_table(
             "index": list(range(1, len(suggestions) + 1)),
             "suggestion": [str(suggestion) for suggestion in suggestions],
         },
-        artifact_file="stormlog_diagnostic_suggestions.json",
+        artifact_file=f"{artifact_prefix}/stormlog_diagnostic_suggestions.json",
     )
