@@ -133,8 +133,8 @@ def test_ensure_mlflow_available_reports_optional_dependency_guidance(
 
     def _blocked_import(
         name: str,
-        globals: dict[str, object] | None = None,
-        locals: dict[str, object] | None = None,
+        globals: dict[str, object] | None = None,  # noqa: A002
+        locals: dict[str, object] | None = None,  # noqa: A002
         fromlist: tuple[str, ...] = (),
         level: int = 0,
     ) -> Any:
