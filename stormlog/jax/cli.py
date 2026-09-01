@@ -8,10 +8,16 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict
+from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Sequence
 
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from stormlog.telemetry_sink import TelemetrySinkConfig
+
+if TYPE_CHECKING:
+    from stormlog._mlflow.core import MlflowExportConfig
+    from stormlog.session import SessionSummary
+
+    from .tracker import MemoryTracker
 
 try:
     from stormlog.wandb_integration import (
@@ -54,9 +60,34 @@ except ImportError:
 
     def mlflow_config_from_namespace(args: Any) -> Any:  # type: ignore[misc]
         class DummyConfig:
-            enabled = False
+            enabled = bool(getattr(args, "mlflow", False))
 
         return DummyConfig()
+
+    def ensure_mlflow_available(config: MlflowExportConfig) -> None:
+        pass
+
+    def export_tracking_run_to_mlflow(
+        config: MlflowExportConfig,
+        *,
+        command_name: str,
+        session_summary: SessionSummary | None,
+        stats: Mapping[str, Any],
+        events: Sequence[Any],
+        output_path: str | Path | None = None,
+        telemetry_sink_dir: str | Path | None = None,
+        oom_dump_path: str | Path | None = None,
+        attribution_bundle_dir: str | Path | None = None,
+    ) -> None:
+        pass
+
+    def export_diagnose_bundle_to_mlflow(
+        config: MlflowExportConfig,
+        *,
+        command_name: str,
+        artifact_dir: str | Path,
+    ) -> None:
+        pass
 
 
 from .jax_env import configure_jax_logging
@@ -73,9 +104,6 @@ try:
 except ImportError:
     JAX_AVAILABLE = False
     jax = None
-
-if TYPE_CHECKING:
-    from .tracker import MemoryTracker
 
 
 def _load_memory_tracker() -> type[MemoryTracker]:
