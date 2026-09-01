@@ -8,10 +8,16 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict
+from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Sequence
 
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from stormlog.telemetry_sink import TelemetrySinkConfig
+
+if TYPE_CHECKING:
+    from stormlog._mlflow.core import MlflowExportConfig
+    from stormlog.session import SessionSummary
+
+    from .tracker import MemoryTracker
 
 try:
     from stormlog.wandb_integration import (
@@ -36,6 +42,54 @@ except ImportError:
         return DummyConfig()
 
 
+try:
+    from stormlog.mlflow_integration import (
+        add_mlflow_arguments,
+        ensure_mlflow_available,
+        export_diagnose_bundle_to_mlflow,
+        export_tracking_run_to_mlflow,
+        mlflow_config_from_namespace,
+    )
+
+    MLFLOW_AVAILABLE = True
+except ImportError:
+    MLFLOW_AVAILABLE = False
+
+    def add_mlflow_arguments(parser: Any) -> None:
+        pass
+
+    def mlflow_config_from_namespace(args: Any) -> Any:  # type: ignore[misc]
+        class DummyConfig:
+            enabled = bool(getattr(args, "mlflow", False))
+
+        return DummyConfig()
+
+    def ensure_mlflow_available(config: MlflowExportConfig) -> None:
+        pass
+
+    def export_tracking_run_to_mlflow(
+        config: MlflowExportConfig,
+        *,
+        command_name: str,
+        session_summary: SessionSummary | None,
+        stats: Mapping[str, Any],
+        events: Sequence[Any],
+        output_path: str | Path | None = None,
+        telemetry_sink_dir: str | Path | None = None,
+        oom_dump_path: str | Path | None = None,
+        attribution_bundle_dir: str | Path | None = None,
+    ) -> None:
+        pass
+
+    def export_diagnose_bundle_to_mlflow(
+        config: MlflowExportConfig,
+        *,
+        command_name: str,
+        artifact_dir: str | Path,
+    ) -> None:
+        pass
+
+
 from .jax_env import configure_jax_logging
 from .utils import format_memory, get_system_info
 
@@ -50,9 +104,6 @@ try:
 except ImportError:
     JAX_AVAILABLE = False
     jax = None
-
-if TYPE_CHECKING:
-    from .tracker import MemoryTracker
 
 
 def _load_memory_tracker() -> type[MemoryTracker]:
@@ -144,6 +195,22 @@ def _tracking_memory_capability(results: Any) -> Dict[str, Any]:
             process_memory if isinstance(process_memory, int) else None
         ),
     }
+
+
+def _resolve_mlflow_config(args: argparse.Namespace) -> Any:
+    config = mlflow_config_from_namespace(args)
+    if not config.enabled:
+        return config
+    try:
+        ensure_mlflow_available(config)
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return None
+    return config
+
+
+def _warn_mlflow_export_failure(command_name: str, exc: Exception) -> None:
+    print(f"Warning: {command_name} MLflow export skipped: {exc}", file=sys.stderr)
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -322,6 +389,9 @@ def cmd_track(args: argparse.Namespace) -> int:
     wandb_config = _resolve_wandb_config(args)
     if wandb_config is None:
         return 1
+    mlflow_config = _resolve_mlflow_config(args)
+    if mlflow_config is None:
+        return 1
 
     print("Starting background memory tracking...")
     job_id = getattr(args, "job_id", None)
@@ -488,6 +558,24 @@ def cmd_track(args: argparse.Namespace) -> int:
         elif wandb_config.enabled:
             print("Warning: W&B is not available.", file=sys.stderr)
 
+        if MLFLOW_AVAILABLE and mlflow_config.enabled:
+            try:
+                export_tracking_run_to_mlflow(
+                    mlflow_config,
+                    command_name="jaxmemprof-track",
+                    session_summary=tracker.get_session_summary(),
+                    stats=final_stats,
+                    events=results.telemetry_events,
+                    output_path=args.output,
+                    telemetry_sink_dir=getattr(args, "telemetry_sink_dir", None),
+                    oom_dump_path=tracker.last_oom_dump_path,
+                )
+                print("MLflow export completed.")
+            except Exception as exc:
+                _warn_mlflow_export_failure("jaxmemprof track", exc)
+        elif mlflow_config.enabled:
+            print("Warning: MLflow is not available.", file=sys.stderr)
+
     return 0
 
 
@@ -505,6 +593,9 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
 
     wandb_config = _resolve_wandb_config(args)
     if wandb_config is None:
+        return 1
+    mlflow_config = _resolve_mlflow_config(args)
+    if mlflow_config is None:
         return 1
 
     command_line = " ".join(sys.argv)
@@ -562,6 +653,19 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
             _warn_wandb_export_failure("jaxmemprof diagnose", exc)
     elif wandb_config.enabled:
         print("Warning: W&B is not available.", file=sys.stderr)
+
+    if MLFLOW_AVAILABLE and mlflow_config.enabled:
+        try:
+            export_diagnose_bundle_to_mlflow(
+                mlflow_config,
+                command_name="jaxmemprof-diagnose",
+                artifact_dir=artifact_dir,
+            )
+            print("MLflow export completed.")
+        except Exception as exc:
+            _warn_mlflow_export_failure("jaxmemprof diagnose", exc)
+    elif mlflow_config.enabled:
+        print("Warning: MLflow is not available.", file=sys.stderr)
 
     return exit_code
 
@@ -820,6 +924,7 @@ Cookbook:
         help="Maximum retained OOM dump storage in MB (default: 256)",
     )
     add_wandb_arguments(track_parser)
+    add_mlflow_arguments(track_parser)
 
     # Diagnose command
     diagnose_parser = subparsers.add_parser(
@@ -849,6 +954,7 @@ Cookbook:
         help="Sampling interval for timeline (default: 0.5)",
     )
     add_wandb_arguments(diagnose_parser)
+    add_mlflow_arguments(diagnose_parser)
 
     # Analyze command
     analyze_parser = subparsers.add_parser(

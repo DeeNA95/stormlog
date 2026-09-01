@@ -7,6 +7,47 @@ import textwrap
 import pytest
 
 
+def test_jax_mlflow_fallback_preserves_requested_export() -> None:
+    code = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+        from types import SimpleNamespace
+
+        class BlockMlflowIntegration(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "stormlog.mlflow_integration":
+                    raise ImportError("MLflow integration unavailable")
+                return None
+
+        sys.meta_path.insert(0, BlockMlflowIntegration())
+
+        import stormlog.jax.cli as cli
+
+        args = SimpleNamespace(mlflow=True)
+        config = cli.mlflow_config_from_namespace(args)
+        assert cli.MLFLOW_AVAILABLE is False
+        assert config.enabled is True
+        assert cli._resolve_mlflow_config(args).enabled is True
+        assert callable(cli.export_tracking_run_to_mlflow)
+        assert callable(cli.export_diagnose_bundle_to_mlflow)
+
+        print("ok")
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ok" in completed.stdout
+
+
 def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
     code = textwrap.dedent(
         """
