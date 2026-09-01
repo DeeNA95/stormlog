@@ -558,7 +558,13 @@ def test_export_uses_active_mlflow_run_without_creating_another(
     fake_mlflow.active = _FakeRun()
 
     export_tracking_run_to_mlflow(
-        mlflow_config_from_namespace(Namespace(mlflow=True)),
+        mlflow_config_from_namespace(
+            Namespace(
+                mlflow=True,
+                mlflow_group="active-group",
+                mlflow_job_type="active-job-type",
+            )
+        ),
         command_name="stormlog-track",
         session_summary=create_session_summary(source="stormlog.tracker"),
         stats={"peak_memory": 128},
@@ -567,6 +573,10 @@ def test_export_uses_active_mlflow_run_without_creating_another(
 
     assert fake_mlflow.start_kwargs is None
     assert fake_mlflow.end_calls == 0
+    assert fake_mlflow.tags["stormlog_command"] == "stormlog-track"
+    assert fake_mlflow.tags["stormlog_group"] == "active-group"
+    assert fake_mlflow.tags["stormlog_job_type"] == "active-job-type"
+    assert "stormlog_session_id" in fake_mlflow.tags
     assert fake_mlflow.metrics["stormlog_peak_memory_bytes"] == [(128.0, None)]
 
 
@@ -589,6 +599,7 @@ def test_tracking_resumes_existing_run_id(
     assert fake_mlflow.start_kwargs is not None
     assert fake_mlflow.start_kwargs["run_id"] == "existing-run-1"
     assert "run_name" not in fake_mlflow.start_kwargs
+    assert fake_mlflow.experiment is None
     assert fake_mlflow.end_calls == 1
 
 

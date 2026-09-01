@@ -142,8 +142,16 @@ def resolve_run(
 ) -> tuple[Any, Any, bool]:
     """Return (mlflow module, run object, managed) like the W&B exporter."""
     mlflow = import_mlflow()
+    tags: dict[str, Any] = dict(session_summary_fields(session_summary))
+    tags["stormlog_command"] = command_name
+    group = config.group or default_group(session_summary)
+    if group is not None:
+        tags["stormlog_group"] = group
+    tags["stormlog_job_type"] = config.job_type or command_name
+
     active_run = mlflow.active_run()
     if active_run is not None:
+        mlflow.set_tags(tags)
         return mlflow, active_run, False
 
     if config.tracking_uri is not None:
@@ -155,26 +163,19 @@ def resolve_run(
                 file=sys.stderr,
             )
 
-    experiment = config.experiment or "stormlog"
-    mlflow.set_experiment(experiment)
-
     start_kwargs: dict[str, Any] = {}
     if config.run_id is not None:
         start_kwargs["run_id"] = config.run_id
         if config.run_name is not None:
             start_kwargs["run_name"] = config.run_name
     else:
+        experiment = config.experiment or "stormlog"
+        mlflow.set_experiment(experiment)
         start_kwargs["run_name"] = config.run_name or _default_run_name(
             command_name, session_summary
         )
 
     run = mlflow.start_run(**start_kwargs)
-    tags: dict[str, Any] = dict(session_summary_fields(session_summary))
-    tags["stormlog_command"] = command_name
-    group = config.group or default_group(session_summary)
-    if group is not None:
-        tags["stormlog_group"] = group
-    tags["stormlog_job_type"] = config.job_type or command_name
     mlflow.set_tags(tags)
     return mlflow, run, True
 
