@@ -44,6 +44,7 @@ vllm_execution
 inference_diagnosis
 incident_capture
 inference_export
+qualification
 tui
 cookbook/index
 cookbook/always_on
