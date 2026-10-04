@@ -150,6 +150,11 @@ class ProfileConfig:
     slo_source: str | None = None
     # What to export, and where; nothing by default (docs/inference_export.md).
     export: ExportConfig = field(default_factory=ExportConfig)
+    # What to ask the server about itself before and after the run: auto,
+    # basic or none (see server_probe). /server_info is asked of a public
+    # host only when allow_remote_probe is set.
+    server_probe: str = "auto"
+    allow_remote_probe: bool = False
 
     def prompt_spec(self) -> PromptSpec:
         return PromptSpec(
