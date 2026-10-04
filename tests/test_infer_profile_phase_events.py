@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
 
 from examples.qualification.fake_engine import FakeEngine, FakeEngineConfig
 from stormlog.infer.config import ProfileConfig
+from stormlog.infer.open_loop import (
+    STOPPED_WAITING,
+    Arrival,
+    Dispatch,
+    InFlightLimiter,
+    dispatch_schedule,
+)
 from stormlog.infer.profile import InferenceProfiler, PhaseEvent
 
 
@@ -92,3 +101,128 @@ def test_a_phase_is_on_record_before_its_end_is_told(tmp_path: Path) -> None:
         with pytest.raises(OSError):
             InferenceProfiler(config, on_phase=refuse_end).run()
     assert "measured" in _phase_windows(output)
+
+
+@pytest.mark.parametrize(
+    "arrivals",
+    [
+        {"arrival_mode": "poisson", "rates": (40.0,)},
+        {"concurrency": (2,)},
+    ],
+    ids=["open", "closed"],
+)
+def test_a_stop_file_ends_the_measured_window_cleanly(
+    tmp_path: Path, arrivals: dict[str, object]
+) -> None:
+    # #221's victim runs until the harness's plan is done, which isn't known
+    # in advance: the stop file ends its arrivals, and the phase drains and
+    # completes, instead of the run being interrupted.
+    import threading
+    import time
+
+    output, stop = tmp_path / "infer.jsonl", tmp_path / "stop"
+    threading.Timer(1.0, stop.touch).start()
+    with FakeEngine(FakeEngineConfig(step_seconds=0.001)) as engine:
+        config = _config(
+            engine,
+            output,
+            request_count=None,
+            duration_seconds=60.0,
+            stop_file=str(stop),
+            **arrivals,
+        )
+        began = time.monotonic()
+        InferenceProfiler(config).run()
+        lasted = time.monotonic() - began
+    assert lasted < 20
+    window = _phase_windows(output)["measured"]
+    seconds = (window["window_ended_at_ns"] - window["started_at_ns"]) / 1e9  # type: ignore[operator]
+    assert 0.5 < seconds < 5
+    assert window["stopped_early"] is True
+    records = [json.loads(line) for line in output.read_text().splitlines() if line]
+    sessions = [r for r in records if r.get("event_type") == "infer.session"]
+    assert sessions[-1]["status"] == "completed"
+
+
+def test_a_stopped_open_loop_divides_by_the_window_it_ran(tmp_path: Path) -> None:
+    # The phase records the arrivals due by the stop; without its own
+    # endpoint, populations recomputed the full 60 s schedule's and divided
+    # those arrivals by it, as if the victim's load had been a sixtieth.
+    import threading
+
+    from stormlog.infer.populations import case_populations
+
+    output, stop = tmp_path / "infer.jsonl", tmp_path / "stop"
+    threading.Timer(1.0, stop.touch).start()
+    with FakeEngine(FakeEngineConfig(step_seconds=0.001)) as engine:
+        config = _config(
+            engine,
+            output,
+            request_count=None,
+            duration_seconds=60.0,
+            stop_file=str(stop),
+            arrival_mode="poisson",
+            rates=(40.0,),
+        )
+        InferenceProfiler(config).run()
+    window = _phase_windows(output)["measured"]
+    ran = window["window_ended_at_ns"] - window["started_at_ns"]  # type: ignore[operator]
+    assert window["scheduled_endpoint_offset_ns"] == ran
+    records = [json.loads(line) for line in output.read_text().splitlines() if line]
+    (case,) = case_populations(records).values()
+    assert case.intervals.scheduled_window is not None
+    assert case.intervals.scheduled_window.ended_at_ns == window["window_ended_at_ns"]
+    assert case.intervals.realized_offered_rate_per_second == pytest.approx(
+        window["scheduled_arrivals"] / (ran / 1e9)
+    )
+
+
+def test_a_stop_while_an_arrival_waits_for_a_slot_ends_the_schedule_then() -> None:
+    # Codex on #310: with overflow="wait" and every slot busy, an arrival
+    # waited for a slot without watching the stop, so the stop was seen only
+    # once a slot freed or the drain deadline passed, and that arrival was
+    # sent after the window had ended. The arrivals due by the stop are
+    # dropped then, and the schedule ends there.
+    async def scenario() -> tuple[Dispatch, list[int], list[tuple[int, str]], float]:
+        limiter = InFlightLimiter(1)
+        await limiter.acquire()  # every slot busy
+        until = asyncio.Event()
+        sent: list[int] = []
+        dropped: list[tuple[int, str]] = []
+
+        async def send(arrival: Arrival) -> None:
+            sent.append(arrival.index)
+
+        asyncio.get_running_loop().call_later(0.1, until.set)
+        started = time.perf_counter()
+        dispatch = await dispatch_schedule(
+            [0.0, 0.05, 5.0],
+            mode="fixed_rate",
+            limiter=limiter,
+            overflow="wait",
+            send=send,
+            drop=lambda arrival, reason: dropped.append((arrival.index, reason)),
+            deadline=3.0,
+            until=until,
+        )
+        took = time.perf_counter() - started
+        # The slot the arrival waited for was never taken.
+        assert limiter.active == 1
+        return dispatch, sent, dropped, took
+
+    dispatch, sent, dropped, took = asyncio.run(scenario())
+    assert sent == [] and took < 1.0
+    assert dropped == [(0, STOPPED_WAITING), (1, STOPPED_WAITING)]
+    assert dispatch.ended_at_ns is not None and dispatch.scheduled == 2
+
+
+def test_the_command_line_passes_the_stop_file(tmp_path: Path) -> None:
+    from stormlog.infer.cli import _profile_config, build_parser
+
+    stop = str(tmp_path / "stop")
+    args = build_parser().parse_args(
+        ["profile", "--endpoint", "http://127.0.0.1:9/v1/chat/completions",
+         "--model", "m", "--duration", "5", "--output", str(tmp_path / "o.jsonl"),
+         "--stop-file", stop]
+    )  # fmt: skip
+    assert _profile_config(args).stop_file == stop
