@@ -445,9 +445,9 @@ def test_an_api_server_pulse_that_also_stalled_the_engine_adds_that_mechanism() 
 
 
 def test_a_twin_that_leaves_the_signals_alone_is_realized() -> None:
-    # A twin's recovery already holds at its onset, so its effect window is
-    # empty; its realization is judged over its whole action instead (the
-    # neighbor ran from 60 s to 90 s).
+    # A twin's recovery already holds at its onset; its effect, the benign
+    # change, lasts as long as its action, as N's slot does (the neighbor
+    # ran from 60 s to 90 s), and its realization is judged over all of it.
     cached = every_second(0, 200, lambda s: 0.95)
     falling = every_second(0, 200, lambda s: 0.4 if 60 <= s < 90 else 0.7)
     actions = Actions(
@@ -458,7 +458,7 @@ def test_a_twin_that_leaves_the_signals_alone_is_realized() -> None:
         actions,
     )
     timing = effect_timing("T3b", t3b)
-    assert timing.end_ns == timing.onset_ns == 60 * S
+    assert (timing.onset_ns, timing.end_ns) == (60 * S, 90 * S)
     assert realization("T3b", t3b, timing)[0]
     # T2's no-preemption check covers the whole neighbor run: a preemption
     # at 85 s, late in the action, fails it.
@@ -467,6 +467,24 @@ def test_a_twin_that_leaves_the_signals_alone_is_realized() -> None:
         Signals(in_flight=None, victim_preemptions=[85 * S], kv_usage=flat), actions
     )
     assert not realization("T2", late, effect_timing("T2", late))[0]
+
+
+def test_a_twin_recovers_only_by_a_hold_after_its_action() -> None:
+    # Codex on #309: a twin's recovery was sought from its onset and only
+    # then moved to the action's end, so a hold found early in the action
+    # stood for one after it that was never checked. Here the KV usage rises
+    # late in the action and stays up until 95 s: recovery holds from then.
+    kv = (
+        every_second(0, 75, lambda _second: 0.5)
+        + every_second(75, 95, lambda _second: 0.9)
+        + every_second(95, 200, lambda _second: 0.5)
+    )
+    actions = Actions(first_admission_ns=60 * S, action_end_ns=90 * S)
+    timing = effect_timing(
+        "T2", context(Signals(in_flight=ALWAYS, kv_usage=kv), actions)
+    )
+    assert timing.end_ns is not None and 94 * S < timing.end_ns <= 95 * S
+    assert timing.recovery_held_at_ns == timing.end_ns + 10 * S
 
 
 def test_a_baseline_too_thin_to_compare_with_never_recovers() -> None:

@@ -176,7 +176,12 @@ such start is tried.
 | I1 | the stop request | at the stop's return plus #219's drain |
 | N | its scheduled slot's start (`Actions.slot_ns`) | at the slot's end |
 
-A short twin (`S-<x>`) follows its fault's rules.
+A short twin (`S-<x>`) follows its fault's rules. A workload twin (T1, T2,
+T3, T3b) leaves the signals alone, so its recovery holds at once; its effect,
+the benign change, lasts until its action ends (`Actions.action_end_ns`), as
+N's slot does, so its scoring window is not just the grace. Its recovery is
+sought from the action's end: a hold found inside the action says nothing of
+the signals after it.
 
 A 5 s window counts only once all of it has been seen, so a live poll never
 judges an onset on a window's first samples.

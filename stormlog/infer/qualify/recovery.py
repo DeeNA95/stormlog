@@ -607,6 +607,9 @@ class Mechanism:
     recovery: Callable[[Context], list[Criterion]]
     end_from: str = "onset"  # recovery is sought from the onset or the action's end
     hold: str = "hold_ns"
+    # A workload twin leaves the signals alone, so its recovery holds at
+    # once; its effect, the benign change, lasts as long as its action.
+    spans_action: bool = False
 
 
 def _stall_recovery(context: Context) -> list[Criterion]:
@@ -627,12 +630,12 @@ _FIRST_STOP = _action_onset("first_stop_confirmed_ns", "first_sigstop_confirmed"
 
 MECHANISMS: dict[str, Mechanism] = {
     "F1": Mechanism(_queue_onset, _queue_criteria),
-    "T1": Mechanism(_FIRST_SEND, _queue_criteria),
+    "T1": Mechanism(_FIRST_SEND, _queue_criteria, spans_action=True),
     "F2": Mechanism(_preemption_onset, _kv_criteria),
-    "T2": Mechanism(_FIRST_ADMISSION, _kv_criteria),
+    "T2": Mechanism(_FIRST_ADMISSION, _kv_criteria, spans_action=True),
     "F3": Mechanism(_cache_onset, _cache_criteria),
-    "T3": Mechanism(_FIRST_SEND, _cache_criteria),
-    "T3b": Mechanism(_FIRST_SEND, _cache_criteria),
+    "T3": Mechanism(_FIRST_SEND, _cache_criteria, spans_action=True),
+    "T3b": Mechanism(_FIRST_SEND, _cache_criteria, spans_action=True),
     "F4a": Mechanism(_FIRST_STOP, _stall_recovery, "action_end", "cadence_hold_ns"),
     "F4b": Mechanism(_FIRST_STOP, _frontend_recovery, "action_end", "cadence_hold_ns"),
     "H0": Mechanism(_FIRST_STOP, _stall_recovery, "action_end", "cadence_hold_ns"),
@@ -654,8 +657,9 @@ def effect_timing(episode_type: str, context: Context) -> Timing:
     Effect end is the start of the first interval over which the recovery
     criteria hold; recovery holds at its end. For pulses, recovery is sought
     from the last ``SIGCONT``. I1's effect runs from the stop request to the
-    stop's return plus #219's drain, and N's is its scheduled slot. A short
-    twin follows its fault's rules.
+    stop's return plus #219's drain, and N's is its scheduled slot. A
+    workload twin's recovery is sought from its action's end. A short twin
+    follows its fault's rules.
 
     Raises:
         KeyError: for an episode type with no rule here.
@@ -671,6 +675,9 @@ def effect_timing(episode_type: str, context: Context) -> Timing:
     since = onset
     if mechanism.end_from == "action_end":
         since = context.actions.last_continue_ns or onset
+    action_end = context.actions.action_end_ns
+    if mechanism.spans_action and action_end is not None:
+        since = max(since, action_end)
     hold = getattr(context.thresholds, mechanism.hold)
     end = held_from(mechanism.recovery(context), since, context.until_ns, hold)
     return Timing(onset, basis, end, None if end is None else end + hold)
