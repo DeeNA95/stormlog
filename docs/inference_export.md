@@ -86,7 +86,7 @@ Units are base units: seconds and counts. Every series also carries
 | `stormlog_infer_time_to_first_chunk_seconds` | histogram | same | Send to the first streamed chunk | — |
 | `stormlog_infer_chunk_interarrival_seconds` | histogram | same | Gaps between streamed chunks. This is chunk timing, not token inter-token latency | `vllm:inter_token_latency_seconds` |
 | `stormlog_infer_e2e_from_intended_seconds` | histogram | same | Open-loop arrivals only: completed requests measured from their intended arrival, so a held arrival's wait is included | — |
-| `stormlog_infer_dispatch_lag_seconds` | histogram | case, arrival_mode | How late each request was sent against its schedule | — |
+| `stormlog_infer_dispatch_lag_seconds` | histogram | case, arrival_mode | How late each request was sent against its schedule: the `dispatch_lag_ms` of its `infer.request` record, observed when the request ends. The `infer.dispatch` progress record is not exported | — |
 | `stormlog_infer_tokens_total` | counter | model, server, case, phase, direction, source | Prompt and output tokens of completed requests. `source` is where each count came from: `server_usage`, `tiktoken`, `transformers`, `estimated` or `unknown`. A count no counter can take, negative or past 2^53, is left out and counted as `tokens_rejected` in the capability record | `vllm:prompt_tokens_total` and `vllm:generation_tokens_total` (every client) |
 | `stormlog_infer_requests_held_for_slot_total` | counter | case | Open-loop arrivals that found every in-flight slot taken: they waited for one, or with `--overflow drop` were dropped | — |
 | `stormlog_infer_phases_total` | counter | case, phase | Completed phase windows | — |

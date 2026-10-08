@@ -24,6 +24,7 @@ from stormlog.infer.export_spans import (
     error_diagnostics,
 )
 from stormlog.scrub import REDACTED, KnownSecrets
+from tests.test_infer_export_metrics import _event_types
 
 API_KEY = "sk-live-canary-0123456789abcdef"
 TRACE = "4bf92f3577b34da6a3ce929d0e0e4736"
@@ -181,6 +182,21 @@ def test_a_request_never_sent_and_engine_records_are_not_spans() -> None:
         "infer.session",
     ):
         assert spans.envelope({"event_type": event_type}, None) is None
+
+
+SPAN_EVENT_TYPES = {"infer.request", "infer.phase_window", "infer.trace_window"}
+PROGRESS_EVENT_TYPES = {"infer.dispatch", "infer.first_content", "infer.phase_start"}
+
+
+def test_only_the_three_mapped_record_types_become_spans() -> None:
+    # Progress records, engine records and every other record the artifact
+    # holds stay in it, even shaped like a request.
+    spans = _spans()
+    event_types = _event_types()
+    assert SPAN_EVENT_TYPES | PROGRESS_EVENT_TYPES <= event_types
+    for event_type in sorted(event_types - SPAN_EVENT_TYPES):
+        record = _request(event_type=event_type)
+        assert spans.envelope(record, None) is None, event_type
 
 
 def test_sampling_keeps_every_failure() -> None:
