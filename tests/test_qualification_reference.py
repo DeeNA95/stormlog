@@ -299,6 +299,33 @@ def test_a_record_missing_a_field_is_skipped_not_fatal(tmp_path: Path) -> None:
     assert json.loads(noted[0])["kind"] == "bad_record"
 
 
+def test_the_channel_measures_how_late_step_records_arrive(tmp_path: Path) -> None:
+    # Astra's closure of delta 3, H5: engine_stalled needs the hook's record
+    # lag. A step that began 300 ms before the poll that first saw it was
+    # 300 ms late; the window asked for is the steps begun in it.
+    part = _epoch_dir(tmp_path) / "000001.jsonl.part"
+    began = time.time_ns() - 300_000_000
+    record = {
+        "epoch": "engine-1",
+        "seq": 1,
+        "kind": "scheduled",
+        "start_wall_ns": began,
+    }
+    part.write_bytes((json.dumps(record) + "\n").encode())
+    channel = ReferenceChannel(
+        hook_root=tmp_path / "hook",
+        metrics_url="http://127.0.0.1:9/metrics",
+        victim_prefix=VICTIM,
+        shared_prefix_tokens=4,
+        reference_dir=tmp_path / "reference",
+        probes_dir=tmp_path / "probes",
+    )
+    channel.poll(scrape=False)
+    lag = channel.record_lag_ns(began, began + 1)
+    assert lag is not None and lag >= 300_000_000
+    assert channel.record_lag_ns(began + 1, began + 2) is None
+
+
 def test_a_record_any_error_rejects_is_skipped_and_the_rest_still_apply(
     tmp_path: Path,
 ) -> None:
@@ -327,6 +354,26 @@ def test_a_record_any_error_rejects_is_skipped_and_the_rest_still_apply(
     assert (channel.bad_records, len(channel.tailer.pending)) == (1, 0)
     noted = (tmp_path / "probes" / "hook-problems.jsonl").read_text().splitlines()
     assert "OverflowError" in json.loads(noted[0])["error"]
+
+
+def test_a_step_record_skipped_as_bad_notes_no_lag(tmp_path: Path) -> None:
+    # gate-221-close, J3: a step record skipped as bad never reached the
+    # view, so it has no lag to note (an end that isn't a number, here).
+    part = _epoch_dir(tmp_path) / "000001.jsonl.part"
+    bad = {"epoch": "engine-1", "seq": 2, "kind": "scheduled", "start_wall_ns": 2,
+           "end_wall_ns": "later"}  # fmt: skip
+    part.write_bytes(_hook_line(1) + (json.dumps(bad) + "\n").encode() + _hook_line(3))
+    channel = ReferenceChannel(
+        hook_root=tmp_path / "hook",
+        metrics_url="http://127.0.0.1:9/metrics",
+        victim_prefix=VICTIM,
+        shared_prefix_tokens=4,
+        reference_dir=tmp_path / "reference",
+        probes_dir=tmp_path / "probes",
+    )
+    channel.poll(scrape=False)
+    assert channel.bad_records == 1
+    assert [start for start, _lag in channel.step_lags] == [1, 3]
 
 
 def test_a_bad_record_changes_nothing() -> None:
