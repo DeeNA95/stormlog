@@ -180,3 +180,25 @@ not proof of a leak. Cache growth is not a fragmentation finding.
 Querying MLX telemetry through `stormlog.query` also requires no framework
 initialization. The legacy `stormlog.utils.format_bytes` import remains available
 through a neutral formatting helper used by query consumers.
+
+## Script capture and diagnostic bundles (PR 2)
+
+The same-process runner uses `runpy.run_path(..., run_name="__main__")` and
+sets the script's directory as the first import path. It passes all workload
+arguments through and restores `sys.argv`/`sys.path`, retaining the invocation
+working directory. Sampling begins before user code and ends in a `finally`
+block. The application owns evaluation of lazy arrays, including final work.
+Separate subprocess allocators need their own instrumentation.
+
+Capture bundles contain an environment/capability snapshot, bounded tracking
+summary, rotating telemetry sink, diagnostic summary, session manifest and
+shared `report.json`. Existing output directories receive a unique child
+directory. Active thresholds are opt-in; the watchdog is alert-only. OOM dumps
+use bounded shared flight recording with the narrow MLX allocator classifier.
+
+The report stores workload exit status separately: `SystemExit(None/0)` passes;
+other integer or text values remain in the payload and map to exit 1. Unexpected
+user failure maps to 1, missing scripts to 5, unavailable runtime to 2, observed
+OOM to 3, and interruption to 130. Partial bundles are finalized best-effort;
+diagnostic failure cannot turn a failed workload into success. An idle diagnose
+probe describes this command's own allocator, not another application's memory.

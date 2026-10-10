@@ -36,6 +36,7 @@ for name in package.__all__:
     getattr(package, name)
 from stormlog.mlx.profile_artifact import load_profiles
 assert load_profiles(sys.argv[1])['profiles'] == []
+from stormlog.mlx import runner, diagnose, artifacts
 from stormlog import query
 assert len(query.open([sys.argv[2]]).query_events()) == 1
 from stormlog.mlx.analyzer import analyze
