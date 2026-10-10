@@ -166,3 +166,17 @@ it is unavailable. Linux CI runs fake contracts with all four frameworks absent.
 See [PR 1 hardware qualification](benchmarks/mlx-qualification.md) for the tested
 environment and limits of the evidence. Full CLI/TUI and overhead qualification
 belongs to later rollout PRs.
+
+## Offline analysis (PR 2)
+
+`stormlog.mlx.analyzer.analyze(path, session_id=None)` accepts telemetry JSON,
+JSONL, sink directories and MLX profile JSON without importing a framework.
+It uses the shared default session policy or selects the requested session.
+Active, cache and native lifetime peaks remain separate; unknown values remain
+null in the timeline. Growth windows stop at failed samples, recovery boundaries
+and long sampling gaps. Positive active growth asks for workload review; it is
+not proof of a leak. Cache growth is not a fragmentation finding.
+
+Querying MLX telemetry through `stormlog.query` also requires no framework
+initialization. The legacy `stormlog.utils.format_bytes` import remains available
+through a neutral formatting helper used by query consumers.

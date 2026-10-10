@@ -36,6 +36,10 @@ for name in package.__all__:
     getattr(package, name)
 from stormlog.mlx.profile_artifact import load_profiles
 assert load_profiles(sys.argv[1])['profiles'] == []
+from stormlog import query
+assert len(query.open([sys.argv[2]]).query_events()) == 1
+from stormlog.mlx.analyzer import analyze
+assert analyze(sys.argv[2])["metrics"]["sampled_peak_bytes"] == 100
 from stormlog.telemetry import load_telemetry_events
 assert load_telemetry_events(sys.argv[2])[0].metadata['framework'] == 'mlx'
 from stormlog.mlx.context_profiler import profile_function
