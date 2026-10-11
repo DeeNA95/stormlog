@@ -82,6 +82,9 @@ run than its `--run-id`, and warns when it was taken more than an hour
 before the run started.
 
 `attach-manifest` refuses (exit `5`) an `after` description when:
+- the profile has not finished: the artifact's last `infer.session` record
+  is not a terminal one, so the profiler may still write to it, and later
+  cases would follow the "after" description;
 - the artifact has no `before` description;
 - it names another run;
 - it was taken on another host, or after a reboot;

@@ -175,6 +175,30 @@ def test_an_after_description_that_cannot_be_compared_is_refused(
         attach_manifest(artifact, _write(tmp_path / "after.json", after))
 
 
+def test_an_after_description_waits_for_the_profile_to_finish(
+    tmp_path: Path,
+) -> None:
+    # Codex on #302: attach-manifest appended while a profile was still
+    # writing; the profiler's next write could land over the appended bytes,
+    # and cases measured later would follow the "after" description.
+    before = _description()
+    artifact = _profile(tmp_path, server_description=before)
+    lines = artifact.read_text().splitlines()
+    running = [
+        line
+        for line in lines
+        if json.loads(line).get("event_type") not in ("infer.session", "infer.summary")
+        or json.loads(line).get("status") == "running"
+    ]
+    artifact.write_text("\n".join(running) + "\n")
+    after = _later(before)
+    with pytest.raises(InferInputError, match="the profile has not finished"):
+        attach_manifest(artifact, _write(tmp_path / "after.json", after))
+    assert artifact.read_text() == "\n".join(running) + "\n"
+    artifact.write_text("\n".join(lines) + "\n")
+    assert attach_manifest(artifact, tmp_path / "after.json")["role"] == "after"
+
+
 def test_attaching_needs_a_before_description_and_attaches_once(
     tmp_path: Path,
 ) -> None:

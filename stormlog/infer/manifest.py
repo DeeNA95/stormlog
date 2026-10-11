@@ -317,6 +317,13 @@ def attach_manifest(artifact: Path, description_path: Path) -> dict[str, Any]:
     )
     if identity is None:
         raise InferInputError(f"{artifact}: no infer.artifact record")
+    if _session_status(records) in (None, "running"):
+        # The profiler still holds the file, and its next write may land
+        # over these bytes; the run may also have cases left to measure.
+        raise InferInputError(
+            f"{artifact}: the profile has not finished (no terminal "
+            "infer.session record); attach the after description once it has"
+        )
     context = identity.get("context") or {}
     run_id, session_id = str(context.get("run_id")), str(context.get("session_id"))
     refusals = after_refusals(records, description, run_id=run_id)
@@ -598,6 +605,12 @@ def _drift(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any
 def _server_devices(description: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     devices = (description.get("gpus") or {}).get("devices") or []
     return [device for device in devices if device.get("server_pids")]
+
+
+def _session_status(records: Sequence[Mapping[str, Any]]) -> Any:
+    """The status of the artifact's last session record, or None."""
+    sessions = [r for r in records if r.get("event_type") == "infer.session"]
+    return sessions[-1].get("status") if sessions else None
 
 
 def _host(description: Mapping[str, Any]) -> tuple[Any, Any]:
