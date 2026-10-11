@@ -68,6 +68,7 @@ def analyze_inference_events(
     clock_offset_ns: int | None = None,
     clock_uncertainty_ns: int | None = None,
     vllm_span_paths: Iterable[str | Path] = (),
+    mlx_server_evidence_paths: Iterable[str | Path] = (),
     slo: SloSpec | None = None,
     slo_source: str = "flags",
 ) -> dict[str, Any]:
@@ -76,26 +77,18 @@ def analyze_inference_events(
     ``slo`` overrides the policy the artifact recorded, if it recorded one.
     """
     records = _load_jsonl(path)
-    if any(
-        str(record.get("event_type", "")).startswith("infer.audio.")
-        or record.get("task") in {"tts", "stt"}
-        for record in records
-    ):
-        if (
-            slo is not None
-            or tuple(server_telemetry_paths)
-            or tuple(vllm_span_paths)
-            or direct_server
-        ):
-            raise InferInputError(
-                "Audio analysis does not support text SLO or NVIDIA/vLLM evidence options"
-            )
-        from .audio_analysis import analyze_audio_records
-
-        try:
-            return analyze_audio_records(records)
-        except ValueError as exc:
-            raise InferInputError(str(exc)) from exc
+    mlx_paths = tuple(mlx_server_evidence_paths)
+    if _is_audio(records):
+        return _analyze_audio(
+            records,
+            mlx_paths,
+            server_telemetry_paths,
+            vllm_span_paths,
+            direct_server,
+            slo,
+            clock_offset_ns,
+            clock_uncertainty_ns,
+        )
     policy = _policy(records, slo, slo_source)
     requests, samples = _partition_inference_records(records)
     server_samples = _load_server_samples(server_telemetry_paths)
@@ -149,14 +142,61 @@ def analyze_inference_events(
             "execution": execution_report(records),
         },
     }
-    if any(record.get("event_type") == "infer.mlx.stats" for record in records):
-        from .omlx_stats import stats_report
-
-        try:
-            report["telemetry"]["mlx"] = {"omlx_stats": stats_report(records)}
-        except ValueError as exc:
-            raise InferInputError(str(exc)) from exc
+    _add_mlx_evidence(report, records, mlx_paths, clock_offset_ns, clock_uncertainty_ns)
     return report
+
+
+def _is_audio(records: list[dict[str, Any]]) -> bool:
+    return any(
+        str(record.get("event_type", "")).startswith("infer.audio.")
+        or record.get("task") in {"tts", "stt"}
+        for record in records
+    )
+
+
+def _analyze_audio(
+    records: list[dict[str, Any]],
+    mlx_paths: tuple[str | Path, ...],
+    server_paths: Iterable[str | Path],
+    span_paths: Iterable[str | Path],
+    direct: bool,
+    slo: SloSpec | None,
+    offset: int | None,
+    uncertainty: int | None,
+) -> dict[str, Any]:
+    if slo is not None or tuple(server_paths) or tuple(span_paths) or direct:
+        raise InferInputError(
+            "Audio analysis does not support text SLO or NVIDIA/vLLM evidence options"
+        )
+    from .audio_analysis import analyze_audio_records
+
+    try:
+        report = analyze_audio_records(records)
+        _add_mlx_evidence(report, records, mlx_paths, offset, uncertainty)
+        return report
+    except ValueError as exc:
+        raise InferInputError(str(exc)) from exc
+
+
+def _add_mlx_evidence(
+    report: dict[str, Any],
+    records: list[dict[str, Any]],
+    paths: tuple[str | Path, ...],
+    offset: int | None,
+    uncertainty: int | None,
+) -> None:
+    if not paths and not any(
+        record.get("event_type") == "infer.mlx.stats" for record in records
+    ):
+        return
+    from .mlx_report import mlx_evidence_report
+
+    try:
+        report["telemetry"]["mlx"] = mlx_evidence_report(
+            records, paths, clock_offset_ns=offset, clock_uncertainty_ns=uncertainty
+        )
+    except ValueError as exc:
+        raise InferInputError(str(exc)) from exc
 
 
 ANALYSIS_VERSION = 2
@@ -400,10 +440,12 @@ def _failures_by_status(failed: list[dict[str, Any]]) -> dict[str, int]:
 
 def format_analysis_text(report: dict[str, Any]) -> str:
     """Render an inference analysis report as text."""
+    from .mlx_report import mlx_lines
+
     if report.get("report_type") == "stormlog.infer.audio":
         from .audio_analysis import format_audio_analysis
 
-        return format_audio_analysis(report)
+        return "\n".join([format_audio_analysis(report), *mlx_lines(report)])
     summary = report.get("summary", {})
     lines = [
         "Inference Profile Analysis",
@@ -425,6 +467,7 @@ def format_analysis_text(report: dict[str, Any]) -> str:
     lines.extend(workload_lines(report.get("workload")))
     lines.extend(_policy_lines(report))
     lines.append("Memory observations: client-local")
+    lines.extend(mlx_lines(report))
     lines.extend(_server_status_lines(join))
     lines.extend(vllm_lines(vllm))
     lines.extend(execution_lines(telemetry.get("execution")))

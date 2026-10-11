@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import platform
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from .. import __version__
 from ..scrub import redact_url
 from ..session import new_session_id
 from .analysis import analyze_inference_events
@@ -19,8 +22,10 @@ from .audio_client import AudioCallError, AudioClient
 from .audio_config import AudioCase, AudioProfileConfig
 from .audio_events import AudioRequestEvent
 from .audio_workload import AudioWorkload
+from .correlation_events import ArtifactIdentityEvent, CorrelationContext
 from .engine_adapters import get_adapter
 from .events import JsonlEventWriter
+from .host_clock import host_boot_id, wall_clock_domain
 from .http_transport import ignored_proxies
 from .open_loop import Arrival
 from .profile import classify_failure
@@ -87,6 +92,7 @@ class AudioProfiler:
         config = self.config
         with JsonlEventWriter(config.output_path) as writer:
             writer.append(self._session("running"))
+            writer.append(self._artifact_identity().to_record())
             writer.append(self.workload.record(self.session_id))
             status = "completed"
             try:
@@ -111,6 +117,28 @@ class AudioProfiler:
                 raise
             finally:
                 writer.append(self._session(status))
+
+    def _artifact_identity(self) -> ArtifactIdentityEvent:
+        host, boot_id = platform.node(), host_boot_id()
+        return ArtifactIdentityEvent(
+            context=CorrelationContext(
+                run_id=self.run_id,
+                session_id=self.session_id,
+                producer_id="stormlog.infer.profile_audio",
+                source="stormlog.infer.profile_audio",
+                source_version=__version__,
+                host=host,
+                pid=os.getpid(),
+                clock_domain=wall_clock_domain(host, boot_id),
+                clock_kind="wall",
+                collection_mode="active",
+                provenance="observed",
+            ),
+            event_id="artifact",
+            metadata={"boot_id": boot_id},
+            artifact_kind="inference_jsonl",
+            created_at_ns=time.time_ns(),
+        )
 
     def _session(self, status: str) -> dict[str, Any]:
         return {

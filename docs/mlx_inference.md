@@ -104,3 +104,54 @@ failure. Counter decreases and uptime restarts mark epoch changes; outage
 and sampling scope are explicit. Aggregate statistics can include other
 clients and do not prove request ownership, allocator usage or pure compute
 time. Sampling uses bounded GET requests to `/admin/api/stats` only.
+
+## Same-process server evidence
+
+Run the server in an explicitly selected interpreter with its server package
+and MLX 0.32.3 or newer. The launcher candidates are oMLX 0.7.0.dev2,
+MLX-LM 0.31.3 and MLX-Audio 0.4.6. These version gates identify inspected
+entrypoints; consult the qualification results for supported model/task
+combinations. Use the same run ID for server capture and client profiles.
+
+```bash
+stormlog infer mlx-serve --engine mlx-lm --run-id local-run \
+  --output /tmp/server-evidence --interval 0.1 -- \
+  --model /path/to/preprovisioned-model --host 127.0.0.1 --port 8080
+
+stormlog infer analyze /tmp/client-run.jsonl \
+  --mlx-server-evidence /tmp/server-evidence --format json
+```
+
+The foreground launcher passes server arguments unchanged and restores Python
+arguments on exit. Workers, reload and distributed modes are rejected before
+capture. oMLX requires an explicit `--base-path` and disabled cluster settings;
+its own startup behavior remains that of the installed server distribution.
+For custom entrypoints, use `stormlog.infer.mlx_server.capture_mlx_server`
+around inference performed in that interpreter.
+
+Sampling reads native allocator counters and independent process RSS. It never
+evaluates model arrays, synchronizes streams or resets peak memory. Native
+framework telemetry v4 stays under `telemetry/`; `mlx_evidence.json` records
+file digests, capture bounds, host/boot/PID/process-start identity, version
+provenance and redacted arguments. The
+[evidence v1 schema](schemas/inference_mlx_evidence_v1.schema.json) also covers
+the separately versioned oMLX statistics records.
+
+Offline loading verifies size/record limits, paths, digests, schemas, session
+identity and sample timestamps without importing MLX or server packages.
+Repeat `--mlx-server-evidence` for separate captures. Identical copies are
+deduplicated; conflicting identities or contents fail validation.
+
+Matching run IDs and endpoints produce `declared_direct` association. A
+controlled launcher with an observed literal-loopback listener owned by its
+sampled PID and matching host/boot can establish `verified` process
+association. Request execution ownership remains unavailable. Missing identity
+is `unjoined`; overlapping endpoint process epochs are `ambiguous`.
+
+Case summaries include only samples definitely within the case window after
+clock uncertainty. Different clocks need recorded alignment or explicit
+`--clock-offset-ns` and `--clock-uncertainty-ns`. Coverage records sample count,
+cadence and observation gaps. Sampled allocator maxima, runtime lifetime peaks,
+cache and RSS have distinct scopes. They are never summed across processes or
+reported as total device capacity, request peaks or kernel/prefill/decode
+attribution.

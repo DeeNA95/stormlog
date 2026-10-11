@@ -176,6 +176,9 @@ class ProfileConfig:
             raise ValueError(
                 "MLX endpoint engines cannot use vLLM or text-trace instrumentation flags"
             )
+        self._validate_stats_options()
+
+    def _validate_stats_options(self) -> None:
         if self.omlx_stats_api_key is not None and self.omlx_stats_url is None:
             raise ValueError("oMLX admin credential requires a statistics URL")
         if self.omlx_stats_url is not None and self.engine != "omlx":

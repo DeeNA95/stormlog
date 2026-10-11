@@ -89,6 +89,10 @@ def _run_command(
         from .audio_cli import cmd_profile_audio
 
         return cmd_profile_audio(args)
+    if args.infer_command == "mlx-serve":
+        from .mlx_server_cli import cmd_mlx_serve
+
+        return cmd_mlx_serve(args)
     if args.infer_command == "analyze":
         return cmd_analyze(args)
     if args.infer_command == "collect-server":
@@ -340,11 +344,21 @@ def build_parser() -> argparse.ArgumentParser:
     _add_cache_arguments(profile_parser)
     _add_trace_arguments(profile_parser)
 
+    from .mlx_server_cli import add_mlx_serve_parser
+
+    add_mlx_serve_parser(subparsers)
     analyze_parser = subparsers.add_parser(
         "analyze",
         help="Analyze an inference profiling JSONL artifact",
     )
     analyze_parser.add_argument("input_file", help="Input inference JSONL artifact")
+    analyze_parser.add_argument(
+        "--mlx-server-evidence",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="Offline same-process MLX evidence directory; repeat for separate captures",
+    )
     analyze_parser.add_argument(
         "--output",
         default=None,
@@ -874,11 +888,7 @@ def _profile_config(args: argparse.Namespace) -> ProfileConfig:
         server_version=args.server_version,
         max_response_bytes=args.max_response_bytes,
         omlx_stats_url=args.omlx_stats_url,
-        omlx_stats_api_key=(
-            os.environ.get(args.omlx_stats_api_key_env)
-            if args.omlx_stats_api_key_env
-            else None
-        ),
+        omlx_stats_api_key=_admin_key(args),
         omlx_stats_interval_seconds=args.omlx_stats_interval,
         endpoint=endpoint,
         model=args.model,
@@ -945,6 +955,14 @@ def _profile_config(args: argparse.Namespace) -> ProfileConfig:
     )
 
 
+def _admin_key(args: argparse.Namespace) -> str | None:
+    return (
+        os.environ.get(args.omlx_stats_api_key_env)
+        if args.omlx_stats_api_key_env
+        else None
+    )
+
+
 def _extra_body(raw: str | None) -> dict[str, Any] | None:
     if raw is None:
         return None
@@ -995,6 +1013,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         clock_offset_ns=args.clock_offset_ns,
         clock_uncertainty_ns=args.clock_uncertainty_ns,
         vllm_span_paths=args.vllm_spans,
+        mlx_server_evidence_paths=args.mlx_server_evidence,
         slo=slo,
         slo_source=slo_source,
     )

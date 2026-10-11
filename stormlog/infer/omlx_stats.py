@@ -35,6 +35,38 @@ FIELDS = {
     "active_models.total_active_requests": ("requests", "gauge"),
     "active_models.total_waiting_requests": ("requests", "gauge"),
 }
+RECORD_FIELDS = frozenset(
+    {
+        "schema_version",
+        "event_type",
+        "session_id",
+        "run_id",
+        "engine",
+        "case_id",
+        "phase",
+        "marker",
+        "source_revision",
+        "server_version",
+        "version_provenance",
+        "counter_scope",
+        "model_scope",
+        "observation_scope",
+        "other_client_contamination",
+        "scrape_started_at_ns",
+        "scrape_ended_at_ns",
+        "observed_at_ns",
+        "scrape_elapsed_ns",
+        "clock_uncertainty_ns",
+        "clock_provenance",
+        "metrics",
+        "status",
+        "error_type",
+        "http_status",
+        "epoch_change",
+        "decreased_fields",
+        "preceded_by_outage",
+    }
+)
 
 
 def stats_identity(url: str) -> dict[str, Any]:
@@ -247,6 +279,12 @@ class OmlxStatsSampler:
         if not self.outage:
             self.previous = current
 
+    def observe(self, case_id: str, phase: str, marker: str) -> dict[str, Any]:
+        """One blocking scrape with epoch/outage tracking, for thread samplers."""
+        record = self.fetch(case_id, phase, marker)
+        self._epoch(record)
+        return record
+
     @asynccontextmanager
     async def phase(
         self, append: Callable[[dict[str, Any]], None], case_id: str, phase: str
@@ -281,6 +319,8 @@ def _epoch_field(name: str) -> bool:
 
 
 def validate_stats_record(record: dict[str, Any]) -> None:
+    if set(record) - RECORD_FIELDS:
+        raise ValueError("Unknown oMLX statistics fields")
     if (
         record.get("event_type") != "infer.mlx.stats"
         or type(record.get("schema_version")) is not int
@@ -294,6 +334,7 @@ def validate_stats_record(record: dict[str, Any]) -> None:
         raise ValueError("Invalid oMLX statistics identity/scope")
     if record.get("status") not in {"ok", "error", "abandoned"}:
         raise ValueError("Invalid oMLX statistics status")
+    _validate_stats_times(record)
     seen: set[str] = set()
     metrics = record.get("metrics")
     if not isinstance(metrics, list):
@@ -302,8 +343,36 @@ def validate_stats_record(record: dict[str, Any]) -> None:
         _validate_metric(metric, seen)
 
 
+def _validate_stats_times(record: dict[str, Any]) -> None:
+    for key in (
+        "scrape_started_at_ns",
+        "scrape_ended_at_ns",
+        "observed_at_ns",
+        "scrape_elapsed_ns",
+        "clock_uncertainty_ns",
+    ):
+        value = record.get(key)
+        if type(value) is not int or value < 0:
+            raise ValueError(f"Invalid oMLX statistics {key}")
+    if (
+        not record["scrape_started_at_ns"]
+        <= record["observed_at_ns"]
+        <= record["scrape_ended_at_ns"]
+    ):
+        raise ValueError("Invalid oMLX scrape time window")
+
+
 def _validate_metric(metric: Any, seen: set[str]) -> None:
-    if not isinstance(metric, dict):
+    if not isinstance(metric, dict) or set(metric) != {
+        "raw_path",
+        "name",
+        "unit",
+        "kind",
+        "value",
+        "validity",
+        "counter_scope",
+        "scope",
+    }:
         raise ValueError("Invalid oMLX metric object")
     path = metric.get("raw_path")
     if path not in FIELDS or path in seen:
@@ -312,7 +381,10 @@ def _validate_metric(metric: Any, seen: set[str]) -> None:
     unit, kind = FIELDS[path]
     if metric.get("unit") != unit or metric.get("kind") != kind:
         raise ValueError("Invalid oMLX metric units/kind")
-    value = metric.get("value")
+    _validate_metric_value(metric.get("value"))
+
+
+def _validate_metric_value(value: Any) -> None:
     if value is not None and (
         type(value) not in (int, float) or not math.isfinite(value) or value < 0
     ):
