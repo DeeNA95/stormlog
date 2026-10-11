@@ -88,6 +88,11 @@ artifacts instead. See the [MLX guide](mlx_testing_guide.md).
 
 Use this tab when you want the data that later feeds the Visualizations or Diagnostics tabs.
 
+Start Live Tracking loads the default tracker dependencies on first use. It
+tries the GPU tracker and falls back to the CPU tracker when PyTorch or GPU
+tracking is unavailable. Browsing saved MLX artifacts does not load those
+dependencies.
+
 ### Visualizations
 
 - renders an ASCII timeline from the active tracker session

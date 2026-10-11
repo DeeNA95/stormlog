@@ -25,7 +25,7 @@ _UNLOADED = object()
 MemoryTracker: Any = None
 MemoryWatchdog: Any = None
 TrackingEvent: Any = None
-CPUMemoryTracker: Any = None
+CPUMemoryTracker: Any = _UNLOADED
 torch: Any = None
 
 
