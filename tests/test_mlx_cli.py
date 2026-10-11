@@ -204,3 +204,31 @@ raise SystemExit(main(['run', '--json', '--output', sys.argv[1], '--', sys.argv[
         if process.poll() is None:
             process.kill()
             process.communicate()
+
+
+def test_analysis_output_failure_is_error_not_invalid_input(
+    tmp_path, monkeypatch, capsys
+):
+    from pathlib import Path
+
+    from tests.test_mlx_analysis import write_events
+
+    source = tmp_path / "valid.json"
+    write_events(source, [100, 100])
+    original = Path.write_text
+
+    def write(self, *args, **kwargs):
+        if self.name == "analysis.json":
+            raise OSError("disk full")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", write)
+    assert (
+        main(["analyze", str(source), "--output", str(tmp_path / "output"), "--json"])
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    report = json.loads((Path(payload["artifact_dir"]) / "report.json").read_text())
+    assert report["verdict"]["exit_code"] == 1
+    assert "disk full" in report["payload"]["error"]
+    assert not report["artifacts"]

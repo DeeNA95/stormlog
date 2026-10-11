@@ -100,6 +100,7 @@ def _timeline(samples: Sequence[TelemetryEvent]) -> list[dict[str, Any]]:
             "active_bytes": e.allocator_allocated_bytes,
             "cache_bytes": _mlx_bytes(e, "cache_bytes"),
             "runtime_peak_bytes": _mlx_bytes(e, "runtime_peak_bytes"),
+            "process_rss_bytes": e.metadata.get("process_rss_bytes"),
         }
         for e in samples
     ]

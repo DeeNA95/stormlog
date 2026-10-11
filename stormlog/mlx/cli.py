@@ -234,12 +234,6 @@ def _analysis(args: argparse.Namespace) -> int:
     artifacts = []
     try:
         payload = analyze(args.input, session_id=args.session_id)
-        (directory / "analysis.json").write_text(
-            json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-        )
-        artifacts.append(
-            Artifact("mlx_analysis", "analysis.json", "stormlog.mlx.analysis", 1)
-        )
         findings = [
             Finding(
                 id=f"mlx.{f['kind']}",
@@ -258,6 +252,18 @@ def _analysis(args: argparse.Namespace) -> int:
     except (OSError, ValueError, KeyError, TypeError) as exc:
         code = ExitCode.INVALID_INPUT
         payload = {"error": f"{type(exc).__name__}: {exc}"}
+    if code != ExitCode.INVALID_INPUT:
+        try:
+            (directory / "analysis.json").write_text(
+                json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+            )
+            artifacts.append(
+                Artifact("mlx_analysis", "analysis.json", "stormlog.mlx.analysis", 1)
+            )
+        except OSError as exc:
+            code = ExitCode.ERROR
+            findings = []
+            payload["error"] = f"Cannot write analysis artifact: {exc}"
     report = build_report(
         report_kind="mlx_analysis",
         tool_name="mlxmemprof",

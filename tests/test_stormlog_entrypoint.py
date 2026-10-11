@@ -22,6 +22,11 @@ class StormlogEntrypointTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         run_app.assert_called_once_with()
 
+    def test_mlx_tui_selection_reaches_app_launcher(self) -> None:
+        with mock.patch("stormlog.tui.run_app") as run_app:
+            self.assertEqual(entrypoint.main(["tui", "--framework", "mlx"]), 0)
+        run_app.assert_called_once_with(["--framework", "mlx"])
+
     def test_tui_help_does_not_launch_tui(self) -> None:
         output = io.StringIO()
         with mock.patch("stormlog.tui.run_app") as run_app:

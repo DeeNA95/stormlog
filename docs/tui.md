@@ -19,13 +19,18 @@ If you are working from a source checkout, reinstall with the TUI dependencies s
 pip install -e ".[tui,torch]"
 ```
 
+For MLX, install `stormlog[mlx,tui]` and launch `stormlog tui --framework mlx`.
+Offline MLX artifact browsing needs only `stormlog[tui]` and initializes no
+framework. The default selection remains PyTorch.
+
 ## Current tabs
 
-The current TUI surface contains seven tabs:
+The current TUI surface contains eight tabs:
 
 - `Overview`
 - `PyTorch`
 - `TensorFlow`
+- `MLX`
 - `Monitoring`
 - `Visualizations`
 - `Diagnostics`
@@ -54,6 +59,22 @@ If CUDA is unavailable, the sample workload falls back to the CPU profiler path 
 - shows TensorFlow environment details
 - runs a sample TensorFlow workload
 - refreshes or clears collected TensorFlow profile summaries
+
+### MLX
+
+Explicit Runtime Info and Sample actions initialize MLX only when requested.
+The sample evaluates a modest matrix result and shows sampled peak, active delta,
+synchronized host time, and completion verification. Load Artifact accepts saved
+profile JSON, tracker JSON, JSONL, telemetry sinks and capture bundles without a
+native runtime. Nullable timeline values remain gaps.
+
+Use MLX for Tracking selects the MLX adapter in Monitoring. It observes this
+TUI process, with distinct active allocator, reusable cache, RSS, health and
+native lifetime peak labels. GPU percentages, fragmentation and cleanup controls
+are unavailable. Capture external workloads with `mlxmemprof run` and load their
+artifacts instead. See the [MLX guide](mlx_testing_guide.md).
+
+![MLX tab with a native evaluated sample](tui-mlx-current.svg)
 
 ### Monitoring
 

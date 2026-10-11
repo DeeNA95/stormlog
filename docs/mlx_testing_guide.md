@@ -12,6 +12,17 @@ Missing MLX, an unsupported platform, a broken native loader, and unavailable
 Metal produce distinct exceptions with chained causes. Successful runtime
 discovery is cached; sampled counters and failed discovery are not cached.
 
+## Feature matrix
+
+| Surface | Core support | Limits |
+| --- | --- | --- |
+| Python | Snapshots, function/context profiles, passive tracking, phases | Explicit lazy roots; process allocator scope |
+| CLI | Info, monitor, track, same-process run, offline analyze, diagnose | Script mode only; no attachment to server allocators |
+| TUI | Explicit MLX actions, live tracking, saved profiles and nullable timelines | Live counters belong to the TUI process |
+| Persistence | Telemetry v4, profile v1, bounded sinks/OOM bundles, shared reports/query | No native allocation stacks or fragmentation attribution |
+| Qualification | Framework-free contracts and controlled Apple Silicon Metal gates | Linux MLX CPU/CUDA and distributed runtimes unqualified |
+| Deferred | Metal traces, array-buffer inspection, MLX-LM/oMLX adapters | Optional follow-up outside the core rollout |
+
 ## Counter meanings
 
 | Value | Meaning |
@@ -162,9 +173,8 @@ python3 -m pytest tests/test_mlx_hardware.py -m mlx_hardware -v
 Ordinary tests use an injectable runtime and need no framework installation.
 Hardware tests are opt-in; selecting them requires usable Metal and fails if
 it is unavailable. Linux CI runs fake contracts with all four frameworks absent.
-See [PR 1 hardware qualification](benchmarks/mlx-qualification.md) for the tested
-environment and limits of the evidence. Full CLI/TUI and overhead qualification
-belongs to later rollout PRs.
+See [hardware qualification](benchmarks/mlx-qualification.md) for the tested
+environment and limits of the evidence. CLI round-trips and comparative timing evidence are recorded there as well.
 
 ## Offline analysis (PR 2)
 
@@ -230,3 +240,31 @@ independently to memory and disk. Disk retention can remove old segments.
 `--alert-threshold-mb` is an opt-in active allocation alert in MiB. Flight
 recording limits are `--oom-max-dumps` and `--oom-max-total-mb`. No cleanup,
 evaluation or peak reset flags are supplied for passive capture.
+
+
+## TUI and saved artifacts
+
+```bash
+pip install 'stormlog[mlx,tui]'
+stormlog tui --framework mlx
+```
+
+The MLX tab exposes explicit runtime information, a small evaluated sample,
+profile refresh/clear, and loading saved profile JSON, tracker JSON, JSONL,
+telemetry directories or capture bundles. Startup and offline browsing do not
+initialize any framework. Runtime Info, Sample, and Start Live Tracking are
+explicit native actions; unavailable Metal produces a useful error and never
+falls back to a CPU tracker. The default framework remains PyTorch.
+
+Select **Use MLX for Tracking** or start with `--framework mlx` to use MLX in
+Monitoring. Live counters belong to the TUI process. Active allocator bytes,
+reusable cache, host RSS, and native lifetime peak have separate labels. Sampled
+profile peaks and completion verification are shown separately. Unknown values
+remain N/A or gaps; GPU capacity percentages, fragmentation and automatic
+cleanup are unavailable for this adapter. Stopping or closing the app stops its
+sampler. Saved artifacts display without native MLX even on other platforms.
+
+For runnable training and generation recipes, see the [MLX cookbook](cookbook/mlx.md).
+From a source checkout, run `python3 -m examples.basic.mlx_demo --output artifacts/mlx-demo`.
+Serving adapters, Metal trace capture and array-buffer attribution remain
+optional follow-up work; no inference wire or memory schema bump is introduced.
