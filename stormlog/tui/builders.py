@@ -8,7 +8,8 @@ from typing import Any
 
 def build_welcome_info() -> str:
     """Build welcome navigation guide text."""
-    return dedent("""
+    return dedent(
+        """
         # Quick Start Guide
 
         ## Navigate the TUI
@@ -39,7 +40,8 @@ def build_welcome_info() -> str:
         5. **Export Data** - After tracking, use "Export CSV" or "Export JSON" buttons in Monitoring tab
 
         ---
-        """).strip()
+        """
+    ).strip()
 
 
 def build_system_markdown(
@@ -141,7 +143,8 @@ def build_tensorflow_stats_rows(gpu_info: dict[str, Any]) -> list[dict[str, Any]
 
 def build_framework_markdown(framework: str) -> str:
     if framework == "mlx":
-        return dedent("""            # MLX Metal allocator
+        return dedent(
+            """            # MLX Metal allocator
             Install `stormlog[mlx,tui]` on native Apple Silicon macOS.
             Minimum MLX: 0.32.3. Runtime availability is checked only on request.
             Active allocations, reusable cache, native lifetime peak and process RSS
@@ -150,9 +153,11 @@ def build_framework_markdown(framework: str) -> str:
             Profiles evaluate explicit roots and report synchronized host time.
             CLI: `mlxmemprof run --output artifacts/mlx-run -- script.py`
             Offline: `mlxmemprof analyze artifacts/mlx-run`
-            """).strip()
+            """
+        ).strip()
     if framework == "pytorch":
-        return dedent("""
+        return dedent(
+            """
             # PyTorch Playbook
 
             1. **Basic profiling**
@@ -177,9 +182,11 @@ def build_framework_markdown(framework: str) -> str:
 
             Check the [PyTorch Testing Guide](docs/pytorch_testing_guide.md) for
             full workflows and troubleshooting steps.
-            """).strip()
+            """
+        ).strip()
 
-    return dedent("""
+    return dedent(
+        """
         # TensorFlow Playbook
 
         1. **Basic profiling**
@@ -200,11 +207,13 @@ def build_framework_markdown(framework: str) -> str:
 
         The [TensorFlow Testing Guide](docs/tensorflow_testing_guide.md) includes
         deeper recipes, including mixed precision and multi-GPU notes.
-        """).strip()
+        """
+    ).strip()
 
 
 def build_cli_markdown() -> str:
-    return dedent("""
+    return dedent(
+        """
         # CLI Quick Samples
 
         ```bash
@@ -229,22 +238,26 @@ def build_cli_markdown() -> str:
         ```
 
         Use the buttons below to log summaries or copy commands.
-        """).strip()
+        """
+    ).strip()
 
 
 def build_visual_markdown() -> str:
-    return dedent("""
+    return dedent(
+        """
         # Visualization Tips
 
         - Start live tracking to collect timeline samples, then refresh the view.
         - Use `Generate PNG Plot` to save a Matplotlib graph (writes to ./visualizations).
         - Prefer `Generate HTML Plot` for an interactive Plotly view you can open in a browser.
         - A lightweight ASCII chart appears below so you can inspect trends without leaving the terminal.
-        """).strip()
+        """
+    ).strip()
 
 
 def build_diagnostics_markdown() -> str:
-    return dedent("""
+    return dedent(
+        """
         # Distributed Diagnostics
 
         - **Load Live** to read telemetry directly from the active tracker session.
@@ -252,7 +265,8 @@ def build_diagnostics_markdown() -> str:
         - Use **Rank Filter** (`all`, `0,2,4-7`) to narrow the comparison set.
         - Select a rank in the table to pin timeline focus.
         - Review **earliest** and **most severe** first-cause indicators in the anomaly summary.
-        """).strip()
+        """
+    ).strip()
 
 
 def build_mlx_stats_rows(stats: dict[str, Any]) -> list[tuple[str, str]]:
