@@ -88,8 +88,10 @@ def test_mlx_extra_is_platform_gated_and_optional() -> None:
         assert Version("0.32.3") in requirement.specifier
         assert Version("0.32.2") not in requirement.specifier
     content = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    # PR 1 does not ship a CLI entry point before the implementation exists.
-    assert "mlxmemprof =" not in content
+    assert 'mlxmemprof = "stormlog.mlx.cli:main"' in content
+    from stormlog.mlx.cli import main
+
+    assert callable(main)
     base = re.search(r"(?ms)^dependencies = \[(.*?)^\]", content)
     assert base is not None
     assert not re.search(r'"mlx(?:[><=;"\s])', base.group(1))

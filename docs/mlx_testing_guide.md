@@ -97,8 +97,7 @@ Tracker exports use telemetry v4; these are different artifact contracts.
 
 Install with `pip install 'stormlog[mlx]'`. The optional dependency is included
 only on Darwin arm64; on other platforms the extra installs no native MLX wheel.
-Base/offline functionality still works there. This first rollout ships Python
-APIs; `mlxmemprof` commands and dedicated TUI support are later PRs.
+Base/offline functionality still works there. The Python APIs and dedicated `mlxmemprof` CLI are available.
 
 ```python
 from pathlib import Path
@@ -202,3 +201,32 @@ user failure maps to 1, missing scripts to 5, unavailable runtime to 2, observed
 OOM to 3, and interruption to 130. Partial bundles are finalized best-effort;
 diagnostic failure cannot turn a failed workload into success. An idle diagnose
 probe describes this command's own allocator, not another application's memory.
+
+## Dedicated CLI
+
+```bash
+mlxmemprof info --json
+mlxmemprof monitor --duration 2 --interval 0.1
+mlxmemprof track --duration 2 --output artifacts/mlx-track
+mlxmemprof run --output artifacts/mlx-run -- script.py --application-flag value
+mlxmemprof analyze artifacts/mlx-run --output artifacts/mlx-analysis --json
+mlxmemprof diagnose --duration 0.2 --output artifacts/mlx-diagnose --json
+```
+
+`monitor`, `track` and `diagnose` observe their own process. Use `run` for a
+real script workload. `run` passes arguments after the script untouched; module
+mode (`-m`) is deferred. `--json` or `--format json` prints a machine-readable
+result. Workload stdout/stderr stays with the workload, so scripts that print
+can mix their output with the final CLI JSON; `report.json` is the durable
+machine-readable verdict. `analyze` accepts `--session-id` and writes
+`analysis.json` plus the shared report. It can return 3 for candidate growth,
+gaps or unverified completion; inspect findings rather than treating growth
+as a confirmed leak.
+
+Capture options include `--interval`, `--max-history`, `--rollover-max-events`,
+`--retention-max-files`, `--max-buffer-bytes`, `--job-id`, `--rank`,
+`--local-rank` and `--world-size`. The first two history/retention limits apply
+independently to memory and disk. Disk retention can remove old segments.
+`--alert-threshold-mb` is an opt-in active allocation alert in MiB. Flight
+recording limits are `--oom-max-dumps` and `--oom-max-total-mb`. No cleanup,
+evaluation or peak reset flags are supplied for passive capture.
