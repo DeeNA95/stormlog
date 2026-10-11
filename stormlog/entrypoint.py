@@ -13,7 +13,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not resolved_argv:
         from .tui import run_app
 
-        run_app()
+        run_app([])
         return 0
 
     command = resolved_argv[0]
@@ -50,7 +50,7 @@ def _run_tui(argv: list[str]) -> int:
         parser.parse_args(argv)
         run_app(argv)
     else:
-        run_app()
+        run_app([])
     return 0
 
 
