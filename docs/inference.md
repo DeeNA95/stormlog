@@ -875,3 +875,10 @@ to be appended to the same JSONL stream. New profiles include an artifact
 identity record naming their run and capture session. Correlation records use
 wire v4 context definitions/references on disk; loading restores complete
 embedded v2/v3 values.
+
+## MLX text and audio endpoints
+
+See [MLX inference profiling](mlx_inference.md) for oMLX/MLX-LM raw completions,
+MLX-Audio fixture manifests, audio duration metrics and qualification status.
+Endpoint profiles measure client HTTP observations. Server execution hooks
+and allocator ownership require separate evidence.

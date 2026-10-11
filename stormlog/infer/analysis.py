@@ -76,6 +76,26 @@ def analyze_inference_events(
     ``slo`` overrides the policy the artifact recorded, if it recorded one.
     """
     records = _load_jsonl(path)
+    if any(
+        str(record.get("event_type", "")).startswith("infer.audio.")
+        or record.get("task") in {"tts", "stt"}
+        for record in records
+    ):
+        if (
+            slo is not None
+            or tuple(server_telemetry_paths)
+            or tuple(vllm_span_paths)
+            or direct_server
+        ):
+            raise InferInputError(
+                "Audio analysis does not support text SLO or NVIDIA/vLLM evidence options"
+            )
+        from .audio_analysis import analyze_audio_records
+
+        try:
+            return analyze_audio_records(records)
+        except ValueError as exc:
+            raise InferInputError(str(exc)) from exc
     policy = _policy(records, slo, slo_source)
     requests, samples = _partition_inference_records(records)
     server_samples = _load_server_samples(server_telemetry_paths)
@@ -372,6 +392,10 @@ def _failures_by_status(failed: list[dict[str, Any]]) -> dict[str, int]:
 
 def format_analysis_text(report: dict[str, Any]) -> str:
     """Render an inference analysis report as text."""
+    if report.get("report_type") == "stormlog.infer.audio":
+        from .audio_analysis import format_audio_analysis
+
+        return format_audio_analysis(report)
     summary = report.get("summary", {})
     lines = [
         "Inference Profile Analysis",

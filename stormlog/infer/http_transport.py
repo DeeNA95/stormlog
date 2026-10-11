@@ -132,7 +132,7 @@ class _TrackedHTTPConnection(_Answered, http.client.HTTPConnection):
         self._track()
         try:
             return super().getresponse()
-        except OSError as exc:
+        except Exception as exc:
             if self._expired():
                 raise RequestDeadlineExceeded(self._status_line.status) from exc
             if isinstance(exc, ConnectionError):
@@ -151,7 +151,7 @@ class _TrackedHTTPSConnection(_Answered, http.client.HTTPSConnection):
         self._track()
         try:
             return super().getresponse()
-        except OSError as exc:
+        except Exception as exc:
             if self._expired():
                 raise RequestDeadlineExceeded(self._status_line.status) from exc
             if isinstance(exc, ConnectionError):
@@ -244,7 +244,11 @@ def validate_http_endpoint(endpoint: str) -> None:
 
 
 def safe_error(value: str, *, secrets: tuple[str | None, ...] = ()) -> str:
-    return scrub_text(value, max_bytes=4096, secrets=KnownSecrets(secrets))
+    value = scrub_text(value, max_bytes=4096, secrets=KnownSecrets(secrets))
+    for secret in secrets:
+        if secret:
+            value = value.replace(secret, "[REDACTED]")
+    return value
 
 
 class BoundedResponse:

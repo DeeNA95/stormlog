@@ -85,6 +85,10 @@ def _run_command(
 ) -> int:
     if args.infer_command == "profile":
         return cmd_profile(args)
+    if args.infer_command == "profile-audio":
+        from .audio_cli import cmd_profile_audio
+
+        return cmd_profile_audio(args)
     if args.infer_command == "analyze":
         return cmd_analyze(args)
     if args.infer_command == "collect-server":
@@ -453,6 +457,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_import_trace_parser(subparsers)
     _add_import_execution_parser(subparsers)
+    from .audio_cli import add_audio_parser
+
+    add_audio_parser(subparsers, _add_arrival_arguments)
     add_watch_parser(subparsers)
     return parser
 

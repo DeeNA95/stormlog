@@ -22,6 +22,18 @@ from .http_transport import inference_opener as inference_opener
 from .http_transport import safe_error
 from .http_transport import validate_http_endpoint as _validate_http_endpoint
 
+__all__ = [
+    "ChatCompletionResult",
+    "OpenAIChatCompletionsClient",
+    "ConnectError",
+    "CutResponseError",
+    "NoResponseError",
+    "EndpointHTTPError",
+    "inference_opener",
+    "ignored_proxies",
+    "validate_extra_body",
+]
+
 
 @dataclass(frozen=True)
 class ChatCompletionResult:
@@ -213,8 +225,8 @@ class OpenAIChatCompletionsClient:
 
             chunk = json.loads(data)
             _check_payload(chunk, secrets=(self.api_key,))
-            response_id = _optional_string(chunk, "id") or response_id
-            fingerprint = _optional_string(chunk, "system_fingerprint") or fingerprint
+            response_id = _latest_string(chunk, "id", response_id)
+            fingerprint = _latest_string(chunk, "system_fingerprint", fingerprint)
             if isinstance(chunk.get("usage"), dict):
                 usage = chunk["usage"]
             choice = _first_choice(chunk)
@@ -297,34 +309,41 @@ def _first_choice(payload: Any) -> dict[str, Any]:
 
 
 def _stream_data(response: Any) -> Iterator[str]:
-    parts: list[str] = []
+    for data in _sse_frames(response):
+        if data == "[DONE]":
+            return
+        yield data
+
+
+def _data_lines(response: Any) -> Iterator[str | None]:
     for raw_line in response:
         line = raw_line.decode("utf-8").rstrip("\r\n")
         if not line:
-            if parts:
-                data = "\n".join(parts)
-                parts = []
-                if data == "[DONE]":
-                    return
-                yield data
+            yield None
         elif line.startswith("data:"):
-            if line[5:].strip() == "[DONE]":
-                if parts:
-                    yield "\n".join(parts)
-                return
-            # Retain compatibility with servers omitting the event separator
-            # after a complete JSON frame, while accepting multiline JSON.
-            if parts and _complete_frame("\n".join(parts)):
-                data = "\n".join(parts)
-                if data == "[DONE]":
-                    return
-                yield data
+            yield line[5:].lstrip(" ")
+
+
+def _sse_frames(response: Any) -> Iterator[str]:
+    parts: list[str] = []
+    for fragment in _data_lines(response):
+        if fragment is None:
+            if parts:
+                yield "\n".join(parts)
                 parts = []
-            parts.append(line[5:].lstrip(" "))
+        elif fragment == "[DONE]":
+            if parts:
+                yield "\n".join(parts)
+            yield fragment
+            return
+        else:
+            # Older compatible servers omit separators after complete JSON.
+            if parts and _complete_frame("\n".join(parts)):
+                yield "\n".join(parts)
+                parts = []
+            parts.append(fragment)
     if parts:
-        data = "\n".join(parts)
-        if data != "[DONE]":
-            yield data
+        yield "\n".join(parts)
 
 
 def _stream_choice_fields(choice: dict[str, Any]) -> tuple[str | None, str]:
@@ -358,3 +377,9 @@ def _complete_frame(data: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _latest_string(
+    payload: dict[str, Any], key: str, previous: str | None
+) -> str | None:
+    return _optional_string(payload, key) or previous
