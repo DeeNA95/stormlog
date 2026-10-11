@@ -21,3 +21,8 @@ no-retry transport. `--timeout` bounds the total request, including trickling
 responses; `--max-response-bytes` bounds cumulative response data. Sent
 request IDs and server-generated completion IDs are recorded independently.
 Unknown server versions and execution attribution remain unavailable.
+
+Text and audio scheduling share arrival indices, in-flight admission, drops,
+phase windows and bounded drain. Calls still running after an asyncio drain
+remain tracked; the next phase waits for them before starting. The text
+extraction passed 148 existing scheduling, profiler, trace and vLLM tests.
