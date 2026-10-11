@@ -9,7 +9,7 @@ from typing import Any
 
 from ..exit_codes import ExitCode
 from ..report import load_report, write_report
-from .diagnosis import DiagnoseOptions, diagnose_artifact
+from .diagnosis import DiagnoseOptions, TelemetryError, diagnose_artifact
 from .diagnosis_text import InspectError, inspect, render_text
 from .errors import InferInputError, InferUsageError
 
@@ -102,14 +102,7 @@ def cmd_diagnose(args: argparse.Namespace, argv: list[str] | None = None) -> int
         report_dir=output.parent if output is not None else None,
         argv=tuple(argv) if argv is not None else None,
     )
-    try:
-        report = diagnose_artifact(
-            args.artifact, windows=_windows(args.window), options=options
-        )
-    except OSError as exc:
-        raise InferInputError(f"cannot read {args.artifact}: {exc}") from exc
-    except ValueError as exc:
-        raise InferUsageError(str(exc)) from exc
+    report = _diagnose(args, options)
     if output is not None:
         write_report(output, report)
     if args.format == "json":
@@ -117,6 +110,19 @@ def cmd_diagnose(args: argparse.Namespace, argv: list[str] | None = None) -> int
     else:
         print(render_text(report), end="")
     return int(report["verdict"]["exit_code"])
+
+
+def _diagnose(args: argparse.Namespace, options: DiagnoseOptions) -> dict[str, Any]:
+    try:
+        return diagnose_artifact(
+            args.artifact, windows=_windows(args.window), options=options
+        )
+    except OSError as exc:
+        raise InferInputError(f"cannot read {args.artifact}: {exc}") from exc
+    except TelemetryError as exc:
+        raise InferInputError(str(exc)) from exc
+    except ValueError as exc:
+        raise InferUsageError(str(exc)) from exc
 
 
 def _inspect(args: argparse.Namespace) -> int:

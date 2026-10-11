@@ -96,6 +96,11 @@ COMPONENTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 }
 
 
+class TelemetryError(ValueError):
+    """A ``server_telemetry`` file that cannot be read, or holds samples of
+    another run."""
+
+
 @dataclass(frozen=True)
 class DiagnoseOptions:
     """What the caller asked for, and what it asserts."""
@@ -137,14 +142,16 @@ def diagnose_artifact(
 
     Raises:
         OSError: when the artifact cannot be read.
+        TelemetryError: a ``server_telemetry`` file that cannot be read, or
+            holds samples of a run other than the artifact's.
         ValueError: for unknown or non-finite threshold overrides, or empty
             windows.
     """
     options = options or DiagnoseOptions()
     _check(options, windows)
     source = read_input(artifact)
-    telemetry = [s for path in options.server_telemetry for s in load_telemetry(path)]
     view = join(source)
+    telemetry = _telemetry(options.server_telemetry, view.run_id)
     selection = select(
         view,
         SelectionOptions(
@@ -179,6 +186,31 @@ def _check(options: DiagnoseOptions, windows: Sequence[tuple[int, int]] | None) 
     for start, end in windows or ():
         if not end > start:
             raise ValueError(f"window {start},{end} is empty")
+
+
+def _telemetry(paths: Sequence[str], run_id: str | None) -> list[TelemetrySample]:
+    """Every sample of each file, every file from the artifact's own run.
+    Another run's samples would enter the ledger as this run's observed
+    peaks, so a file holding any is refused, not filtered."""
+    samples: list[TelemetrySample] = []
+    for path in paths:
+        try:
+            found = load_telemetry(path)
+        except (OSError, ValueError) as exc:
+            raise TelemetryError(f"--server-telemetry {path}: {exc}") from exc
+        if run_id is None:
+            raise TelemetryError(
+                f"--server-telemetry {path}: the artifact names no run to bind "
+                "its samples to"
+            )
+        others = sorted({sample.run_id for sample in found} - {run_id})
+        if others:
+            raise TelemetryError(
+                f"--server-telemetry {path}: samples of run {', '.join(others)}, "
+                f"not of the artifact's run {run_id}"
+            )
+        samples.extend(found)
+    return samples
 
 
 # ------------------------------------------------------------------ report
@@ -448,5 +480,6 @@ __all__ = [
     "PAYLOAD_VERSION",
     "REPORT_KIND",
     "DiagnoseOptions",
+    "TelemetryError",
     "diagnose_artifact",
 ]

@@ -11,6 +11,7 @@ import pytest
 
 from stormlog.infer import diagnosis_model
 from stormlog.infer.cli import main
+from stormlog.infer.telemetry import ServerIdentity, TelemetrySample
 from tests.diagnosis_scenarios import MS, Engine, build_run, poisson_free
 from tests.vllm_execution_helpers import SECOND
 
@@ -195,6 +196,28 @@ def test_bad_invocations_have_their_codes(
     burst: Path, argv: list[str], code: int, capsys: pytest.CaptureFixture[str]
 ) -> None:
     assert main([a.format(artifact=burst) for a in argv]) == code
+
+
+def test_server_telemetry_from_another_run_is_invalid_input(
+    tmp_path: Path, burst: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    identity = ServerIdentity(host="node-7", pid=2600, process_start_ns=1)
+    sample = TelemetrySample(
+        run_id="another-run",
+        identity=identity,
+        observed_at_ns=1_790_000_010_000_000_000,
+        metric="process_rss_bytes",
+        value_bytes=1 << 30,
+        state="valid",
+        source="psutil",
+        interval_ms=1000,
+    )
+    telemetry = tmp_path / "server.jsonl"
+    telemetry.write_text(json.dumps(sample.to_record()) + "\n")
+
+    code = main(["diagnose", str(burst), "--server-telemetry", str(telemetry)])
+
+    assert code == 5 and "another-run" in capsys.readouterr().err
 
 
 def test_a_nan_threshold_is_a_usage_error_not_a_silent_pass(

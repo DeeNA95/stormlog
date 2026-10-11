@@ -91,15 +91,15 @@ def test_a_kv_peak_across_an_exporter_restart_is_insufficient(tmp_path: Path) ->
     )
 
 
-def test_collector_samples_are_observed_with_their_peak(
-    artifact: Path, tmp_path: Path
-) -> None:
+def _collector_artifact(path: Path, run_ids: tuple[str, ...]) -> Path:
+    """A collector artifact: device memory at 100, 300 and 200 bytes, one
+    second apart, each sample from the next of ``run_ids`` in turn."""
     identity = ServerIdentity(
         host="node-7", pid=2600, process_start_ns=1, device_uuid="GPU-a"
     )
     samples = [
         TelemetrySample(
-            run_id="run-1",
+            run_id=run_ids[i % len(run_ids)],
             identity=identity,
             observed_at_ns=1_790_000_010_000_000_000 + i * SECOND,
             metric="device_memory_used_bytes",
@@ -110,8 +110,14 @@ def test_collector_samples_are_observed_with_their_peak(
         )
         for i, value in enumerate((100, 300, 200))
     ]
-    telemetry = tmp_path / "server.jsonl"
-    telemetry.write_text("".join(json.dumps(s.to_record()) + "\n" for s in samples))
+    path.write_text("".join(json.dumps(s.to_record()) + "\n" for s in samples))
+    return path
+
+
+def test_collector_samples_are_observed_with_their_peak(
+    artifact: Path, tmp_path: Path
+) -> None:
+    telemetry = _collector_artifact(tmp_path / "server.jsonl", ("run-1",))
 
     report = diagnose_artifact(
         artifact, options=DiagnoseOptions(server_telemetry=(str(telemetry),))
@@ -121,3 +127,18 @@ def test_collector_samples_are_observed_with_their_peak(
     assert device["status"] == "observed" and device["samples"] == 3
     assert device["peak"]["value"] == 300 and device["cadence_ms"] == 1000
     assert report["payload"]["memory"]["nesting"]["holds"] is True
+
+
+@pytest.mark.parametrize("run_ids", [("run-2",), ("run-1", "run-2")])
+def test_another_run_s_telemetry_is_refused(
+    artifact: Path, tmp_path: Path, run_ids: tuple[str, ...]
+) -> None:
+    # Its peaks would enter this run's ledger as observed.
+    telemetry = _collector_artifact(tmp_path / "server.jsonl", run_ids)
+
+    with pytest.raises(ValueError, match="run-2.*run-1") as raised:
+        diagnose_artifact(
+            artifact, options=DiagnoseOptions(server_telemetry=(str(telemetry),))
+        )
+
+    assert str(telemetry) in str(raised.value)

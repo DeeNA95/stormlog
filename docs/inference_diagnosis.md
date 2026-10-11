@@ -609,7 +609,12 @@ any other allocator, or a hello that does not say, `holds` is null.
 
 `stormlog infer diagnose ... --server-telemetry JSONL` (repeatable), or
 `DiagnoseOptions(server_telemetry=...)`, names the collector artifacts to
-read; they and the artifact are the only files a diagnosis reads.
+read; they and the artifact are the only files a diagnosis reads. Each must
+hold only samples of the artifact's own run (the `run_id` that
+`infer collect-server --run-id` was given): a file with another run's
+samples, or any file for an artifact that names no run, is refused
+(`TelemetryError`, exit `5`), since its peaks would enter the ledger as this
+run's.
 
 ## Thresholds
 
