@@ -30,11 +30,16 @@ def workload_record(
 ) -> dict[str, Any]:
     """The ``infer.workload`` record written at the start of a run."""
     spec = workload_spec(config, counter=counter, prompt_spec=prompt_spec)
+    traffic = _traffic(spec, open_loop=_open_loop(config))
+    if config.task != "chat":
+        traffic = {"text_task_version": 1, "task": config.task, **traffic}
     return {
         "schema_version": 1,
         "event_type": "infer.workload",
         "session_id": session_id,
-        "workload_digest": _digest(_traffic(spec, open_loop=_open_loop(config))),
+        "workload_digest": _digest(traffic),
+        "engine": config.engine,
+        "task": config.task,
         **spec,
         "chat_template": chat_template_identity(counter),
     }

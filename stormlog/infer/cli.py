@@ -131,6 +131,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-url",
         help="OpenAI-compatible /v1 base URL",
     )
+    profile_parser.add_argument(
+        "--engine", choices=("generic", "vllm", "omlx", "mlx-lm"), default="generic"
+    )
+    profile_parser.add_argument(
+        "--task", choices=("chat", "completion"), default="chat"
+    )
+    profile_parser.add_argument(
+        "--server-version",
+        help="User-declared server version; not independently verified",
+    )
+    profile_parser.add_argument("--max-response-bytes", type=int, default=16 * 1024**2)
+    profile_parser.add_argument(
+        "--omlx-stats-url", help="Explicit read-only oMLX stats endpoint"
+    )
+    profile_parser.add_argument(
+        "--omlx-stats-api-key-env",
+        help="Separate admin credential environment variable",
+    )
+    profile_parser.add_argument("--omlx-stats-interval", type=float, default=1.0)
     profile_parser.add_argument("--model", required=True, help="Model name")
     profile_parser.add_argument(
         "--run-id", default=None, help="Shared run ID for an on-host collector"
@@ -838,9 +857,22 @@ def _usage_errors() -> Iterator[None]:
 
 
 def _profile_config(args: argparse.Namespace) -> ProfileConfig:
-    endpoint = resolve_endpoint(endpoint=args.endpoint, base_url=args.base_url)
+    endpoint = resolve_endpoint(
+        endpoint=args.endpoint, base_url=args.base_url, task=args.task
+    )
     slo, slo_source = _slo_policy(args)
     return ProfileConfig(
+        engine=args.engine,
+        task=args.task,
+        server_version=args.server_version,
+        max_response_bytes=args.max_response_bytes,
+        omlx_stats_url=args.omlx_stats_url,
+        omlx_stats_api_key=(
+            os.environ.get(args.omlx_stats_api_key_env)
+            if args.omlx_stats_api_key_env
+            else None
+        ),
+        omlx_stats_interval_seconds=args.omlx_stats_interval,
         endpoint=endpoint,
         model=args.model,
         concurrency=tuple(

@@ -216,8 +216,11 @@ class _Response:
     def __init__(self, body: dict[str, Any]) -> None:
         self.body = json.dumps(body).encode("utf-8")
 
-    def read(self) -> bytes:
-        return self.body
+    def read(self, size: int = -1) -> bytes:
+        data, self.body = self.body[:size] if size >= 0 else self.body, (
+            self.body[size:] if size >= 0 else b""
+        )
+        return data
 
     def __enter__(self) -> "_Response":
         return self

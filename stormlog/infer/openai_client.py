@@ -2,176 +2,25 @@
 
 from __future__ import annotations
 
-import http.client
 import json
-import os
+import math
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Literal
 
-
-class EndpointHTTPError(RuntimeError):
-    """The endpoint answered with an HTTP error status."""
-
-    def __init__(self, status: int, message: str) -> None:
-        super().__init__(f"HTTP {status}: {message}")
-        self.status = status
-
-
-class ConnectError(OSError):
-    """``connect()`` failed, so no byte of the request was sent.
-
-    That covers a refused or timed-out connection, a TLS handshake that did
-    not finish, and a socket the peer reset before ``connect()`` returned.
-    urllib wraps this in ``URLError``, as it does every error from sending,
-    and the reason tells the two apart: a request that failed here never
-    reached the server.
-    """
-
-    def __init__(self, cause: BaseException) -> None:
-        super().__init__(f"{type(cause).__name__}: {cause}")
-        self.cause = cause
-
-
-class NoResponseError(ConnectionError):
-    """The connection failed after the request was sent, before any response.
-
-    A small request fits in the socket buffer, so it counts as sent before
-    the server has read a byte of it. A reset or close while waiting for the
-    status line leaves delivery as unknown as a failure while sending.
-    """
-
-    def __init__(self, cause: BaseException) -> None:
-        super().__init__(f"{type(cause).__name__}: {cause}")
-        self.cause = cause
-
-
-class CutResponseError(ConnectionError):
-    """The server answered with a status line, then the connection failed.
-
-    The server took the request: delivery is known, and the status is the
-    answer it gave, cut short.
-    """
-
-    def __init__(self, status: int, cause: BaseException) -> None:
-        super().__init__(f"HTTP {status}, then {type(cause).__name__}: {cause}")
-        self.status = status
-        self.cause = cause
-
-
-class _StatusLine:
-    """The status a connection's response line gave, once it arrived."""
-
-    def __init__(self) -> None:
-        self.status: int | None = None
-
-
-def _response_class(seen: _StatusLine) -> type[http.client.HTTPResponse]:
-    class _Response(http.client.HTTPResponse):
-        def _read_status(self) -> tuple[str, int, str]:
-            version, status, reason = super()._read_status()  # type: ignore[misc]
-            seen.status = int(status)
-            return str(version), int(status), str(reason)
-
-    return _Response
-
-
-class _Answered:
-    """Tells a failure before the status line from one after it."""
-
-    def _track(self) -> None:
-        self._status_line = _StatusLine()
-        self.response_class = _response_class(self._status_line)
-
-    def _failed(self, exc: ConnectionError) -> ConnectionError:
-        status = self._status_line.status
-        return NoResponseError(exc) if status is None else CutResponseError(status, exc)
-
-
-class _TrackedHTTPConnection(_Answered, http.client.HTTPConnection):
-    def connect(self) -> None:
-        try:
-            super().connect()
-        except OSError as exc:
-            raise ConnectError(exc) from exc
-
-    def getresponse(self) -> http.client.HTTPResponse:
-        self._track()
-        try:
-            return super().getresponse()
-        except ConnectionError as exc:
-            raise self._failed(exc) from exc
-
-
-class _TrackedHTTPSConnection(_Answered, http.client.HTTPSConnection):
-    def connect(self) -> None:
-        try:
-            super().connect()
-        except OSError as exc:
-            raise ConnectError(exc) from exc
-
-    def getresponse(self) -> http.client.HTTPResponse:
-        self._track()
-        try:
-            return super().getresponse()
-        except ConnectionError as exc:
-            raise self._failed(exc) from exc
-
-
-class _TrackedHTTPHandler(urllib.request.HTTPHandler):
-    def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
-        return self.do_open(_TrackedHTTPConnection, req)
-
-
-class _TrackedHTTPSHandler(urllib.request.HTTPSHandler):
-    def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
-        options: dict[str, Any] = {"context": getattr(self, "_context", None)}
-        check_hostname = getattr(self, "_check_hostname", None)
-        if check_hostname is not None:
-            options["check_hostname"] = check_hostname
-        return self.do_open(_TrackedHTTPSConnection, req, **options)
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Report a redirect as the HTTP error it is instead of following it.
-
-    urllib would re-send a redirected POST as a GET to another address, after
-    the first server had already received the request.
-    """
-
-    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
-        return None
-
-
-def inference_opener() -> urllib.request.OpenerDirector:
-    """An opener that marks where a request failed and goes straight there.
-
-    It follows no redirects and ignores proxies from the environment. Through
-    a proxy, ``connect()`` reaches the proxy, so a server that cannot be
-    reached reads as the proxy's HTTP 502 rather than as ``unreachable``.
-    """
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}),
-        _NoRedirect(),
-        _TrackedHTTPHandler(),
-        _TrackedHTTPSHandler(),
-    )
-
-
-def ignored_proxies() -> dict[str, Any]:
-    """What the environment asked of proxies, which the opener ignores.
-
-    Only the schemes: a proxy's URL can carry its credentials.
-    """
-    schemes = {
-        name.lower()[: -len("_proxy")]
-        for name, value in os.environ.items()
-        if value and name.lower().endswith("_proxy")
-    }
-    return {"ignored": True, "schemes": sorted(schemes)}
+from .http_transport import (
+    BoundedResponse,
+)
+from .http_transport import ConnectError as ConnectError
+from .http_transport import CutResponseError as CutResponseError
+from .http_transport import EndpointHTTPError as EndpointHTTPError
+from .http_transport import NoResponseError as NoResponseError
+from .http_transport import ignored_proxies as ignored_proxies
+from .http_transport import inference_opener as inference_opener
+from .http_transport import safe_error
+from .http_transport import validate_http_endpoint as _validate_http_endpoint
 
 
 @dataclass(frozen=True)
@@ -187,6 +36,8 @@ class ChatCompletionResult:
     chunk_interarrival_ms: list[float] = field(default_factory=list)
     usage: dict[str, Any] | None = None
     finish_reason: str | None = None
+    response_id: str | None = None
+    system_fingerprint: str | None = None
 
 
 class OpenAIChatCompletionsClient:
@@ -201,14 +52,24 @@ class OpenAIChatCompletionsClient:
         api_key: str | None = None,
         max_tokens_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
         extra_body: dict[str, Any] | None = None,
+        max_response_bytes: int = 16 * 1024**2,
+        task: str = "chat",
     ) -> None:
         _validate_http_endpoint(endpoint)
+        if task not in {"chat", "completion"}:
+            raise ValueError("Text client requires chat or completion task")
+        if type(max_response_bytes) is not int or max_response_bytes < 1:
+            raise ValueError("response byte limit must be a positive integer")
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("request timeout must be positive and finite")
+        self.task = task
+        self.max_response_bytes = max_response_bytes
         self.endpoint = endpoint
         self.model = model
         self.timeout_seconds = timeout_seconds
         self.api_key = api_key
         self.max_tokens_field = max_tokens_field
-        self.extra_body = validate_extra_body(extra_body, max_tokens_field)
+        self.extra_body = validate_extra_body(extra_body, max_tokens_field, task=task)
         self._opener = inference_opener()
 
     def complete(
@@ -228,7 +89,7 @@ class OpenAIChatCompletionsClient:
         payload = {
             **self.extra_body,
             "model": self.model,
-            "messages": [{"role": "user", "content": prompt}],
+            **self._prompt_payload(prompt),
             "stream": stream,
             self.max_tokens_field: output_tokens,
         }
@@ -258,21 +119,44 @@ class OpenAIChatCompletionsClient:
             with self._opener.open(
                 request,
                 timeout=self.timeout_seconds,
-            ) as response:
-                if stream:
-                    return self._read_streaming_response(
-                        response=response,
-                        started_at_ns=started_at_ns,
-                        started_perf=started_perf,
+            ) as raw_response:
+                with BoundedResponse(
+                    raw_response,
+                    deadline=started_perf + self.timeout_seconds,
+                    max_bytes=self.max_response_bytes,
+                ) as response:
+                    return self._parse_response(
+                        response, stream, started_at_ns, started_perf
                     )
-                return self._read_json_response(
-                    response=response,
-                    started_at_ns=started_at_ns,
-                    started_perf=started_perf,
-                )
         except urllib.error.HTTPError as exc:
-            message = exc.read().decode("utf-8", errors="replace")
+            message = safe_error(
+                exc.read(65536).decode("utf-8", errors="replace"),
+                secrets=(self.api_key,),
+            )
+            exc.close()
             raise EndpointHTTPError(exc.code, message) from exc
+
+    def _prompt_payload(self, prompt: str) -> dict[str, Any]:
+        return (
+            {"prompt": prompt}
+            if self.task == "completion"
+            else {"messages": [{"role": "user", "content": prompt}]}
+        )
+
+    def _parse_response(
+        self, response: Any, stream: bool, started_at_ns: int, started_perf: float
+    ) -> ChatCompletionResult:
+        if stream:
+            return self._read_streaming_response(
+                response=response,
+                started_at_ns=started_at_ns,
+                started_perf=started_perf,
+            )
+        return self._read_json_response(
+            response=response,
+            started_at_ns=started_at_ns,
+            started_perf=started_perf,
+        )
 
     def _read_json_response(
         self,
@@ -282,13 +166,11 @@ class OpenAIChatCompletionsClient:
         started_perf: float,
     ) -> ChatCompletionResult:
         payload = json.loads(response.read().decode("utf-8"))
+        _check_payload(payload, secrets=(self.api_key,))
         ended_at_ns = time.time_ns()
         ended_perf = time.perf_counter()
         choice = _first_choice(payload)
-        message = choice.get("message") if isinstance(choice, dict) else None
-        text = ""
-        if isinstance(message, dict):
-            text = str(message.get("content") or "")
+        text = self._choice_text(choice, stream=False)
         finish_reason = (
             str(choice.get("finish_reason"))
             if isinstance(choice, dict) and choice.get("finish_reason") is not None
@@ -304,6 +186,8 @@ class OpenAIChatCompletionsClient:
             first_chunk_latency_ms=None,
             usage=usage,
             finish_reason=finish_reason,
+            response_id=_optional_string(payload, "id"),
+            system_fingerprint=_optional_string(payload, "system_fingerprint"),
         )
 
     def _read_streaming_response(
@@ -320,6 +204,7 @@ class OpenAIChatCompletionsClient:
         chunk_interarrival_ms: list[float] = []
         usage: dict[str, Any] | None = None
         finish_reason: str | None = None
+        response_id = fingerprint = None
 
         for data in _stream_data(response):
             now_perf = time.perf_counter()
@@ -327,10 +212,14 @@ class OpenAIChatCompletionsClient:
                 first_chunk_perf = now_perf
 
             chunk = json.loads(data)
+            _check_payload(chunk, secrets=(self.api_key,))
+            response_id = _optional_string(chunk, "id") or response_id
+            fingerprint = _optional_string(chunk, "system_fingerprint") or fingerprint
             if isinstance(chunk.get("usage"), dict):
                 usage = chunk["usage"]
             choice = _first_choice(chunk)
-            chunk_finish_reason, piece = _stream_choice_fields(choice)
+            chunk_finish_reason, _legacy_piece = _stream_choice_fields(choice)
+            piece = self._choice_text(choice, stream=True)
             if chunk_finish_reason is not None:
                 finish_reason = chunk_finish_reason
             if not piece:
@@ -364,18 +253,33 @@ class OpenAIChatCompletionsClient:
             chunk_interarrival_ms=chunk_interarrival_ms,
             usage=usage,
             finish_reason=finish_reason,
+            response_id=response_id,
+            system_fingerprint=fingerprint,
         )
+
+    def _choice_text(self, choice: dict[str, Any], *, stream: bool) -> str:
+        if self.task == "completion":
+            return str(choice.get("text") or "")
+        value = choice.get("delta" if stream else "message")
+        return str(value.get("content") or "") if isinstance(value, dict) else ""
 
 
 def validate_extra_body(
-    extra_body: dict[str, Any] | None, max_tokens_field: str
+    extra_body: dict[str, Any] | None, max_tokens_field: str, *, task: str = "chat"
 ) -> dict[str, Any]:
     """Extra request fields may add settings but not replace the ones Stormlog sets."""
     if extra_body is None:
         return {}
     if not isinstance(extra_body, dict):
         raise ValueError("extra request fields must be a JSON object")
-    owned = {"model", "messages", "stream", "stream_options", max_tokens_field}
+    owned = {
+        "model",
+        "messages",
+        "prompt",
+        "stream",
+        "stream_options",
+        max_tokens_field,
+    }
     clashes = sorted(owned & set(extra_body))
     if clashes:
         raise ValueError(f"extra request fields cannot set {', '.join(clashes)}")
@@ -392,21 +296,35 @@ def _first_choice(payload: Any) -> dict[str, Any]:
     return first if isinstance(first, dict) else {}
 
 
-def _validate_http_endpoint(endpoint: str) -> None:
-    parsed = urllib.parse.urlparse(endpoint)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("endpoint must use http:// or https://")
-
-
 def _stream_data(response: Any) -> Iterator[str]:
+    parts: list[str] = []
     for raw_line in response:
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line or not line.startswith("data:"):
-            continue
-        data = line.removeprefix("data:").strip()
-        if data == "[DONE]":
-            break
-        yield data
+        line = raw_line.decode("utf-8").rstrip("\r\n")
+        if not line:
+            if parts:
+                data = "\n".join(parts)
+                parts = []
+                if data == "[DONE]":
+                    return
+                yield data
+        elif line.startswith("data:"):
+            if line[5:].strip() == "[DONE]":
+                if parts:
+                    yield "\n".join(parts)
+                return
+            # Retain compatibility with servers omitting the event separator
+            # after a complete JSON frame, while accepting multiline JSON.
+            if parts and _complete_frame("\n".join(parts)):
+                data = "\n".join(parts)
+                if data == "[DONE]":
+                    return
+                yield data
+                parts = []
+            parts.append(line[5:].lstrip(" "))
+    if parts:
+        data = "\n".join(parts)
+        if data != "[DONE]":
+            yield data
 
 
 def _stream_choice_fields(choice: dict[str, Any]) -> tuple[str | None, str]:
@@ -418,3 +336,25 @@ def _stream_choice_fields(choice: dict[str, Any]) -> tuple[str | None, str]:
     if isinstance(delta, dict):
         piece = str(delta.get("content") or "")
     return finish_reason, piece
+
+
+def _optional_string(payload: dict[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _check_payload(payload: Any, *, secrets: tuple[str | None, ...]) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("Expected a JSON response object")
+    if payload.get("error") is not None:
+        raise EndpointHTTPError(200, safe_error(str(payload["error"]), secrets=secrets))
+
+
+def _complete_frame(data: str) -> bool:
+    if data == "[DONE]":
+        return True
+    try:
+        json.loads(data)
+        return True
+    except ValueError:
+        return False

@@ -29,10 +29,13 @@ from ..session import (
 from .analysis import analyze_inference_events
 from .arrivals import CLOSED, arrival_offsets, scheduled_endpoint
 from .cache_state import cache_state_record, reset_cache
+from .completions_client import OpenAICompletionsClient
 from .config import ProfileConfig, WorkloadCase
 from .correlation_events import ArtifactIdentityEvent, CorrelationContext
+from .engine_adapters import get_adapter
 from .events import InferenceRequestEvent, InferenceSummaryEvent, JsonlEventWriter
 from .host_clock import host_boot_id, wall_clock_domain
+from .http_transport import RequestDeadlineExceeded, safe_error
 from .open_loop import Arrival, InFlightLimiter, cancel_all, dispatch_schedule
 from .openai_client import (
     ChatCompletionResult,
@@ -91,13 +94,19 @@ class InferenceProfiler:
         self._check_schedules()
         # The repeated prompt by (seed, length): it is the same in every phase.
         self._repeated_prompts: dict[tuple[int, int], Prompt] = {}
-        self.client = OpenAIChatCompletionsClient(
+        client_type = (
+            OpenAICompletionsClient
+            if config.task == "completion"
+            else OpenAIChatCompletionsClient
+        )
+        self.client = client_type(
             endpoint=config.endpoint,
             model=config.model,
             timeout_seconds=config.timeout_seconds,
             api_key=config.api_key,
             max_tokens_field=config.max_tokens_field,
             extra_body=config.extra_body,
+            max_response_bytes=config.max_response_bytes,
         )
         self.request_executor = ThreadPoolExecutor(
             max_workers=max(case.concurrency for case in config.cases()),
@@ -265,13 +274,16 @@ class InferenceProfiler:
                     "timestamp_ns": self.session.started_at_ns,
                     "status": "running",
                     "config": {
-                        "endpoint": self.config.endpoint,
+                        "endpoint": redact_url(self.config.endpoint),
                         "model": self.config.model,
                         "concurrency": list(self.config.concurrency),
                         "input_tokens": list(self.config.input_tokens),
                         "output_tokens": list(self.config.output_tokens),
                         "duration_seconds": self.config.duration_seconds,
                         "request_count": self.config.request_count,
+                        "engine_adapter": get_adapter(
+                            self.config.engine, self.config.task
+                        ).to_record(self.config.task, self.config.server_version),
                         "stream": self.config.stream,
                         "stream_include_usage": self.config.stream_include_usage,
                         "tokenizer": self.config.tokenizer,
@@ -972,8 +984,10 @@ class InferenceProfiler:
             "x_request_id": self._x_request_id(request_id) if sent else None,
             "case_id": case.case_id,
             "phase": request.phase,
-            "endpoint": self.config.endpoint,
+            "endpoint": redact_url(self.config.endpoint),
             "model": self.config.model,
+            "engine": self.config.engine,
+            "task": self.config.task,
             "concurrency": None if case.arrival.open_loop else case.concurrency,
             "max_in_flight": case.concurrency if case.arrival.open_loop else None,
             "target_input_tokens": case.input_tokens,
@@ -1083,6 +1097,8 @@ class InferenceProfiler:
             output_token_exact=output_count.exact,
             total_tokens=total_tokens,
             finish_reason=result.finish_reason,
+            response_id=result.response_id,
+            system_fingerprint=result.system_fingerprint,
         )
 
     def _failure_event(
@@ -1112,7 +1128,7 @@ class InferenceProfiler:
             ttft_ms=None,
             first_chunk_latency_ms=None,
             error_type=type(error).__name__,
-            error_message=str(error),
+            error_message=safe_error(str(error), secrets=(self.config.api_key,)),
             http_status=http_status,
         )
 
@@ -1360,7 +1376,11 @@ def classify_failure(exc: BaseException) -> tuple[str, int | None]:
     not followed, so a 3xx is an ``error``.
     """
     http_status = (
-        exc.status if isinstance(exc, (EndpointHTTPError, CutResponseError)) else None
+        exc.status
+        if isinstance(
+            exc, (EndpointHTTPError, CutResponseError, RequestDeadlineExceeded)
+        )
+        else None
     )
     if http_status in REJECTED_HTTP_STATUSES:
         return "rejected", http_status

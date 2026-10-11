@@ -61,6 +61,10 @@ class InferenceRequestEvent:
     prompt_digest: str | None = None
     # The X-Request-Id header sent, as recorded; None for a request never sent.
     x_request_id: str | None = None
+    engine: str = "generic"
+    task: str = "chat"
+    response_id: str | None = None
+    system_fingerprint: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         record = asdict(self)
