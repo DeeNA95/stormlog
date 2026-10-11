@@ -666,6 +666,6 @@ jaxmemprof diagnose --duration 0 --output ./jax_diag
 Use `mlxmemprof run --output artifacts/mlx-run -- script.py [args...]` to sample
 the workload in the same interpreter. Monitor/track/diagnose observe their own
 process. Analyze reads saved artifacts offline without any framework import.
-See the [MLX command guide](mlx_testing_guide.md#dedicated-cli) for options,
-[report contract](report_contract.md#mlx-captures) for exit statuses, and
+See the [MLX command guide](mlx_testing_guide.md) for options,
+[report contract](report_contract.md) for exit statuses, and
 [MLX cookbook](cookbook/mlx.md) for runnable workflows.
