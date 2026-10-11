@@ -156,6 +156,8 @@ also cover disk failure, unavailable/partial counters and recovery boundaries.
   also tested with imports of all four frameworks explicitly blocked.
 - 130 TUI/entrypoint tests passed, preserving the default PyTorch selection;
   337 shared packaging/query/telemetry/session/report/utility tests passed.
+  A further 168 derived-field/import/docs/capability-matrix/JAX-utility checks
+  passed during the final scope audit.
 - Native Runtime Info, evaluated MLX Sample, live tracking and shutdown passed
   in the MLX/TUI-only environment. Both runnable cookbook examples (training
   loss/model/optimizer roots and completed token generation) executed natively.
@@ -178,8 +180,10 @@ python3 -m examples.scenarios.mlx_memory_scenario --hardware --repetitions 200 -
 python3 -m examples.cli.capability_matrix --target mlx --mode smoke
 ```
 
-PRs 1–3 now supply the core Python/CLI/TUI memory integration. The native optional capability matrix reported PASS (1), SKIP (0), FAIL (0).
-Owned Metal trace
-capture, array-buffer inspection, server adapters, Linux MLX CPU/CUDA and MLX
-distributed qualification remain separate optional follow-ups. Endpoint client
-profiling does not read an external server's process allocator.
+PRs 1–3 now supply the core Python/CLI/TUI memory integration. The native
+optional capability matrix reported PASS (1), SKIP (0), FAIL (0). The separate
+PR4 serving milestone covers oMLX, MLX-LM and MLX-Audio endpoint support and
+scoped server evidence; it is not implemented by this qualification. Owned
+Metal trace capture, array-buffer inspection, Linux MLX CPU/CUDA and distributed
+qualification remain optional follow-ups. Endpoint client profiling does not
+read an external server's process allocator.

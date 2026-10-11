@@ -21,7 +21,8 @@ discovery is cached; sampled counters and failed discovery are not cached.
 | TUI | Explicit MLX actions, live tracking, saved profiles and nullable timelines | Live counters belong to the TUI process |
 | Persistence | Telemetry v4, profile v1, bounded sinks/OOM bundles, shared reports/query | No native allocation stacks or fragmentation attribution |
 | Qualification | Framework-free contracts and controlled Apple Silicon Metal gates | Linux MLX CPU/CUDA and distributed runtimes unqualified |
-| Deferred | Metal traces, array-buffer inspection, MLX-LM/oMLX adapters | Optional follow-up outside the core rollout |
+| PR4 serving milestone | oMLX, MLX-LM and MLX-Audio endpoint profiling and scoped server evidence | Separate planned delivery after the core memory rollout |
+| Optional follow-ups | Metal traces and array-buffer inspection | Outside the core rollout |
 
 ## Counter meanings
 
@@ -266,5 +267,7 @@ sampler. Saved artifacts display without native MLX even on other platforms.
 
 For runnable training and generation recipes, see the [MLX cookbook](cookbook/mlx.md).
 From a source checkout, run `python3 -m examples.basic.mlx_demo --output artifacts/mlx-demo`.
-Serving adapters, Metal trace capture and array-buffer attribution remain
-optional follow-up work; no inference wire or memory schema bump is introduced.
+Serving integration is a separate planned PR4 milestone for oMLX, MLX-LM and
+MLX-Audio. Metal trace capture and array-buffer attribution remain optional
+follow-ups. This core memory rollout introduces no inference wire or memory
+schema bump.

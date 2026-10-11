@@ -88,8 +88,8 @@ print(tokens)
 For a real model, evaluate returned token roots and the model's evolving KV
 cache/state. Avoid serializing arrays into profile artifacts. Profiling an HTTP
 client cannot observe an oMLX server's allocator: instrument inside each server
-worker or export its telemetry with PID/session identity. Serving adapters are
-an optional later rollout.
+worker or export its telemetry with PID/session identity. Serving integration for oMLX, MLX-LM and MLX-Audio is a separate planned
+PR4 milestone after this core memory rollout.
 
 ## Read growth and artifacts correctly
 
