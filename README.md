@@ -73,6 +73,7 @@ evaluation. Use `mlxmemprof run -- script.py` for in-process capture and
 | Install the package | `pip install stormlog` |
 | Launch the TUI | `stormlog` or `stormlog tui` |
 | Profile OpenAI-compatible inference | `stormlog infer profile` |
+| Profile MLX audio and serving evidence | `stormlog infer profile-audio`, `stormlog infer mlx-serve`; [guide](https://github.com/Silas-Asamoah/stormlog/blob/release/dev/docs/mlx_inference.md) |
 | Import PyTorch APIs | `from stormlog import GPUMemoryProfiler, MemoryTracker` |
 | Import TensorFlow APIs | `from stormlog.tensorflow import TFMemoryProfiler` |
 | Import JAX APIs | `from stormlog.jax import JAXMemoryProfiler` |

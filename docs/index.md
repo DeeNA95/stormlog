@@ -66,7 +66,9 @@ pytorch_testing_guide
 tensorflow_testing_guide
 jax_testing_guide
 mlx_testing_guide
+mlx_inference
 benchmarks/mlx-qualification
+benchmarks/mlx-inference-qualification
 article
 architecture
 api
@@ -108,6 +110,7 @@ examples/test_guides/README
 - [TensorFlow guide](tensorflow_testing_guide.md)
 - [JAX guide](jax_testing_guide.md)
 - [MLX instrumentation guide](mlx_testing_guide.md)
+- [MLX inference profiling](mlx_inference.md)
 - [Production Cookbook](cookbook/index.md)
 
 ## Notes

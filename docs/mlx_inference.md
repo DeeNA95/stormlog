@@ -1,9 +1,9 @@
 # MLX inference profiling
 
-PR4 extends endpoint profiling for oMLX, MLX-LM and MLX-Audio. Its acceptance
-criteria are in [the PR4 plan](mlx-inference-pr4-plan.md). Implementation and
-protocol fixture validation are in progress; live server qualification is
-required before declaring the integration complete.
+PR4 extends endpoint profiling for oMLX, MLX-LM and MLX-Audio. The implementation
+and selected live model/task combinations are recorded in
+[the qualification results](benchmarks/mlx-inference-qualification.md).
+Authenticated oMLX statistics remain unqualified at the user's request.
 
 Text profiling retains the existing chat defaults. Select `--engine omlx`
 or `--engine mlx-lm` and `--task completion` for raw text completions:
@@ -97,8 +97,12 @@ scope. Only the documented token/request counters, uptime, average serving
 rates, cache efficiency and active/waiting request gauges are retained.
 The source response can contain credentials; its raw body is never recorded.
 
-`--omlx-stats-api-key-env ENV_NAME` supplies a separate admin key. Inference
-credentials are never reused for admin requests, even on the same origin.
+The inspected oMLX admin route uses a normally issued `omlx_admin_session`
+cookie: `--omlx-stats-cookie-env ENV_NAME` supplies that separate token.
+`--omlx-stats-api-key-env ENV_NAME` supplies a bearer key for deployments
+whose admin gateway explicitly supports it. Choose one. Sampling never logs
+in or changes authentication. Inference credentials are never reused for
+admin requests, even on the same origin.
 A missing/unauthorized stats endpoint is evidence loss, not an inference
 failure. Counter decreases and uptime restarts mark epoch changes; outage
 and sampling scope are explicit. Aggregate statistics can include other

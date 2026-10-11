@@ -21,7 +21,7 @@ discovery is cached; sampled counters and failed discovery are not cached.
 | TUI | Explicit MLX actions, live tracking, saved profiles and nullable timelines | Live counters belong to the TUI process |
 | Persistence | Telemetry v4, profile v1, bounded sinks/OOM bundles, shared reports/query | No native allocation stacks or fragmentation attribution |
 | Qualification | Framework-free contracts and controlled Apple Silicon Metal gates | Linux MLX CPU/CUDA and distributed runtimes unqualified |
-| PR4 serving milestone | oMLX, MLX-LM and MLX-Audio endpoint profiling and scoped server evidence | Separate planned delivery after the core memory rollout |
+| PR4 serving | oMLX/MLX-LM text, MLX-Audio TTS/STT, scoped process evidence and offline joins | Selected live model/version pairs qualified; authenticated oMLX stats unqualified |
 | Optional follow-ups | Metal traces and array-buffer inspection | Outside the core rollout |
 
 ## Counter meanings
@@ -271,3 +271,46 @@ Serving integration is a separate planned PR4 milestone for oMLX, MLX-LM and
 MLX-Audio. Metal trace capture and array-buffer attribution remain optional
 follow-ups. This core memory rollout introduces no inference wire or memory
 schema bump.
+
+
+## Inference server qualification (PR4)
+
+The [inference guide](mlx_inference.md) documents endpoint profiling and
+same-process capture. The [qualification matrix and artifacts](benchmarks/mlx-inference-qualification.md)
+record actual versions, models, fixtures, serving PIDs, off/on measurements
+and unsupported combinations. Client profiling and offline joins require no
+MLX or server imports. Only native capture needs the serving interpreter's
+MLX >=0.32.3, Apple Silicon and a usable Metal device.
+
+Protocol/audio/transport/statistics/evidence tests use hardware-free fixtures:
+
+```bash
+python3 -m pytest tests/test_infer_mlx_text.py tests/test_infer_http_transport.py tests/test_infer_audio*.py tests/test_infer_omlx_stats.py tests/test_infer_mlx_evidence.py tests/test_infer_mlx_report.py tests/test_infer_mlx_server.py tests/test_infer_mlx_qualification_helpers.py -q
+```
+
+The source-only scenario client needs explicit already running endpoints,
+pre-provisioned model IDs and authored manifests. It never launches a service,
+downloads weights or resets state. The separate server qualification example
+reads bounded model-call checkpoints in the serving PID; use identical settings
+for off/on pairs. Keep warmup, request counts, seed, fixtures, cache policy and
+dependency versions fixed. Record clock/identity provenance and sampled scope.
+
+For the full live gate, set `STORMLOG_INFER_MLX_QUALIFICATION_CONFIG` to a JSON
+file mapping `omlx`, `mlx-lm`, `mlx-audio` to lists of scenario CLI arguments
+(omit `--engine`, supplied by the test). Include `--base-url`, `--server-version`,
+`--run-id`, a fresh `--output`, `--telemetry-state` and each model/manifest.
+oMLX additionally needs `--omlx-stats-url` and a separately supplied normally
+issued admin credential via `--omlx-stats-cookie-env` or the explicit gateway
+bearer environment option. Credential values must never appear in the file.
+
+```bash
+python3 -m pytest tests/test_infer_mlx_qualification.py -m infer_mlx_qualification -q -ra
+```
+
+Requested qualification fails on missing runtime, Metal, configuration, endpoint
+or valid stats; it never reports success with every case skipped. Ordinary CI
+runs the framework-free contracts. The manual `MLX inference qualification`
+workflow uses a dedicated self-hosted macOS/ARM64 runner whose operator has
+prepared the environment and endpoints. It does not install models or reset
+services. Successful authenticated stats are still unqualified locally at the
+user's request; the complete live gate remains strict for future qualification.
