@@ -37,7 +37,7 @@ from .diagnosis_queue import assess_queue
 from .diagnosis_report import envelope_finding, finding_detail, inputs_block
 from .diagnosis_roles import link_roles
 from .diagnosis_selection import SelectionOptions, Subject, select
-from .diagnosis_thresholds import DEFAULT_THRESHOLDS, THRESHOLDS_VERSION
+from .diagnosis_thresholds import DEFAULT_THRESHOLDS, THRESHOLDS_VERSION, range_error
 from .diagnosis_vocabulary import (
     CAPTURE_PAUSE,
     CLIENT_ADMISSION,
@@ -183,6 +183,10 @@ def _check(options: DiagnoseOptions, windows: Sequence[tuple[int, int]] | None) 
     if not all(math.isfinite(value) for value in options.thresholds.values()):
         # A NaN is never exceeded: every finding it gates would vanish silently.
         raise ValueError("threshold overrides must be finite numbers")
+    for key, value in sorted(options.thresholds.items()):
+        problem = range_error(key, value)
+        if problem is not None:
+            raise ValueError(problem)
     for start, end in windows or ():
         if not end > start:
             raise ValueError(f"window {start},{end} is empty")

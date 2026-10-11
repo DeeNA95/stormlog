@@ -14,6 +14,11 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from stormlog.infer.diagnosis import DiagnoseOptions, diagnose_artifact
+from stormlog.infer.diagnosis_thresholds import (
+    DEFAULT_THRESHOLDS,
+    RANGES,
+    range_error,
+)
 from tests.diagnosis_scenarios import MS, Engine, build_run, poisson_free
 from tests.vllm_execution_helpers import SECOND, WALL_OFFSET
 
@@ -254,6 +259,24 @@ def test_an_incident_its_queue_explains_little_of_is_inconclusive(
         (None, {"thresholds": {"selection.window_seconds": math.nan}}, "finite"),
         (None, {"thresholds": {"selection.window_seconds": math.inf}}, "finite"),
         ([(5, 5)], {}, "is empty"),
+        # A base window under a nanosecond divided by zero, or held nothing.
+        (None, {"thresholds": {"selection.window_seconds": 0.0}}, "nanosecond"),
+        (None, {"thresholds": {"selection.window_seconds": 1e-12}}, "nanosecond"),
+        (None, {"thresholds": {"selection.window_seconds": -1.0}}, "nanosecond"),
+        (None, {"thresholds": {"selection.span_cap_seconds": 0.0}}, "nanosecond"),
+        (None, {"thresholds": {"selection.min_requests": 0.0}}, "at least 1"),
+        (None, {"thresholds": {"selection.reference_min_requests": 0.5}}, "at least 1"),
+        (None, {"thresholds": {"selection.alpha": 0.0}}, "above 0"),
+        (None, {"thresholds": {"selection.alpha": 1.5}}, "above 0"),
+        (None, {"thresholds": {"selection.min_above": -1.0}}, "count"),
+        (
+            None,
+            {"thresholds": {"queue_saturation.witness_request_share": 1.5}},
+            "share",
+        ),
+        (None, {"thresholds": {"prefix_sharing_drop.share_drop": -1.0}}, "share"),
+        (None, {"thresholds": {"workload.length_ratio": 0.5}}, "ratio"),
+        (None, {"thresholds": {"kv_preemption_pressure.preemptions": -1.0}}, "count"),
     ],
 )
 def test_bad_options_are_refused(
@@ -261,6 +284,26 @@ def test_bad_options_are_refused(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         diagnose_artifact(burst, windows=windows, options=_options(**options))
+
+
+def test_every_threshold_has_a_range_its_default_and_edges_lie_in() -> None:
+    assert set(RANGES) == set(DEFAULT_THRESHOLDS)
+    edges = {
+        "selection.window_seconds": 1e-9,
+        "selection.min_requests": 1.0,
+        "selection.alpha": 1.0,
+        "selection.min_above": 0.0,
+        "queue_saturation.witness_request_share": 1.0,
+        "queue_saturation.competitor_floor_share": 0.0,
+        "workload.length_ratio": 1.0,
+    }
+    for key, value in [*DEFAULT_THRESHOLDS.items(), *edges.items()]:
+        assert range_error(key, value) is None, key
+
+
+def test_the_whole_default_table_is_a_valid_override(burst: Path) -> None:
+    overrides = dict(DEFAULT_THRESHOLDS)
+    assert diagnose_artifact(burst, options=_options(thresholds=overrides))
 
 
 def test_diagnosis_reads_only_the_artifact(

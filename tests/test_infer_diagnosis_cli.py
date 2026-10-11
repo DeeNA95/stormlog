@@ -220,6 +220,15 @@ def test_server_telemetry_from_another_run_is_invalid_input(
     assert code == 5 and "another-run" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("seconds", ["0", "1e-12", "-1"])
+def test_a_window_under_a_nanosecond_is_a_usage_error(
+    burst: Path, seconds: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(["diagnose", str(burst), "--window-seconds", seconds])
+
+    assert code == 2 and "nanosecond" in capsys.readouterr().err
+
+
 def test_a_nan_threshold_is_a_usage_error_not_a_silent_pass(
     tmp_path: Path, burst: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

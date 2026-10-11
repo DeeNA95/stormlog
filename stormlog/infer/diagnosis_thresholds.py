@@ -10,7 +10,7 @@ overrode a value.
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 
 THRESHOLDS_VERSION = "diagnosis_thresholds_v1"
 
@@ -123,6 +123,60 @@ DEFAULT_THRESHOLDS: Mapping[str, float] = MappingProxyType(
 )
 
 
+# What an override must be to mean anything: a share outside 0 to 1, a
+# ratio below 1 or a negative count would turn a rule inside out, and a
+# window under a nanosecond holds nothing.
+_Range = tuple[Callable[[float], bool], str]
+_SHARE: _Range = (lambda v: 0.0 <= v <= 1.0, "a share from 0 to 1")
+_RATIO: _Range = (lambda v: v >= 1.0, "a ratio of at least 1")
+_COUNT: _Range = (lambda v: v >= 0.0, "a count of at least 0")
+_POSITIVE: _Range = (lambda v: v > 0.0, "positive")
+_AT_LEAST_ONE: _Range = (lambda v: v >= 1.0, "at least 1")
+_NANOSECOND: _Range = (lambda v: int(v * 1e9) >= 1, "at least one nanosecond")
+_LEVEL: _Range = (lambda v: 0.0 < v <= 1.0, "a level above 0 and at most 1")
+
+RANGES: Mapping[str, _Range] = MappingProxyType(
+    {
+        QUEUE_MEDIAN_WAITING: _COUNT,
+        KV_PREEMPTIONS: _COUNT,
+        PREFIX_HIT_RATIO_DROP: _SHARE,
+        PREFIX_MIN_QUERIED: _COUNT,
+        PREFIX_WORKING_SET_RATIO: _RATIO,
+        LOOP_STALL_FACTOR: _POSITIVE,
+        LOOP_STALL_FLOOR_NS: _POSITIVE,
+        LOOP_NO_BASELINE_FLOOR_NS: _POSITIVE,
+        LOOP_BASELINE_WINDOW_NS: _POSITIVE,
+        LOOP_MIN_BUSY_STEPS: _POSITIVE,
+        LOOP_MATCHED_BIN_MIN_STEPS: _POSITIVE,
+        LOOP_HEARTBEAT_GRACE_NS: _POSITIVE,
+        QUEUE_WITNESS_SHARE: _SHARE,
+        QUEUE_CONTRIBUTION: _SHARE,
+        QUEUE_STALL_SHARE: _SHARE,
+        QUEUE_FRONT_SHARE: _SHARE,
+        QUEUE_KV_SHARE: _SHARE,
+        QUEUE_COMPETITOR_FLOOR: _SHARE,
+        WORKLOAD_RATE_RATIO: _RATIO,
+        WORKLOAD_LENGTH_RATIO: _RATIO,
+        WORKLOAD_SHARE_DROP: _SHARE,
+        SELECTION_WINDOW_S: _NANOSECOND,
+        SELECTION_SPAN_CAP_S: _NANOSECOND,
+        SELECTION_MIN_REQUESTS: _AT_LEAST_ONE,
+        SELECTION_REFERENCE_MIN: _AT_LEAST_ONE,
+        SELECTION_ALPHA: _LEVEL,
+        SELECTION_MIN_ABOVE: _COUNT,
+    }
+)
+
+
+def range_error(key: str, value: float) -> str | None:
+    """Why ``value`` cannot be the finite threshold ``key`` of the table, or
+    None when it can."""
+    test, description = RANGES[key]
+    return (
+        None if test(value) else f"threshold {key} must be {description}, not {value!r}"
+    )
+
+
 def resolve_threshold(
     key: str, overrides: Mapping[str, float] | None = None
 ) -> tuple[float, bool]:
@@ -156,6 +210,7 @@ __all__ = [
     "QUEUE_MEDIAN_WAITING",
     "QUEUE_STALL_SHARE",
     "QUEUE_WITNESS_SHARE",
+    "RANGES",
     "SELECTION_ALPHA",
     "SELECTION_MIN_ABOVE",
     "SELECTION_MIN_REQUESTS",
@@ -166,5 +221,6 @@ __all__ = [
     "WORKLOAD_LENGTH_RATIO",
     "WORKLOAD_RATE_RATIO",
     "WORKLOAD_SHARE_DROP",
+    "range_error",
     "resolve_threshold",
 ]

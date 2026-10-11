@@ -37,7 +37,8 @@ validated [`stormlog.report` v1](report_contract.md) report with
 `warning`, else 0. The same artifact and options give the same report; the
 generation time can be fixed with `DiagnoseOptions(generated_at_ns=...)`.
 Thresholds can be overridden by key (`DiagnoseOptions(thresholds=...)`); an
-unknown key, or a value that is not a finite number, is refused.
+unknown key, a value that is not a finite number, or one outside the key's
+range (see [Thresholds](#diagnosis-thresholds)) is refused.
 
 The payload, `stormlog.inference_diagnosis` v1
 ([schema](schemas/inference_diagnosis_v1.schema.json)), holds:
@@ -122,7 +123,7 @@ exits `5`.
 | --- | --- |
 | 0 | the diagnosis completed with no `warning` finding, including `inconclusive` |
 | 3 | at least one `warning` finding |
-| 2 | a usage error: no artifact, a malformed `--window`, an unknown threshold key or one that is not a finite number |
+| 2 | a usage error: no artifact, a malformed `--window`, an unknown threshold key, or a value that is not a finite number or lies outside its key's range (a `--window-seconds` under a nanosecond among them) |
 | 5 | an unreadable artifact, report or threshold file |
 | 1 | anything unexpected |
 
@@ -618,6 +619,7 @@ samples, or any file for an artifact that names no run, is refused
 (`TelemetryError`, exit `5`), since its peaks would enter the ledger as this
 run's.
 
+(diagnosis-thresholds)=
 ## Thresholds
 
 Online triggers and the diagnoser read thresholds from one versioned table,
@@ -626,6 +628,13 @@ they cannot disagree about what a threshold is. A caller may override an
 entry; every result records the table version and whether it did. An override
 of a key the table lacks, or with a value that is not a finite number (a NaN,
 a string, a bool), is refused, as is a window floor (`min_scrapes`) below 2.
+A diagnosis also refuses a value outside its key's range
+(`diagnosis_thresholds.RANGES`), where the rule it sets would turn inside
+out: a share outside 0 to 1, a ratio below 1, a count below 0, a `host_stall`
+entry that is not positive, `selection.min_requests` or
+`selection.reference_min_requests` below 1, a `selection.alpha` that is not
+above 0 and at most 1, and a `selection.window_seconds` or
+`selection.span_cap_seconds` under a nanosecond.
 The values are provisional until they are read from real runs.
 
 | Key | Value | Meaning |
