@@ -602,7 +602,9 @@ def _declared(
 ) -> list[Subject]:
     flagged = {rid for window in windows if window.flagged for rid in window.requests}
     by_case = _measured(view)
-    declared = list(options.windows)
+    # Each window and request once, in the order given: a repeat would be
+    # assessed again, or counted again as a sample.
+    declared = list(dict.fromkeys(options.windows))
     by = DECLARED_BY_CALLER
     if not declared and not options.request_ids:
         declared, by = _watched(view), DECLARED_BY_WATCHER
@@ -611,7 +613,7 @@ def _declared(
         for start, end in declared
     ]
     if options.request_ids:
-        known = [rid for rid in options.request_ids if rid in view.client]
+        known = list(dict.fromkeys(r for r in options.request_ids if r in view.client))
         subjects.append(
             Subject(
                 key="requests:" + ",".join(known),

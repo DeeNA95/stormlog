@@ -93,7 +93,9 @@ stormlog infer diagnose --inspect diagnosis.json FINDING_ID [--all]
 `--window` and `--request` declare subjects and may be repeated; declared
 requests are compared, like a declared window's, with the unflagged requests
 of their cases that arrived before the first of them, and a difference of
-medians needs 20 in each arm, so one request alone cannot be explained.
+medians needs 20 in each arm, so one request alone cannot be explained. A
+window or request given twice counts once: the same request repeated is one
+sample, not twenty.
 `--case` (repeatable) keeps automatic selection to those cases' incidents;
 `--window-seconds` sets the base window of automatic selection;
 `--thresholds FILE` overrides entries of the threshold table from a JSON

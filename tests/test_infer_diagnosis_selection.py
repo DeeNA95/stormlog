@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from stormlog.infer.diagnosis import DiagnoseOptions, diagnose_artifact
 from stormlog.infer.diagnosis_context import Context
 from stormlog.infer.diagnosis_inputs import Line, read_input
 from stormlog.infer.diagnosis_join import ClientRequest, RunView, join
@@ -28,16 +29,25 @@ from tests.diagnosis_scenarios import MS, Engine, build_run, poisson_free
 from tests.vllm_execution_helpers import SECOND, WALL_OFFSET
 
 
-def _burst_run(tmp_path: Path, *, burst: int = 600) -> RunView:
+def _burst_artifact(tmp_path: Path, *, burst: int = 600) -> Path:
     """Two minutes at 2 requests/s, then 3 s at 200 requests/s."""
     calm = poisson_free(240, 10 * SECOND, 500 * MS, prefix="a")
     heavy = poisson_free(burst, 130 * SECOND, 5 * MS, prefix="b")
-    return join(read_input(build_run(tmp_path, calm + heavy, Engine(max_num_seqs=4))))
+    return build_run(tmp_path, calm + heavy, Engine(max_num_seqs=4))
+
+
+def _burst_run(tmp_path: Path, *, burst: int = 600) -> RunView:
+    return join(read_input(_burst_artifact(tmp_path, burst=burst)))
 
 
 @pytest.fixture(scope="module")
-def burst_view(tmp_path_factory: pytest.TempPathFactory) -> RunView:
-    return _burst_run(tmp_path_factory.mktemp("burst"))
+def burst_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _burst_artifact(tmp_path_factory.mktemp("burst"))
+
+
+@pytest.fixture(scope="module")
+def burst_view(burst_artifact: Path) -> RunView:
+    return join(read_input(burst_artifact))
 
 
 def test_fisher_s_exact_test_matches_known_tables() -> None:
@@ -145,6 +155,31 @@ def test_declared_requests_are_compared_with_earlier_ones_of_their_case(
     assert all(rid.startswith("a") for rid in subject.reference)
 
 
+def test_a_repeated_declared_request_counts_once(burst_view: RunView) -> None:
+    declared = ("b101",) * 20 + ("b100", "b101")
+
+    (subject,) = select(burst_view, SelectionOptions(request_ids=declared)).subjects
+
+    assert subject.requests == ["b101", "b100"]
+    assert subject.key == "requests:b101,b100"
+
+
+def test_one_request_declared_twenty_times_is_too_few_to_measure(
+    burst_artifact: Path,
+) -> None:
+    # Twenty copies of one request would pass MIN_PER_ARM as twenty samples.
+    report = diagnose_artifact(
+        burst_artifact, options=DiagnoseOptions(request_ids=("b500",) * 20)
+    )
+
+    (subject,) = report["payload"]["selection"]["subjects"]
+    assert subject["requests"] == 1 and report["findings"] == []
+    for kind in ("host_stall", "queue_saturation"):
+        assert "insufficient_samples" in report["payload"]["coverage"][kind]["reasons"]
+    for kind in ("longer_inputs", "longer_outputs"):
+        assert report["payload"]["coverage"][kind]["status"] != "assessed"
+
+
 def test_a_declared_case_keeps_selection_to_its_incidents(tmp_path: Path) -> None:
     calm = poisson_free(240, 10 * SECOND, 500 * MS, prefix="a")
     burst = poisson_free(600, 130 * SECOND, 5 * MS, prefix="b")
@@ -188,6 +223,16 @@ def test_a_declared_window_is_compared_with_earlier_unflagged_requests(
     (subject,) = selection.subjects
     assert subject.declared_by == "caller" and subject.incident
     assert len(subject.requests) == 200 and len(subject.reference) == 240
+
+
+def test_a_window_declared_twice_is_one_subject(burst_view: RunView) -> None:
+    start = 130 * SECOND + 1_790_000_000_000_000_000
+    window, other = (start, start + SECOND), (start, start + 2 * SECOND)
+
+    declared = SelectionOptions(windows=(window, other, window))
+
+    keys = [s.key for s in select(burst_view, declared).subjects]
+    assert len(keys) == 2 and len(set(keys)) == 2
 
 
 # ------------------------------------------------------------ censoring
