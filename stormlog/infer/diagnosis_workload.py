@@ -12,6 +12,7 @@ demand, at ``info``, so a finding about the engine is read beside them.
 
 from __future__ import annotations
 
+from statistics import median
 from typing import Any
 
 from scipy import stats
@@ -187,7 +188,7 @@ def _lengths(
     excess = median_difference(arms[0], arms[1])
     if excess is None:
         return _verdict(kind, subject, UNSUPPORTED, NO_REFERENCE)
-    reference = sorted(arms[1])[len(arms[1]) // 2]
+    reference = median(arms[1])  # the median the excess is measured from
     needed = resolve_threshold(WORKLOAD_LENGTH_RATIO, context.thresholds)[0]
     if excess.low <= 0 or reference + excess.estimate < needed * reference:
         return _verdict(kind, subject, ASSESSED, NOT_OBSERVED)

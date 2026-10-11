@@ -73,6 +73,28 @@ def test_longer_prompts_are_longer_inputs_only(tmp_path: Path) -> None:
     assert assess_load(context, subject).reasons == ["not_observed"]
 
 
+def test_longer_inputs_are_judged_against_the_reference_median(
+    tmp_path: Path,
+) -> None:
+    # An even reference arm, its middle values 1,000 and 1,100: its median is
+    # 1,050, and 1,157 tokens is 10.2% longer; against the upper middle,
+    # 1,100, the same excess of 107 tokens would read as only 9.7%.
+    reference = poisson_free(70, 10 * SECOND, 500 * MS, prefix="a", prompt=1000)
+    reference += poisson_free(70, 45 * SECOND, 500 * MS, prefix="c", prompt=1100)
+    subject = poisson_free(20, AT, 500 * MS, prefix="b", prompt=1157)
+    view = join(
+        read_input(build_run(tmp_path, reference + subject, Engine(max_num_seqs=64)))
+    )
+    start = AT + WALL_OFFSET
+    context = Context(
+        view, select(view, SelectionOptions(windows=((start, start + 10 * SECOND),)))
+    )
+
+    (finding,) = assess_inputs(context, context.subjects()[0]).findings
+
+    assert finding.observations[0].value == 107.0
+
+
 @pytest.mark.parametrize("shared, observed", [(0, True), (64, False)])
 def test_requests_that_stop_sharing_are_a_sharing_drop(
     tmp_path: Path, shared: int, observed: bool
