@@ -35,6 +35,7 @@ from .engine_adapters import get_adapter
 from .events import InferenceRequestEvent, InferenceSummaryEvent, JsonlEventWriter
 from .host_clock import host_boot_id, wall_clock_domain
 from .http_transport import RequestDeadlineExceeded, safe_error
+from .omlx_stats import OmlxStatsSampler
 from .open_loop import Arrival
 from .openai_client import (
     ChatCompletionResult,
@@ -118,6 +119,19 @@ class InferenceProfiler:
         self._late_calls = LateCalls()
         self._opened_artifact = False
         self.vllm_scraper = self._build_vllm_scraper()
+        self.omlx_stats = (
+            OmlxStatsSampler(
+                url=config.omlx_stats_url,
+                api_key=config.omlx_stats_api_key,
+                interval=config.omlx_stats_interval_seconds,
+                timeout=config.timeout_seconds,
+                session_id=self.session.session_id,
+                run_id=self.run_id,
+                server_version=config.server_version,
+            )
+            if config.omlx_stats_url is not None
+            else None
+        )
         self.span_receiver: OtlpSpanReceiver | None = None
         self._span_receiver_error: str | None = None
         self.traces = (
@@ -631,6 +645,23 @@ class InferenceProfiler:
         )
 
     async def _run_scraped_phase(
+        self,
+        request: "_PhaseRequest",
+        total_requests: int | None,
+        duration_seconds: float | None,
+    ) -> "_PhaseWindow":
+        if self.omlx_stats is None:
+            return await self._run_vllm_scraped_phase(
+                request, total_requests, duration_seconds
+            )
+        async with self.omlx_stats.phase(
+            request.writer.append, request.case.case_id, request.phase
+        ):
+            return await self._run_vllm_scraped_phase(
+                request, total_requests, duration_seconds
+            )
+
+    async def _run_vllm_scraped_phase(
         self,
         request: "_PhaseRequest",
         total_requests: int | None,

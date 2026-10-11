@@ -87,3 +87,20 @@ and audio duration also have explicit configurable limits.
 The [audio v1 schema](schemas/inference_audio_v1.schema.json) covers request,
 workload, summary and manifest variants. Native MLX telemetry remains in a
 separate sidecar; it never enters the inference context codec as wire v4.
+
+## Read-only oMLX statistics
+
+Opt in with `--engine omlx --omlx-stats-url
+http://127.0.0.1:8000/admin/api/stats`. Add `?scope=alltime` for lifetime
+counters or `?model=MODEL_ID` for model counters. The default is session/server
+scope. Only the documented token/request counters, uptime, average serving
+rates, cache efficiency and active/waiting request gauges are retained.
+The source response can contain credentials; its raw body is never recorded.
+
+`--omlx-stats-api-key-env ENV_NAME` supplies a separate admin key. Inference
+credentials are never reused for admin requests, even on the same origin.
+A missing/unauthorized stats endpoint is evidence loss, not an inference
+failure. Counter decreases and uptime restarts mark epoch changes; outage
+and sampling scope are explicit. Aggregate statistics can include other
+clients and do not prove request ownership, allocator usage or pure compute
+time. Sampling uses bounded GET requests to `/admin/api/stats` only.

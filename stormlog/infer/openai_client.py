@@ -141,11 +141,18 @@ class OpenAIChatCompletionsClient:
                         response, stream, started_at_ns, started_perf
                     )
         except urllib.error.HTTPError as exc:
-            message = safe_error(
-                exc.read(65536).decode("utf-8", errors="replace"),
-                secrets=(self.api_key,),
-            )
-            exc.close()
+            try:
+                with BoundedResponse(
+                    exc, deadline=started_perf + self.timeout_seconds, max_bytes=65536
+                ) as response:
+                    message = safe_error(
+                        response.read().decode("utf-8", errors="replace"),
+                        secrets=(self.api_key,),
+                    )
+            except Exception:
+                message = "Error response body unavailable or exceeded limits"
+            finally:
+                exc.close()
             raise EndpointHTTPError(exc.code, message) from exc
 
     def _prompt_payload(self, prompt: str) -> dict[str, Any]:

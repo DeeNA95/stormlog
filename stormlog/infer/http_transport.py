@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import math
 import os
+import queue
 import socket
 import threading
 import time
@@ -101,6 +102,7 @@ class _Answered:
         deadline = (
             time.perf_counter() + timeout if isinstance(timeout, (int, float)) else None
         )
+        self._create_connection = _bounded_connection
         call()
         self._request_deadline = deadline
         if deadline is not None:
@@ -111,6 +113,12 @@ class _Answered:
             )
             self._deadline_timer.daemon = True
             self._deadline_timer.start()
+
+    def close(self) -> None:
+        timer = getattr(self, "_deadline_timer", None)
+        if timer is not None:
+            timer.cancel()
+        getattr(super(), "close")()
 
     def _expired(self) -> bool:
         deadline = getattr(self, "_request_deadline", None)
@@ -343,3 +351,62 @@ def json_headers(
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     return headers
+
+
+_DNS_SLOTS = threading.BoundedSemaphore(64)
+
+
+def _addresses(address: tuple[str, int], deadline: float) -> list[Any]:
+    """Bound DNS waiting and the number of unresolved daemon lookups."""
+    if not _DNS_SLOTS.acquire(timeout=max(0, deadline - time.perf_counter())):
+        raise TimeoutError("DNS resolution capacity deadline exceeded")
+    replies: queue.Queue[Any] = queue.Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            replies.put(socket.getaddrinfo(*address, 0, socket.SOCK_STREAM))
+        except Exception as exc:
+            replies.put(exc)
+        finally:
+            _DNS_SLOTS.release()
+
+    thread = threading.Thread(target=resolve, daemon=True, name="stormlog-dns")
+    try:
+        thread.start()
+    except BaseException:
+        _DNS_SLOTS.release()
+        raise
+    try:
+        result = replies.get(timeout=max(0, deadline - time.perf_counter()))
+    except queue.Empty as exc:
+        raise TimeoutError("DNS resolution total deadline exceeded") from exc
+    if isinstance(result, Exception):
+        raise result
+    return list(result)
+
+
+def _bounded_connection(
+    address: tuple[str, int],
+    timeout: float,
+    source_address: tuple[str, int] | None = None,
+) -> socket.socket:
+    deadline = time.perf_counter() + timeout
+    last: OSError | None = None
+    for family, kind, protocol, _canonical, destination in _addresses(
+        address, deadline
+    ):
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise TimeoutError("Connection total deadline exceeded")
+        sock = socket.socket(family, kind, protocol)
+        try:
+            sock.settimeout(remaining)
+            if source_address is not None:
+                sock.bind(source_address)
+            sock.connect(destination)
+            sock.settimeout(max(1e-9, deadline - time.perf_counter()))
+            return sock
+        except OSError as exc:
+            last = exc
+            sock.close()
+    raise last if last is not None else OSError("No endpoint addresses")

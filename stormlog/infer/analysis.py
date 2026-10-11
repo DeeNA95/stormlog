@@ -124,7 +124,7 @@ def analyze_inference_events(
     if timelines:
         join["case_coverage"] = _coverage_counts(cases)
     failed = [record for record in requests if record.get("status") != "ok"]
-    return {
+    report: dict[str, Any] = {
         # 2: per-case populations and intervals; throughput divides by the
         # case's declared interval (throughput.interval_seconds) instead of
         # the span of its successful requests (the old duration_seconds).
@@ -149,6 +149,14 @@ def analyze_inference_events(
             "execution": execution_report(records),
         },
     }
+    if any(record.get("event_type") == "infer.mlx.stats" for record in records):
+        from .omlx_stats import stats_report
+
+        try:
+            report["telemetry"]["mlx"] = {"omlx_stats": stats_report(records)}
+        except ValueError as exc:
+            raise InferInputError(str(exc)) from exc
+    return report
 
 
 ANALYSIS_VERSION = 2
