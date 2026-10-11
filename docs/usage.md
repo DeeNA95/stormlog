@@ -455,6 +455,9 @@ Install `stormlog[viz]` before relying on PNG or HTML exports.
 
 ## When to switch to the TUI
 
+Launch the default TUI with either `stormlog` or `stormlog tui`; neither needs
+options. Use `stormlog tui --framework mlx` to select MLX explicitly.
+
 Use the TUI when you want:
 
 - a live monitoring session without writing custom code
