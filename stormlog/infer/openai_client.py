@@ -19,7 +19,7 @@ from .http_transport import EndpointHTTPError as EndpointHTTPError
 from .http_transport import NoResponseError as NoResponseError
 from .http_transport import ignored_proxies as ignored_proxies
 from .http_transport import inference_opener as inference_opener
-from .http_transport import safe_error
+from .http_transport import safe_error as safe_error
 from .http_transport import validate_http_endpoint as _validate_http_endpoint
 
 __all__ = [

@@ -17,7 +17,6 @@ from pathlib import Path
 import pytest
 
 from stormlog.infer.analysis import analyze_inference_events, format_analysis_text
-from stormlog.infer.audio_client import AudioCallError, AudioClient
 from stormlog.infer.audio_config import AudioProfileConfig
 from stormlog.infer.audio_events import AudioRequestEvent
 from stormlog.infer.audio_profile import AudioProfiler
