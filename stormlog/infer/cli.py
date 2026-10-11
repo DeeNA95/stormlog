@@ -158,6 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Separate admin credential environment variable",
     )
     profile_parser.add_argument("--omlx-stats-interval", type=float, default=1.0)
+    profile_parser.add_argument(
+        "--omlx-stats-cookie-env",
+        help="Environment variable containing a separate omlx_admin_session token",
+    )
     profile_parser.add_argument("--model", required=True, help="Model name")
     profile_parser.add_argument(
         "--run-id", default=None, help="Shared run ID for an on-host collector"
@@ -888,7 +892,8 @@ def _profile_config(args: argparse.Namespace) -> ProfileConfig:
         server_version=args.server_version,
         max_response_bytes=args.max_response_bytes,
         omlx_stats_url=args.omlx_stats_url,
-        omlx_stats_api_key=_admin_key(args),
+        omlx_stats_api_key=_admin_credential(args.omlx_stats_api_key_env),
+        omlx_stats_cookie=_admin_credential(args.omlx_stats_cookie_env),
         omlx_stats_interval_seconds=args.omlx_stats_interval,
         endpoint=endpoint,
         model=args.model,
@@ -955,12 +960,13 @@ def _profile_config(args: argparse.Namespace) -> ProfileConfig:
     )
 
 
-def _admin_key(args: argparse.Namespace) -> str | None:
-    return (
-        os.environ.get(args.omlx_stats_api_key_env)
-        if args.omlx_stats_api_key_env
-        else None
-    )
+def _admin_credential(name: str | None) -> str | None:
+    if name is None:
+        return None
+    value = os.environ.get(name)
+    if not value:
+        raise ValueError(f"Admin credential environment variable {name} is unset")
+    return value
 
 
 def _extra_body(raw: str | None) -> dict[str, Any] | None:

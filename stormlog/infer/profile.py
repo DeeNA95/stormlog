@@ -123,6 +123,7 @@ class InferenceProfiler:
             OmlxStatsSampler(
                 url=config.omlx_stats_url,
                 api_key=config.omlx_stats_api_key,
+                cookie=config.omlx_stats_cookie,
                 interval=config.omlx_stats_interval_seconds,
                 timeout=config.timeout_seconds,
                 session_id=self.session.session_id,

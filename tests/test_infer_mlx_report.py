@@ -1,6 +1,9 @@
 """Associations, process epochs and uncertainty-aware case placement."""
 
 import copy
+import json
+import subprocess
+import sys
 import time
 from dataclasses import replace
 
@@ -57,6 +60,12 @@ def client(item, *, run_id="join-run", boot=None):
         {
             "event_type": "infer.request",
             "endpoint": "http://127.0.0.1:8000/v1/completions",
+            "schema_version": 1,
+            "phase": "measured",
+            "case_id": "c1",
+            "status": "ok",
+            "started_at_ns": capture["started_at_ns"],
+            "ended_at_ns": capture["ended_at_ns"],
         },
         {
             "event_type": "infer.phase_window",
@@ -147,3 +156,29 @@ def test_overlapping_physical_epochs_are_ambiguous(native, monkeypatch):
     assert report["association_counts"]["ambiguous"] == 2
     assert all(not p["cases"][0]["available"] for p in report["processes"])
     assert all(p["memory"]["samples"] > 0 for p in report["processes"])
+
+
+def test_cli_offline_join_blocks_all_framework_and_server_imports(native, tmp_path):
+    item = load_evidence(native)
+    path = tmp_path / "client.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in client(item)))
+    code = """
+import importlib.abc
+import sys
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'mlx', 'torch', 'tensorflow', 'jax', 'omlx', 'mlx_lm', 'mlx_audio'}:
+            raise AssertionError('Offline import attempted: ' + fullname)
+sys.meta_path.insert(0, Block())
+from stormlog.infer.cli import main
+raise SystemExit(main(['analyze', sys.argv[1], '--mlx-server-evidence', sys.argv[2], '--format', 'json']))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(path), str(native)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["telemetry"]["mlx"]["association_counts"]["declared_direct"] == 1

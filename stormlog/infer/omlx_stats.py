@@ -141,11 +141,14 @@ class OmlxStatsSampler:
         session_id: str,
         run_id: str,
         server_version: str | None,
+        cookie: str | None = None,
     ) -> None:
         self.identity = stats_identity(url)
         if not math.isfinite(interval) or interval <= 0:
             raise ValueError("oMLX statistics interval must be positive and finite")
         self.url, self.api_key, self.interval = url, api_key, interval
+        _validate_admin_credentials(api_key, cookie)
+        self.cookie = cookie
         self.timeout = min(timeout, 5.0)
         self.session_id, self.run_id, self.server_version = (
             session_id,
@@ -203,6 +206,8 @@ class OmlxStatsSampler:
         # This is exclusively the separately supplied admin key.
         if self.api_key:
             headers["Authorization"] = "Bearer " + self.api_key
+        if self.cookie:
+            headers["Cookie"] = "omlx_admin_session=" + self.cookie
         request = urllib.request.Request(self.url, headers=headers, method="GET")
         with self.opener.open(request, timeout=self.timeout) as raw:
             with BoundedResponse(
@@ -316,6 +321,28 @@ class OmlxStatsSampler:
 
 def _epoch_field(name: str) -> bool:
     return FIELDS[name][1] == "counter" or name == "uptime_seconds"
+
+
+def _validate_admin_credentials(api_key: str | None, cookie: str | None) -> None:
+    if api_key and cookie:
+        raise ValueError("Choose one separate admin bearer key or session cookie")
+    for value in (api_key, cookie):
+        _validate_admin_value(value)
+    if cookie is not None and any(ch in cookie for ch in ";,="):
+        raise ValueError(
+            "Supply only the omlx_admin_session token, not a Cookie header"
+        )
+
+
+def _validate_admin_value(value: str | None) -> None:
+    if value is not None and (
+        not value
+        or len(value) > 8192
+        or any(ord(ch) < 33 or ord(ch) > 126 for ch in value)
+    ):
+        raise ValueError(
+            "Admin credentials must be bounded printable ASCII without whitespace"
+        )
 
 
 def validate_stats_record(record: dict[str, Any]) -> None:

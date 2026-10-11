@@ -9,7 +9,9 @@ from __future__ import annotations
 import importlib
 import importlib.metadata
 import os
+import signal
 import sys
+import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -135,7 +137,11 @@ def _validate_omlx_config(args: Sequence[str]) -> None:
 
         settings = json.loads(bounded_file(config, 1024**2))
         cluster = settings.get("cluster", {}) if isinstance(settings, dict) else {}
-        if isinstance(cluster, dict) and cluster.get("enabled"):
+        server = settings.get("server", {}) if isinstance(settings, dict) else {}
+        distributed = isinstance(server, dict) and server.get(
+            "distributed_inference_enabled"
+        )
+        if (isinstance(cluster, dict) and cluster.get("enabled")) or distributed:
             raise ValueError(
                 "Distributed oMLX settings are not qualified for process-local capture"
             )
@@ -152,10 +158,25 @@ def server_arguments(module: str, args: Sequence[str]) -> Iterator[None]:
 
 
 def launch(launcher: Launcher, args: Sequence[str]) -> None:
-    with server_arguments(launcher.module, args):
+    with server_arguments(launcher.module, args), server_signals():
         module = importlib.import_module(launcher.module)
         entrypoint: Callable[[], Any] = getattr(module, "main")
         entrypoint()
+
+
+@contextmanager
+def server_signals() -> Iterator[None]:
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        previous = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGINT, signal.SIGTERM)
+        }
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def redacted_arguments(args: Sequence[str]) -> list[str]:

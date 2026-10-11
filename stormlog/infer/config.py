@@ -159,6 +159,7 @@ class ProfileConfig:
     max_response_bytes: int = 16 * 1024**2
     omlx_stats_url: str | None = None
     omlx_stats_api_key: str | None = None
+    omlx_stats_cookie: str | None = None
     omlx_stats_interval_seconds: float = 1.0
 
     def __post_init__(self) -> None:
@@ -179,7 +180,10 @@ class ProfileConfig:
         self._validate_stats_options()
 
     def _validate_stats_options(self) -> None:
-        if self.omlx_stats_api_key is not None and self.omlx_stats_url is None:
+        if (
+            any((self.omlx_stats_api_key, self.omlx_stats_cookie))
+            and self.omlx_stats_url is None
+        ):
             raise ValueError("oMLX admin credential requires a statistics URL")
         if self.omlx_stats_url is not None and self.engine != "omlx":
             raise ValueError("oMLX statistics require --engine omlx")

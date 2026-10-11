@@ -2,6 +2,7 @@
 
 import json
 import os
+import signal
 import sys
 import time
 from types import SimpleNamespace
@@ -51,6 +52,7 @@ def test_embedding_same_pid_passive_sampling_and_primary_exception(tmp_path):
 
 def test_launcher_restores_arguments_and_records_clean_metadata(tmp_path, monkeypatch):
     import importlib.metadata
+
     import stormlog.infer.mlx_launchers as launchers
 
     original_version = importlib.metadata.version
@@ -64,6 +66,8 @@ def test_launcher_restores_arguments_and_records_clean_metadata(tmp_path, monkey
 
     def main():
         seen.append((os.getpid(), list(sys.argv)))
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
     monkeypatch.setattr(
         launchers.importlib,
@@ -75,6 +79,9 @@ def test_launcher_restores_arguments_and_records_clean_metadata(tmp_path, monkey
         ),
     )
     argv = sys.argv
+    handlers = {
+        signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)
+    }
     secret = "my-private-server-api-key"
     directory, outcome = run_mlx_server(
         engine="mlx-lm",
@@ -91,6 +98,9 @@ def test_launcher_restores_arguments_and_records_clean_metadata(tmp_path, monkey
         )
     ]
     assert sys.argv is argv
+    assert all(
+        signal.getsignal(signum) == handler for signum, handler in handlers.items()
+    )
     manifest = load_evidence(directory).manifest
     assert manifest["engine"]["version_provenance"] == "installed_distribution_metadata"
     for path in directory.rglob("*.json"):
@@ -124,9 +134,13 @@ def test_unknown_versions_and_existing_omlx_settings_are_not_implicit(
         prepare_launcher("omlx", [])
     base = tmp_path / "base"
     base.mkdir()
-    (base / "settings.json").write_text(json.dumps({"cluster": {"enabled": True}}))
-    with pytest.raises(ValueError, match="Distributed"):
-        prepare_launcher("omlx", ["--base-path", str(base)])
+    for settings in (
+        {"cluster": {"enabled": True}},
+        {"server": {"distributed_inference_enabled": True}},
+    ):
+        (base / "settings.json").write_text(json.dumps(settings))
+        with pytest.raises(ValueError, match="Distributed"):
+            prepare_launcher("omlx", ["--base-path", str(base)])
 
 
 def test_arguments_redact_both_credential_forms_and_urls():

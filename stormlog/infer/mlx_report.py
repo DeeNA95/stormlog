@@ -74,7 +74,13 @@ def _artifact(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     artifacts = [
         record for record in records if record.get("event_type") == "infer.artifact"
     ]
-    unique = {str(record.get("context", {}).get("run_id")) for record in artifacts}
+    unique = {
+        tuple(
+            record.get("context", {}).get(key)
+            for key in ("run_id", "session_id", "clock_domain", "host", "pid")
+        )
+        for record in artifacts
+    }
     return artifacts[0] if artifacts and len(unique) == 1 else None
 
 

@@ -35,11 +35,13 @@ PINNED_RESPONSE = {
 
 
 @contextlib.contextmanager
-def endpoint(*, failing=False):
+def endpoint(*, failing=False, cookie_headers=None):
     calls = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            if cookie_headers is not None:
+                cookie_headers.append(self.headers.get("Cookie"))
             calls.append(("GET", self.path, self.headers.get("Authorization")))
             self.send_response(401 if failing else 200)
             self.end_headers()
@@ -218,3 +220,51 @@ def test_cancelled_scrape_is_recorded_without_late_append(monkeypatch):
         assert len(records) == 1
 
     asyncio.run(run())
+
+
+def test_admin_session_cookie_is_separate_and_never_retained(tmp_path):
+    cookies = []
+    token = "normally-issued-admin-session-token"
+    with endpoint(cookie_headers=cookies) as (url, calls):
+        config = ProfileConfig(
+            endpoint=url + "/v1/chat/completions",
+            model="model",
+            engine="omlx",
+            concurrency=(1,),
+            input_tokens=(4,),
+            output_tokens=(2,),
+            output_path=str(tmp_path / "run.jsonl"),
+            stream=False,
+            request_count=1,
+            tokenizer="none",
+            system_sampler="none",
+            api_key="inference-key",
+            omlx_stats_url=url + "/admin/api/stats",
+            omlx_stats_cookie=token,
+        )
+        InferenceProfiler(config).run()
+    assert cookies and all(
+        cookie == "omlx_admin_session=" + token for cookie in cookies
+    )
+    assert all(auth is None for method, _, auth in calls if method == "GET")
+    assert all(
+        auth == "Bearer inference-key" for method, _, auth in calls if method == "POST"
+    )
+    assert token not in (tmp_path / "run.jsonl").read_text()
+
+
+@pytest.mark.parametrize(
+    "cookie", ["bad\r\nheader", "cookie;other=value", "cookie=value", " ", "x" * 8193]
+)
+def test_invalid_admin_cookie_fails_before_traffic(cookie):
+    with pytest.raises(ValueError):
+        OmlxStatsSampler(
+            url="http://127.0.0.1:1/admin/api/stats",
+            api_key=None,
+            cookie=cookie,
+            interval=1,
+            timeout=1,
+            session_id="s",
+            run_id="r",
+            server_version=None,
+        )
