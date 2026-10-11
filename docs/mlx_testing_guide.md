@@ -164,6 +164,14 @@ For a sink directory use `load_telemetry_sessions("mlx-telemetry")`; for tracker
 JSON exports use the same loader. Default session selection follows the shared
 completed/interrupted/incomplete policy.
 
+Tracker JSON and the TUI's MLX JSON export retain a `telemetry_events` array
+alongside tracking aggregates. The shared loader recognizes this envelope;
+`mlxmemprof analyze mlx-tracking.json` and `stormlog query` can read these
+exports directly, including nullable counters and interrupted captures.
+The exported summary preserves session status even when the retained window
+omits the start event. Offline sample metrics describe those retained events;
+use an append-only sink when the full history is needed.
+
 ## Verification
 
 ```bash
