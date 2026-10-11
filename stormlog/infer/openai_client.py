@@ -50,6 +50,8 @@ class ChatCompletionResult:
     finish_reason: str | None = None
     response_id: str | None = None
     system_fingerprint: str | None = None
+    # The response's HTTP status, as received.
+    http_status: int | None = None
 
 
 class OpenAIChatCompletionsClient:
@@ -92,11 +94,14 @@ class OpenAIChatCompletionsClient:
         stream: bool,
         stream_include_usage: bool,
         request_id: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> ChatCompletionResult:
         """Send one chat completion.
 
         ``request_id`` goes out as ``X-Request-Id``, which vLLM embeds in its
         own request id and in the ``gen_ai.request.id`` of the request span.
+        ``headers`` adds others, such as ``traceparent``; they cannot replace
+        the ones the client sets.
         """
         payload = {
             **self.extra_body,
@@ -108,20 +113,22 @@ class OpenAIChatCompletionsClient:
         if stream and stream_include_usage:
             payload["stream_options"] = {"include_usage": True}
         body = json.dumps(payload).encode("utf-8")
-        headers = {
+        request_headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream" if stream else "application/json",
         }
         if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
+            request_headers["Authorization"] = f"Bearer {self.api_key}"
         if request_id:
-            headers["X-Request-Id"] = request_id
+            request_headers["X-Request-Id"] = request_id
+        for name, value in (headers or {}).items():
+            request_headers.setdefault(name, value)
 
         _validate_http_endpoint(self.endpoint)
         request = urllib.request.Request(
             self.endpoint,
             data=body,
-            headers=headers,
+            headers=request_headers,
             method="POST",
         )
 
@@ -207,6 +214,7 @@ class OpenAIChatCompletionsClient:
             finish_reason=finish_reason,
             response_id=_optional_string(payload, "id"),
             system_fingerprint=_optional_string(payload, "system_fingerprint"),
+            http_status=_status(response),
         )
 
     def _read_streaming_response(
@@ -274,6 +282,7 @@ class OpenAIChatCompletionsClient:
             finish_reason=finish_reason,
             response_id=response_id,
             system_fingerprint=fingerprint,
+            http_status=_status(response),
         )
 
     def _choice_text(self, choice: dict[str, Any], *, stream: bool) -> str:
@@ -313,6 +322,17 @@ def _first_choice(payload: Any) -> dict[str, Any]:
         return {}
     first = choices[0]
     return first if isinstance(first, dict) else {}
+
+
+def _status(response: Any) -> int | None:
+    status = getattr(response, "status", None)
+    return status if isinstance(status, int) else None
+
+
+def _validate_http_endpoint(endpoint: str) -> None:
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("endpoint must use http:// or https://")
 
 
 def _stream_data(response: Any) -> Iterator[str]:

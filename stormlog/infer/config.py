@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from .arrivals import BURST, CLOSED, RATE_MODES, REPLAY, ArrivalSpec, ArrivalTrace
 from .cache_state import RESET_RETRY_SECONDS, UNSPECIFIED
 from .engine_adapters import TASK_PATHS, get_adapter
+from .export_config import ExportConfig
 from .prompts import REPEAT, PromptSpec
 
 if TYPE_CHECKING:
@@ -152,6 +153,8 @@ class ProfileConfig:
     # came from a file or from --slo flags. None records none.
     slo: SloSpec | None = None
     slo_source: str | None = None
+    # What to export, and where; nothing by default (docs/inference_export.md).
+    export: ExportConfig = field(default_factory=ExportConfig)
 
     engine: str = "generic"
     task: str = "chat"
