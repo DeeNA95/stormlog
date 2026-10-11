@@ -7,6 +7,7 @@ import copy
 import email.utils
 import io
 import json
+import socket
 import time
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from stormlog.infer.describe_server import (
     write_description,
 )
 from stormlog.infer.errors import InferInputError
+from stormlog.infer.host_clock import host_boot_id
 from stormlog.infer.manifest import (
     after_refusals,
     attach_manifest,
@@ -31,6 +33,8 @@ from stormlog.infer.manifest import (
     load_declarations,
 )
 from tests.infer_workload_helpers import run_profile_with_fake_client
+
+BOOT = host_boot_id()
 
 
 def _description(**changes: Any) -> dict[str, Any]:
@@ -168,7 +172,8 @@ def test_a_changed_identity_is_a_protocol_failure(tmp_path: Path) -> None:
 def test_an_after_description_that_cannot_be_compared_is_refused(
     tmp_path: Path, changes: dict[str, Any], reason: str
 ) -> None:
-    before = _description()
+    # On the client's own host and boot, so its clock stamped the run's end.
+    before = _description(host__hostname=socket.gethostname(), host__boot_id=BOOT)
     artifact = _profile(tmp_path, server_description=before)
     after = _later(before, **changes)
     with pytest.raises(InferInputError, match=reason):
@@ -276,6 +281,35 @@ def _skewed_run(description: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def test_the_clients_end_bounds_an_after_only_on_the_servers_own_clock() -> None:
+    # Codex on #302: a client on another host stamps the run's end by its
+    # own clock, which may run ahead of the server's, so an after taken once
+    # the run had ended could read as taken before it. The server's Date and
+    # each clock's own interval still bound it.
+    before = _description(observed_at_ns=1_000 * SECOND)
+    after = _later(before, observed_at_ns=1_011 * SECOND)
+
+    def run(domain: str) -> list[dict[str, Any]]:
+        identity = {"event_type": "infer.artifact", "context": {"clock_domain": domain}}
+        return [identity, *_skewed_run(before)[:1], _window(1_990, 2_000)]
+
+    elsewhere = run("client-box/boot-c/unix_epoch_ns")
+    assert after_refusals(elsewhere, after, run_id="r") == []
+    here = run("gpu-box/boot-1/unix_epoch_ns")
+    assert after_refusals(here, after, run_id="r") == [
+        "it was taken before the last measured phase ended"
+    ]
+
+
+def _window(started_s: int, drained_s: int) -> dict[str, Any]:
+    return {
+        "event_type": "infer.phase_window",
+        "phase": "measured",
+        "started_at_ns": started_s * SECOND,
+        "drained_at_ns": drained_s * SECOND,
+    }
+
+
 def test_an_after_must_be_taken_after_the_before() -> None:
     before = _description(observed_at_ns=1_000 * SECOND)
     earlier = _later(before, observed_at_ns=999 * SECOND)
@@ -371,7 +405,7 @@ def test_the_cli_attaches_or_refuses_with_exit_5(tmp_path: Path) -> None:
     stale = _write(tmp_path / "stale.json", _later(before, observed_at_ns=1))
     code, err = _cli("attach-manifest", str(artifact), str(stale))
     assert code == ExitCode.INVALID_INPUT
-    assert "before the last measured phase ended" in err
+    assert "taken before the before description" in err
 
     fresh = _write(tmp_path / "after.json", _later(before))
     code, _err = _cli("attach-manifest", str(artifact), str(fresh), "--role", "after")

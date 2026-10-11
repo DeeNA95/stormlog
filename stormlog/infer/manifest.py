@@ -188,8 +188,9 @@ def _timing_refusals(
     description: Mapping[str, Any],
     before: Mapping[str, Any],
 ) -> list[str]:
-    """Taken after the run: by the client's end, by the server's own clock,
-    and by each clock's interval.
+    """Taken after the run: by the client's end, when the client ran on the
+    server's host and boot, so one clock stamped both; by the server's own
+    clock; and by each clock's interval.
 
     The last two need no agreement between the clocks: the server stamped
     the after probe, asked once the run had ended, with its own Date; and
@@ -199,8 +200,7 @@ def _timing_refusals(
     observed = description.get("observed_at_ns")
     if not isinstance(observed, int):
         return ["it has no observation time"]
-    ended = last_measured_end_ns(records)
-    if ended is not None and observed < ended:
+    if _before_the_end(records, description, observed):
         return ["it was taken before the last measured phase ended"]
     answered = _after_probe_answered_ns(records)
     if answered is not None and observed < answered - _DATE_RESOLUTION_NS:
@@ -605,6 +605,29 @@ def _drift(before: Mapping[str, Any], after: Mapping[str, Any]) -> dict[str, Any
 def _server_devices(description: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     devices = (description.get("gpus") or {}).get("devices") or []
     return [device for device in devices if device.get("server_pids")]
+
+
+def _before_the_end(
+    records: Sequence[Mapping[str, Any]], description: Mapping[str, Any], observed: int
+) -> bool:
+    """Whether the description was taken before the client's last measured
+    phase ended, as far as one clock can tell (``_one_clock``)."""
+    ended = last_measured_end_ns(records)
+    return ended is not None and observed < ended and _one_clock(records, description)
+
+
+def _one_clock(
+    records: Sequence[Mapping[str, Any]], description: Mapping[str, Any]
+) -> bool:
+    """Whether the client's records and the description were stamped by one
+    wall clock: the artifact's clock domain names the description's host and
+    boot. Another host's clock may run ahead of or behind the server's."""
+    identity = next(
+        (r for r in records if r.get("event_type") == "infer.artifact"), None
+    )
+    domain = str(((identity or {}).get("context") or {}).get("clock_domain", ""))
+    hostname, boot_id = _host(description)
+    return bool(hostname and boot_id) and domain.split("/")[:2] == [hostname, boot_id]
 
 
 def _session_status(records: Sequence[Mapping[str, Any]]) -> Any:
