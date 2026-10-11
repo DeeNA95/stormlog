@@ -234,10 +234,14 @@ def _blob_name(blob: Path | None) -> tuple[str, str]:
 def local_files(
     directory: Path, *, hash_contents: bool, cache: Path | None = None
 ) -> list[ModelFile]:
-    """Each file of a local model directory, by size or by SHA-256."""
+    """Each file of a local model directory, by size or by SHA-256.
+
+    A digest cache kept inside the directory is no model file: hashing it
+    would change the weights' digest each time the cache is written.
+    """
     known = _load_cache(cache) if hash_contents else {}
     files = []
-    for path in _walk(directory):
+    for path in _walk(directory, leave_out=cache):
         relative = path.relative_to(directory).as_posix()
         try:
             stat = path.stat()
@@ -366,10 +370,14 @@ def _read_ref(repo: Path, name: str) -> str | None:
     return commit if _COMMIT.match(commit) else None
 
 
-def _walk(directory: Path) -> Iterator[Path]:
+def _walk(directory: Path, *, leave_out: Path | None = None) -> Iterator[Path]:
+    """Every file under the directory, but the one ``leave_out`` names."""
+    own = leave_out.resolve() if leave_out is not None else None
     for root, _dirs, names in sorted(os.walk(directory)):
         for name in sorted(names):
-            yield Path(root) / name
+            path = Path(root) / name
+            if own is None or path.resolve() != own:
+                yield path
 
 
 def _sha256(path: Path) -> str:

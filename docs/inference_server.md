@@ -29,7 +29,7 @@ stormlog infer describe-server --pid "$(pgrep -f 'vllm serve' | head -1)" \
 | `--python auto\|PATH\|none` | The interpreter asked for the Python and package versions (torch, triton, flashinfer, transformers, vllm). `auto` (the default) is the interpreter on the server's command line: a bare `python` is found on the server's own `PATH`, and a relative path from its working directory; one that cannot be found is not run. `auto` runs that interpreter as the describing user, so describing as root a server you do not trust, pass `--python none` or a path you chose. |
 | `--hash-weights` | Hash every file of a local model directory. |
 | `--verify-model-files` | Hash every hub-cache blob to check it against its name. |
-| `--digest-cache FILE` | Where `--hash-weights` keeps digests between runs. |
+| `--digest-cache FILE` | Where `--hash-weights` keeps digests between runs. A cache kept inside the model directory is not one of its files. |
 | `--no-gpu` | Describe without NVML. |
 
 The description is one JSON document, `stormlog.infer.server_description`

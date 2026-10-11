@@ -372,6 +372,18 @@ def test_local_digests_are_cached_by_path_size_mtime_and_inode(tmp_path: Path) -
     assert {item.path for item in first} == set(digests)
 
 
+def test_a_digest_cache_inside_the_model_is_no_model_file(tmp_path: Path) -> None:
+    # Codex on #302: the walk hashed the cache itself, which each description
+    # rewrites, so the weights' digest changed on every run.
+    directory = _local(tmp_path, WEIGHTS)
+    cache = directory / ".stormlog-digests.json"
+    first = local_files(directory, hash_contents=True, cache=cache)
+    second = local_files(directory, hash_contents=True, cache=cache)
+    assert cache.exists()
+    assert {item.path for item in second} == {"config.json", "model.safetensors"}
+    assert weights_digest(first) == weights_digest(second)
+
+
 def test_a_cached_digest_is_not_used_after_an_in_place_rewrite(tmp_path: Path) -> None:
     # rsync --inplace -t or cp --preserve keep the size and the mtime; the
     # change time still moves.
