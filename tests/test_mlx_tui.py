@@ -7,6 +7,7 @@ import pytest
 
 pytest.importorskip("textual")
 
+from stormlog.mlx.analyzer import analyze
 from stormlog.mlx.context_profiler import (
     clear_global_profiler,
     get_profile_summaries,
@@ -42,6 +43,12 @@ def test_explicit_mlx_session_passive_counters_nulls_and_export(tmp_path):
         )
         assert not session.force_cleanup()
         assert session.export_events(str(tmp_path / "events.json"), format="json")
+        exported = analyze(tmp_path / "events.json")
+        assert (
+            exported["session"]["session_id"]
+            == session.get_session_summary().session_id
+        )
+        assert exported["metrics"]["sampled_peak_bytes"] == 100
         assert session.export_events(str(tmp_path / "events.csv"), format="csv")
         session.clear_events()
         assert not session.pull_events()
