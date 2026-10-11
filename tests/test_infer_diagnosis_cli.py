@@ -220,6 +220,20 @@ def test_server_telemetry_from_another_run_is_invalid_input(
     assert code == 5 and "another-run" in capsys.readouterr().err
 
 
+def test_a_file_that_is_no_inference_artifact_is_invalid_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A JSONL with neither a profile's session or requests nor a server-only
+    # bundle's identity exited 0, as an inconclusive diagnosis; infer
+    # analyze and infer compare refuse it as invalid input, and so does
+    # diagnose now.
+    other = tmp_path / "other.jsonl"
+    other.write_text(json.dumps({"event_type": "something.else"}) + "\n")
+    assert main(["diagnose", str(other)]) == 5
+    assert "not an inference artifact" in capsys.readouterr().err
+    assert main(["analyze", str(other)]) == 5
+
+
 @pytest.mark.parametrize("seconds", ["0", "1e-12", "-1"])
 def test_a_window_under_a_nanosecond_is_a_usage_error(
     burst: Path, seconds: str, capsys: pytest.CaptureFixture[str]

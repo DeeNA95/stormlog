@@ -9,7 +9,12 @@ from typing import Any
 
 from ..exit_codes import ExitCode
 from ..report import load_report, write_report
-from .diagnosis import DiagnoseOptions, TelemetryError, diagnose_artifact
+from .diagnosis import (
+    ArtifactError,
+    DiagnoseOptions,
+    TelemetryError,
+    diagnose_artifact,
+)
 from .diagnosis_text import InspectError, inspect, render_text
 from .errors import InferInputError, InferUsageError
 
@@ -119,7 +124,7 @@ def _diagnose(args: argparse.Namespace, options: DiagnoseOptions) -> dict[str, A
         )
     except OSError as exc:
         raise InferInputError(f"cannot read {args.artifact}: {exc}") from exc
-    except TelemetryError as exc:
+    except (ArtifactError, TelemetryError) as exc:
         raise InferInputError(str(exc)) from exc
     except ValueError as exc:
         raise InferUsageError(str(exc)) from exc

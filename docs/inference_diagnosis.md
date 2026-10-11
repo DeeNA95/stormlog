@@ -124,7 +124,7 @@ exits `5`.
 | 0 | the diagnosis completed with no `warning` finding, including `inconclusive` |
 | 3 | at least one `warning` finding |
 | 2 | a usage error: no artifact, a malformed `--window`, an unknown threshold key, or a value that is not a finite number or lies outside its key's range (a `--window-seconds` under a nanosecond among them) |
-| 5 | an unreadable artifact, report or threshold file |
+| 5 | an unreadable artifact, report or threshold file, or a file that is no inference artifact (no `infer.session`, `infer.request` or `infer.artifact` record), which `infer analyze` and `infer compare` refuse too |
 | 1 | anything unexpected |
 
 ## Citing records

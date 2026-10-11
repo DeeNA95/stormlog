@@ -27,7 +27,7 @@ from .diagnosis_client import (
     assess_client_admission,
 )
 from .diagnosis_context import ASSESSED, PARTIAL, UNSUPPORTED, Assessment, Context
-from .diagnosis_inputs import read_input
+from .diagnosis_inputs import InputFile, read_input
 from .diagnosis_join import RunView, join
 from .diagnosis_kv import assess_kv
 from .diagnosis_memory import memory_ledger
@@ -101,6 +101,16 @@ class TelemetryError(ValueError):
     another run."""
 
 
+class ArtifactError(ValueError):
+    """A file that is not an inference artifact."""
+
+
+# What an inference artifact holds at least one of: a profile's session or
+# requests, or the identity a server-only bundle (an incident watcher's)
+# carries beside the engine's executions.
+_ARTIFACT_EVENT_TYPES = frozenset({"infer.session", "infer.request", "infer.artifact"})
+
+
 @dataclass(frozen=True)
 class DiagnoseOptions:
     """What the caller asked for, and what it asserts."""
@@ -142,6 +152,8 @@ def diagnose_artifact(
 
     Raises:
         OSError: when the artifact cannot be read.
+        ArtifactError: a file with no ``infer.session``, ``infer.request`` or
+            ``infer.artifact`` record, which is no inference artifact.
         TelemetryError: a ``server_telemetry`` file that cannot be read, or
             holds samples of a run other than the artifact's.
         ValueError: for unknown or non-finite threshold overrides, or empty
@@ -150,6 +162,7 @@ def diagnose_artifact(
     options = options or DiagnoseOptions()
     _check(options, windows)
     source = read_input(artifact)
+    _check_artifact(source)
     view = join(source)
     telemetry = _telemetry(options.server_telemetry, view.run_id)
     selection = select(
@@ -174,6 +187,17 @@ def diagnose_artifact(
         for assess in assessors
     ]
     return _report(context, assessments, options, windows or (), telemetry)
+
+
+def _check_artifact(source: InputFile) -> None:
+    """Refuse a file that is no inference artifact, as ``infer analyze`` and
+    ``infer compare`` do: diagnosing it would say only that nothing was
+    found."""
+    if not any(line.event_type in _ARTIFACT_EVENT_TYPES for line in source.lines):
+        raise ArtifactError(
+            f"{source.path}: not an inference artifact (no infer.session, "
+            "infer.request or infer.artifact records)"
+        )
 
 
 def _check(options: DiagnoseOptions, windows: Sequence[tuple[int, int]] | None) -> None:
@@ -483,6 +507,7 @@ __all__ = [
     "PAYLOAD_FORMAT",
     "PAYLOAD_VERSION",
     "REPORT_KIND",
+    "ArtifactError",
     "DiagnoseOptions",
     "TelemetryError",
     "diagnose_artifact",
