@@ -24,8 +24,21 @@ from typing import Any, Sequence
 from .host_clock import host_boot_id
 
 FORMAT = "stormlog.vllm_hook/1"
+# Every kind the hook writes. The reader keeps a record of any other kind, as
+# a later hook may write one, and only the kinds it knows have meaning.
 RECORD_KINDS = frozenset(
-    {"hello", "alias", "scheduled", "completed", "terminal", "heartbeat", "goodbye"}
+    {
+        "hello",
+        "alias",
+        "enqueued",
+        "scheduled",
+        "completed",
+        "terminal",
+        "pause",
+        "cache_reset",
+        "heartbeat",
+        "goodbye",
+    }
 )
 # A process with no heartbeat for this long is taken as gone: its epoch has
 # ended without a goodbye, and its pending iterations will never complete.
