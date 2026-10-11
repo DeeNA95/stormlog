@@ -8,6 +8,7 @@ import urllib.error
 
 import pytest
 
+from stormlog.infer.completions_client import OpenAICompletionsClient
 from stormlog.infer.http_transport import (
     ConnectError,
     EndpointHTTPError,
@@ -27,6 +28,34 @@ def complete(value):
     return value.complete(
         prompt="input", output_tokens=1, stream=False, stream_include_usage=False
     )
+
+
+@pytest.mark.parametrize(
+    "client_class", [OpenAIChatCompletionsClient, OpenAICompletionsClient]
+)
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://user:password@localhost/v1/chat/completions",
+        "http:///v1/chat/completions",
+        "http://localhost:bad/v1/chat/completions",
+        "http://localhost/v1/chat/completions#fragment",
+        "file:///tmp/model",
+    ],
+)
+def test_endpoint_validation_precedes_transport_creation(
+    monkeypatch, client_class, url
+):
+    def unexpected_transport():
+        pytest.fail(
+            "An invalid endpoint must be rejected before creating its transport"
+        )
+
+    monkeypatch.setattr(
+        "stormlog.infer.openai_client.inference_opener", unexpected_transport
+    )
+    with pytest.raises(ValueError):
+        client_class(endpoint=url, model="opaque", timeout_seconds=1)
 
 
 def test_dns_deadline_is_bounded_without_sending_a_request(monkeypatch):

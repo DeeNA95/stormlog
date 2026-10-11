@@ -12,10 +12,8 @@ import time
 import urllib.error
 from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, replace
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 from pathlib import Path
 from types import FrameType

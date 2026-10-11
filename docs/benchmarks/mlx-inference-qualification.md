@@ -206,3 +206,19 @@ now uses invalid mapping keys, retaining error/sequence assertions on supported
 versions. Reader type-ignore codes accommodate the differing stdlib `readinto`
 annotations. These changes preserve runtime behavior. The full rerun passed.
 Authenticated live oMLX stats remain unqualified as explicitly requested.
+
+
+## Checks after the base-branch merge (2026-10-11)
+
+Pulled the conflict-resolution merge `d6bf8ff` from `release/dev`. Removed
+duplicate profiler imports and the duplicate text-client endpoint validator,
+retaining the shared bounded-transport validation alongside the incoming
+export/trace-header and HTTP-status support. Regression cases cover missing
+hosts, invalid ports, URL credentials/fragments and unsupported schemes before
+transport construction, for chat and raw completion clients.
+
+CI-pinned Black/isort/flake8 passed the full source/test/example trees, mypy
+passed all 232 source files, and the complexity gate passed. The targeted MLX
+text/audio, HTTP transport, CLI portability, profiler and export integration
+suite passed **176 tests**. The live model artifacts above identify their
+pre-merge source digests; these post-merge checks cover portable integration.

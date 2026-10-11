@@ -329,12 +329,6 @@ def _status(response: Any) -> int | None:
     return status if isinstance(status, int) else None
 
 
-def _validate_http_endpoint(endpoint: str) -> None:
-    parsed = urllib.parse.urlparse(endpoint)
-    if parsed.scheme not in {"http", "https"}:
-        raise ValueError("endpoint must use http:// or https://")
-
-
 def _stream_data(response: Any) -> Iterator[str]:
     for data in _sse_frames(response):
         if data == "[DONE]":
