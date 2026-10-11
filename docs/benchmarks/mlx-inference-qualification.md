@@ -175,16 +175,34 @@ gate without prerequisites fails; default ordinary tests skip its three
 unconfigured live cases. The local limited qualification here deliberately
 leaves authenticated stats unqualified rather than making that full gate green.
 
-Validation: 1,980 inference tests passed, three unconfigured live tests skipped;
-44 focused follow-up tests passed after the final distributed-settings guard.
-Offline framework/server-blocked import/CLI joins passed. Changed code passed
-formatting/lint and complexity <=10. Focused typing passed with the repository's
-existing unused-ignore diagnostic disabled; this is not a claim that the plain
-repository-wide strict type check is clean. The wheel built and was installed
-in a fresh client environment; copied text/audio native joins and CLI help
-passed with MLX, all server packages, PyTorch, TensorFlow and JAX absent.
-Packaging/workflow contracts passed 12 tests; documentation contracts passed
-96 tests. Sphinx HTML built with 29 warnings:
-three untracked local planning documents outside the toctree and 26 ambiguous
-`bytes` cross-references from generated autodoc. This is not a warnings-as-errors
-docs pass. Remote CI was not run locally.
+Initial protocol validation passed 1,980 inference tests with three unconfigured
+live tests skipped; 44 focused follow-up tests passed after the distributed-settings
+guard. Copied text/audio joins and CLI help passed in an installed-wheel client
+with MLX, all server packages, PyTorch, TensorFlow and JAX absent.
+
+## Publication checks (2026-10-11)
+
+- Full locally supported CI suite: **3,567 passed, 25 skipped**, using four
+  workers on Python 3.14.7. TensorFlow/JAX matrix tests were excluded because
+  those frameworks are not installed locally; their remote jobs remain separate.
+- TUI pilot/snapshot suite: 18 passed. Terminal smoke: one passed. Explicit
+  native Apple Silicon Metal gate: four passed. Final affected vLLM tests:
+  141 passed, one optional benchmark skipped. Documentation contracts: 96 passed.
+- Repository-wide Black 24.3.0, isort 8.0.1 and flake8 7.3.0 passed using the
+  pinned Python 3.10 CI environment. Mypy 1.8.0 (CI) and 2.4.0 (local Python
+  3.14) both passed all 209 source files without disabling unused-ignore checks.
+- Complexity <=10 and the workflow audit passed. Source and wheel distributions
+  built in isolated environments and passed `twine check`.
+- The exact tracked documentation, copied to a temporary source directory,
+  passed a clean `sphinx -E -W --keep-going` HTML build with no warnings.
+  Built-in `bytes` type references are explicitly qualified, including dataclass
+  signatures, instead of resolving to unrelated properties named `bytes`.
+  User-owned untracked planning pages remain untouched and outside that published
+  source set; building every local page still reports their orphan warnings.
+
+The broad run initially exposed a pre-existing fixture assumption: Python 3.14
+can JSON-encode deeply nested lists iteratively. Its serialization-failure test
+now uses invalid mapping keys, retaining error/sequence assertions on supported
+versions. Reader type-ignore codes accommodate the differing stdlib `readinto`
+annotations. These changes preserve runtime behavior. The full rerun passed.
+Authenticated live oMLX stats remain unqualified as explicitly requested.
