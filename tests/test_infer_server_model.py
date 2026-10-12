@@ -384,6 +384,31 @@ def test_a_digest_cache_inside_the_model_is_no_model_file(tmp_path: Path) -> Non
     assert weights_digest(first) == weights_digest(second)
 
 
+@pytest.mark.parametrize("spelling", ["relative", "through_a_link", "dotdot"])
+def test_a_digest_cache_inside_the_model_is_left_out_however_it_is_named(
+    tmp_path: Path, spelling: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gate-213-codex's F4 (mutant 302c_no_resolve): the walk leaves out the
+    # file the cache path resolves to, not the path as given.
+    directory = _local(tmp_path, WEIGHTS)
+    name = ".stormlog-digests.json"
+    if spelling == "relative":
+        monkeypatch.chdir(directory)
+        cache = Path(name)
+    elif spelling == "through_a_link":
+        link = tmp_path / "link"
+        link.symlink_to(directory, target_is_directory=True)
+        cache = link / name
+    else:
+        (directory / "sub").mkdir()
+        cache = directory / "sub" / ".." / name
+    first = local_files(directory, hash_contents=True, cache=cache)
+    second = local_files(directory, hash_contents=True, cache=cache)
+    assert (directory / name).exists()
+    assert {item.path for item in second} == {"config.json", "model.safetensors"}
+    assert weights_digest(first) == weights_digest(second)
+
+
 def test_a_cached_digest_is_not_used_after_an_in_place_rewrite(tmp_path: Path) -> None:
     # rsync --inplace -t or cp --preserve keep the size and the mtime; the
     # change time still moves.
