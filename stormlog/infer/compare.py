@@ -112,7 +112,8 @@ class ComparisonSpec:
     # Pre-registered fallback budgets: (metric name or pattern, budget, unit).
     fallbacks: tuple[tuple[str, float, str], ...] = ()
     # The pre-registered fewest complete blocks, for the attainment gate as
-    # for the metric gates (whose rules carry it too).
+    # for the metric gates: a gate rule without one takes it, and a rule that
+    # names another is refused.
     min_complete_blocks: int | None = None
 
     def __post_init__(self) -> None:
@@ -139,6 +140,9 @@ class ComparisonSpec:
             raise InferUsageError(
                 "--family any_regression gates with the significant rule"
             )
+        object.__setattr__(
+            self, "gates", _with_floor(self.gates, self.min_complete_blocks)
+        )
 
     def gate_for(self, metric: str) -> GateRule | None:
         """The gate on a metric: the last pattern that matches its name.
@@ -192,6 +196,23 @@ class ComparisonSpec:
         else:
             statement = f"{value} (pre-registered)"
         return {"preregistered": value, "floor": MIN_GATE_PAIRS, "statement": statement}
+
+
+def _with_floor(
+    gates: tuple[tuple[str, GateRule], ...], floor: int | None
+) -> tuple[tuple[str, GateRule], ...]:
+    """Each gate's rule with the comparison's pre-registered block floor."""
+    if floor is None:
+        return gates
+    floored = []
+    for pattern, rule in gates:
+        if rule.min_complete_blocks not in (None, floor):
+            raise InferUsageError(
+                f"gate {pattern} pre-registers {rule.min_complete_blocks} complete "
+                f"blocks, the comparison {floor}"
+            )
+        floored.append((pattern, replace(rule, min_complete_blocks=floor)))
+    return tuple(floored)
 
 
 def _share(value: float | None, *, low_open: bool) -> bool:

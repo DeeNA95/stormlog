@@ -886,6 +886,43 @@ def test_the_preregistered_block_count_holds_the_attainment_gate_too() -> None:
     assert comparison.to_payload()["spec"]["min_complete_blocks"]["preregistered"] == 6
 
 
+def _losing(*blocks: int) -> list[RunSummary]:
+    """A candidate arm whose runs in these blocks ended in a protocol failure."""
+    candidate = [_run("candidate", i, e, attainment=0.995) for i, e in enumerate(SAME)]
+    for block in blocks:
+        candidate[block] = _run(
+            "candidate",
+            block,
+            100.0,
+            started=block,
+            protocol=("external:preempted",),
+            attainment=0.995,
+        )
+    return candidate
+
+
+def test_the_specs_block_floor_holds_gates_whose_rules_carry_none() -> None:
+    # gate-213-codex's F2: a ComparisonSpec(min_complete_blocks=6) whose gate
+    # rules carried no floor reported 6 as pre-registered, yet judged its
+    # metric gates with none: a gate passed on 4 complete blocks.
+    baseline, _ = _arms(SAME)
+    spec = ComparisonSpec(gates=E2E_GATE, min_complete_blocks=6)
+    assert spec.gate_for("client.e2e.p95") == replace(
+        E2E_GATE[0][1], min_complete_blocks=6
+    )
+    comparison = compare_runs(baseline, _losing(2, 4), spec)
+    gate = comparison.cases[CASE]["metrics"]["client.e2e.p95"].gate
+    assert (gate.status, gate.reason) == ("not_evaluable", "blocks_below_preregistered")
+    # A rule that names another floor contradicts the spec's.
+    other = (("client.e2e.p95", replace(E2E_GATE[0][1], min_complete_blocks=4)),)
+    with pytest.raises(
+        InferUsageError,
+        match="^gate client.e2e.p95 pre-registers 4 complete blocks, "
+        "the comparison 6$",
+    ):
+        ComparisonSpec(gates=other, min_complete_blocks=6)
+
+
 def test_the_attainment_gate_counts_in_the_reports_gate_totals() -> None:
     # Codex on #303: with only --min-attainment, the report said "every gate
     # passed (0 gates)", or "1 gate(s) failed ... of 0", and metrics.gates

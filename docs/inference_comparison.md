@@ -649,6 +649,12 @@ leaves the contrast `not_evaluable: control_failed`: `compare_runs` reads
 that from the runs, and a caller of `compare_values`, which sees values
 alone, passes `unavailable="control_failed"`.
 
+A `ComparisonSpec(min_complete_blocks=N)` gives its floor to every gate
+whose `GateRule` names none, as `--min-complete-blocks` does, so its metric
+gates and its attainment gate need the same N complete pairs; a rule that
+names another floor is refused (`gate <pattern> pre-registers M complete
+blocks, the comparison N`).
+
 ## Related pages
 
 - [Inference Profiling](inference.md)
