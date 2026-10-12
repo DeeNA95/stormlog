@@ -66,6 +66,26 @@ def test_a_comparison_without_gates_reports_and_exits_0(
     assert "client.e2e.p95" in out
 
 
+def test_a_copy_of_a_baseline_run_with_a_record_appended_is_refused(
+    arms: dict[str, list[str]], tmp_path: Path
+) -> None:
+    # gate-213-codex's F1: copies of the baseline, each with one record
+    # appended as attach-manifest or an import does in place, compared as the
+    # candidate exited 0 at +0.0%.
+    copies = []
+    for block, path in enumerate(arms["baseline"]):
+        copy = tmp_path / f"copy{block}.jsonl"
+        copy.write_text(Path(path).read_text() + json.dumps({"event_type": "x"}) + "\n")
+        copies.append(str(copy))
+    gate = ["--gate", "client.e2e.p95=non-inferiority:0.05"]
+    code, _out, err = _compare(
+        "--baseline", *arms["baseline"], "--candidate", *copies, *gate
+    )
+    assert code == ExitCode.INVALID_INPUT
+    assert "is the same run (session " in err
+    assert f"as {arms['baseline'][0]}, given in both arms" in err
+
+
 def test_the_json_envelope_is_a_valid_report_with_the_payload(
     arms: dict[str, list[str]],
 ) -> None:

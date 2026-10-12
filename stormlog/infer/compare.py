@@ -373,18 +373,46 @@ def compare_runs(
 
 
 def _check_each_run_once(arms: Mapping[str, list[RunSummary]]) -> None:
-    """One artifact, by path or by SHA-256, given twice would count a single
-    run as two: twice in an arm, or once in each, as its own baseline, so
-    every within-block difference is zero."""
-    seen: dict[str, str] = {}
+    """One run given twice would count as two: twice in an arm, or once in
+    each, as its own baseline, so every within-block difference is zero. A
+    run is known by its path, its SHA-256 and its profile session, so a copy
+    whose bytes differ (one an attach or an import appended to in place) is
+    the same run. Not by its run ID: the runner names each run by its label,
+    which another experiment with the same ID repeats."""
+    seen: dict[tuple[str, str], tuple[str, str]] = {}
     for arm, runs in arms.items():
         for run in runs:
-            keys = {run.name} | ({run.sha256} if run.sha256 else set())
-            other = next((seen[key] for key in keys if key in seen), None)
-            if other is not None:
-                where = "twice" if other == arm else "in both arms"
-                raise InferInputError(f"run {run.name} is given {where}")
-            seen.update(dict.fromkeys(keys, arm))
+            keys = _identities(run)
+            matched = [key for key in keys if key in seen]
+            if matched:
+                raise InferInputError(_given_twice(run, arm, matched, seen))
+            seen.update(dict.fromkeys(keys, (arm, run.name)))
+
+
+def _identities(run: RunSummary) -> set[tuple[str, str]]:
+    keys = {("path", run.name)}
+    if run.sha256:
+        keys.add(("sha256", run.sha256))
+    if run.session_id:
+        keys.add(("session", run.session_id))
+    return keys
+
+
+def _given_twice(
+    run: RunSummary,
+    arm: str,
+    matched: list[tuple[str, str]],
+    seen: Mapping[tuple[str, str], tuple[str, str]],
+) -> str:
+    other_arm, other = seen[matched[0]]
+    where = "twice" if other_arm == arm else "in both arms"
+    if {kind for kind, _ in matched} == {"session"}:
+        session = matched[0][1]
+        return (
+            f"run {run.name} is the same run (session {session}) as {other}, "
+            f"given {where}"
+        )
+    return f"run {run.name} is given {where}"
 
 
 def _item(arm: str, run: RunSummary, case_id: str, reasons: list[str]) -> dict:

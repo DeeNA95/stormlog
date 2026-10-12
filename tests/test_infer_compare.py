@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -75,6 +77,10 @@ def _case(
     }
 
 
+# Each run its own profile session, as a profile gives it.
+_SESSIONS = itertools.count()
+
+
 def _run(
     arm: str,
     block: int | None,
@@ -95,7 +101,7 @@ def _run(
         path=None,
         sha256=None,
         run_id=f"{arm}-{block}-{e2e}" if block is not None else f"{arm}-{started}",
-        session_id="s",
+        session_id=f"s{next(_SESSIONS)}",
         session_status=status,
         labels=labels,
         fields=fields or _fields(),
@@ -284,6 +290,24 @@ def test_a_run_given_in_both_arms_is_refused() -> None:
     copy = replace(candidate[0], sha256=digest)
     with pytest.raises(InferInputError, match="is given in both arms"):
         compare_runs([first, *baseline[1:]], [copy, *candidate[1:]], ComparisonSpec())
+
+
+def test_one_runs_byte_different_copies_are_the_same_run() -> None:
+    # gate-213-codex's F1: a copy of a run taken before attach-manifest or an
+    # import appended to it in place differs in path and bytes, yet is the
+    # same run: in the other arm it was its own baseline, and a gate passed.
+    baseline, candidate = _arms(SAME)
+    one = replace(baseline[0], path=Path("/a/run.jsonl"), sha256="a" * 64)
+    two = replace(baseline[0], path=Path("/b/run.jsonl"), sha256="b" * 64)
+    session = baseline[0].session_id
+    with pytest.raises(
+        InferInputError,
+        match=f"^run /b/run.jsonl is the same run \\(session {session}\\) as "
+        "/a/run.jsonl, given in both arms$",
+    ):
+        compare_runs([one, *baseline[1:]], [two, *candidate[1:]], ComparisonSpec())
+    with pytest.raises(InferInputError, match="as /a/run.jsonl, given twice$"):
+        compare_runs([one, two, *baseline[1:]], candidate, ComparisonSpec())
 
 
 def test_a_retry_never_replaces_an_outcome_failure() -> None:
