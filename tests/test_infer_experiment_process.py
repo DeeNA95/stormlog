@@ -951,3 +951,31 @@ def test_the_launch_clock_and_the_bound_follow_the_clock_named(
     assert launched.bound_s() == 3.0
     now["seconds"] = 1004.5
     assert launched.bound_s() is None
+
+
+@pytest.mark.parametrize("cause", ["missing", "unpinnable"])
+def test_a_launch_that_cannot_start_says_why_in_its_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cause: str
+) -> None:
+    # gate-213-codex's F4 (mutant 304b_no_log): the run's own log is where an
+    # operator looks, so it names why its command never started.
+    from stormlog.infer import experiment_process as ep
+
+    command = [str(tmp_path / "no-such-program")]
+    cpus = None
+    if cause == "unpinnable":
+
+        def cannot_pin(cpus: set[int]) -> Any:
+            def pin() -> None:
+                raise OSError(22, "Invalid argument")
+
+            return pin
+
+        monkeypatch.setattr(ep, "_pin", cannot_pin)
+        command, cpus = [sys.executable, "-c", "pass"], "0"
+    log = tmp_path / "step.log"
+    with pytest.raises(OSError) as raised:
+        launch("step:x", command, cpu_affinity=cpus, log_path=log)
+    assert (
+        log.read_text() == f"launch failed: {raised.value.__cause__ or raised.value}\n"
+    )
