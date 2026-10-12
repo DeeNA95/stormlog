@@ -1802,6 +1802,22 @@ def test_only_completed_and_outcome_failure_runs_are_finished(tmp_path: Path) ->
     assert unfinished_runs(plan, exp) == {}
 
 
+def test_a_resume_retries_a_run_whose_digests_do_not_match(tmp_path: Path) -> None:
+    # gate-213-codex's F4 (mutant 304a_retry_unverified): a run whose files no
+    # longer match its SHA256SUMS has not finished, so --retry-incomplete runs
+    # it again, and a resume without it leaves it be.
+    document = _plan(_port(), blocks=1)
+    _run(tmp_path, document)
+    attempt = tmp_path / "exp" / "runs" / "t213-b00-p0-off-a1"
+    with (attempt / "commands.sh").open("a") as handle:
+        handle.write("# changed\n")
+    assert _run(tmp_path, document, resume=True) == []
+    retried = _run(tmp_path, document, resume=True, retry_incomplete=True)
+    assert [(r["label"], r["state"]) for r in retried] == [
+        ("t213-b00-p0-off-a2", "completed")
+    ]
+
+
 def test_the_example_cli_exits_3_when_a_stop_leaves_planned_runs_unstarted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
