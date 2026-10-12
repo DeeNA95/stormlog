@@ -92,9 +92,11 @@ before the run started.
   the server was restarted;
 - it is the `before` description itself, or is already attached;
 - it was taken before the last measured phase ended, when the client ran on
-  the server's host and boot, so one clock stamped both (a client on another
-  host stamps the run's end by its own clock, which may run ahead of the
-  server's: the checks below bound such an after description);
+  the server's boot, so one clock stamped both: on its host, or in a
+  container on it under another hostname, since the boot ID names the
+  running kernel (a client on another host stamps the run's end by its own
+  clock, which may run ahead of the server's: the checks below bound such an
+  after description);
 - it was taken more than a second before the server answered the after
   probe, by the server's own clock: the HTTP `Date` header the probe records
   on each answer (`date`, to the second). The probe is asked once the run

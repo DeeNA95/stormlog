@@ -301,6 +301,25 @@ def test_the_clients_end_bounds_an_after_only_on_the_servers_own_clock() -> None
     ]
 
 
+def test_a_client_in_a_container_on_the_servers_boot_shares_its_clock() -> None:
+    # gate-213-codex's F3: a client in a container on the server's host runs
+    # on the server's kernel, and so stamps by its wall clock, under another
+    # hostname. The boot ID alone names that clock.
+    before = _description(observed_at_ns=1_000 * SECOND)
+    after = _later(before, observed_at_ns=1_011 * SECOND)
+
+    def run(domain: str) -> list[dict[str, Any]]:
+        identity = {"event_type": "infer.artifact", "context": {"clock_domain": domain}}
+        return [identity, *_skewed_run(before)[:1], _window(1_990, 2_000)]
+
+    container = run("client-container/boot-1/unix_epoch_ns")
+    assert after_refusals(container, after, run_id="r") == [
+        "it was taken before the last measured phase ended"
+    ]
+    for elsewhere in ("gpu-box/boot-2/unix_epoch_ns", "gpu-box/unix_epoch_ns"):
+        assert after_refusals(run(elsewhere), after, run_id="r") == []
+
+
 def _window(started_s: int, drained_s: int) -> dict[str, Any]:
     return {
         "event_type": "infer.phase_window",

@@ -38,6 +38,7 @@ from typing import Any
 
 from .describe_server import load_description
 from .errors import InferInputError
+from .host_clock import is_boot_qualified
 
 MANIFEST_EVENT = "infer.manifest"
 # The experiment runner's record of weights it verified before it launched
@@ -620,14 +621,18 @@ def _one_clock(
     records: Sequence[Mapping[str, Any]], description: Mapping[str, Any]
 ) -> bool:
     """Whether the client's records and the description were stamped by one
-    wall clock: the artifact's clock domain names the description's host and
-    boot. Another host's clock may run ahead of or behind the server's."""
+    wall clock: the artifact's clock domain names the description's boot. A
+    boot names one running kernel and its clock, whatever hostname a client
+    in a container on it reports; another boot's clock may run ahead of or
+    behind the server's."""
     identity = next(
         (r for r in records if r.get("event_type") == "infer.artifact"), None
     )
     domain = str(((identity or {}).get("context") or {}).get("clock_domain", ""))
-    hostname, boot_id = _host(description)
-    return bool(hostname and boot_id) and domain.split("/")[:2] == [hostname, boot_id]
+    _, boot_id = _host(description)
+    return (
+        bool(boot_id) and is_boot_qualified(domain) and domain.split("/")[1] == boot_id
+    )
 
 
 def _session_status(records: Sequence[Mapping[str, Any]]) -> Any:
