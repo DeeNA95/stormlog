@@ -923,6 +923,25 @@ def test_the_specs_block_floor_holds_gates_whose_rules_carry_none() -> None:
         ComparisonSpec(gates=other, min_complete_blocks=6)
 
 
+@pytest.mark.parametrize(
+    ("floor", "judged"),
+    [
+        (4, ("pass", None)),
+        (5, ("not_evaluable", "blocks_below_preregistered")),
+    ],
+)
+def test_an_attainment_gate_with_exactly_its_floor_of_blocks_is_judged(
+    floor: int, judged: tuple[str, str | None]
+) -> None:
+    # gate-213-codex's F4 (mutant 303a_le): 4 blocks kept meet a floor of 4.
+    baseline, _ = _arms(SAME)
+    spec = ComparisonSpec(
+        min_attainment=0.9, min_run_pass=0.3, min_complete_blocks=floor
+    )
+    gate = compare_runs(baseline, _losing(2, 4), spec).cases[CASE]["attainment_gate"]
+    assert (gate["status"], gate.get("reason")) == judged
+
+
 def test_the_attainment_gate_counts_in_the_reports_gate_totals() -> None:
     # Codex on #303: with only --min-attainment, the report said "every gate
     # passed (0 gates)", or "1 gate(s) failed ... of 0", and metrics.gates
