@@ -126,6 +126,9 @@ PROTOCOL_FAILURE = "protocol_failure"
 NOT_RUN = "not_run"
 # A finished attempt whose digests do not match: a resume may retry it.
 UNVERIFIED = "unverified"
+# The states in which a run has finished: a resume never runs it again.
+# Any other, one a later runner may add included, leaves it unfinished.
+_FINISHED = (COMPLETED, OUTCOME_FAILURE)
 NEVER_HEALTHY = "server_never_healthy"
 PENDING = "pending"
 INDEX = "index.jsonl"
@@ -1034,7 +1037,8 @@ def unfinished_runs(plan: ExperimentPlan, output_dir: Path) -> dict[str, str]:
     label, with its last attempt's state: ``not_run`` when no attempt
     finished, ``unverified`` when its digests do not match. A run has
     finished when its last attempt verifies and ended ``completed`` or
-    ``outcome_failure``, the rule by which a resume never runs it again."""
+    ``outcome_failure``, the rule by which a resume never runs it again; any
+    other state, one a later runner may add included, leaves it unfinished."""
     runs = output_dir / "runs"
     unfinished: dict[str, str] = {}
     for block, arms in enumerate(plan_order(plan).blocks):
@@ -1042,14 +1046,14 @@ def unfinished_runs(plan: ExperimentPlan, output_dir: Path) -> dict[str, str]:
             base = f"{plan.experiment_id}-b{block:02d}-p{position}-{arm}"
             finished = _finished_attempts(runs, base) if runs.is_dir() else []
             state = _last_state(finished[-1]) if finished else NOT_RUN
-            if state in (NOT_RUN, UNVERIFIED, PROTOCOL_FAILURE):
+            if state not in _FINISHED:
                 unfinished[base] = state
     return unfinished
 
 
 def _retry_wanted(last: Path, retry: bool) -> bool:
     """Whether a run's last attempt should be followed by another."""
-    return retry and _last_state(last) in (UNVERIFIED, PROTOCOL_FAILURE)
+    return retry and _last_state(last) not in _FINISHED
 
 
 def _last_state(last: Path) -> str:

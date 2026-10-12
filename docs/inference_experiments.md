@@ -283,16 +283,19 @@ makes the bundle not `publishable`.
 `run_plan(..., resume=True)` continues an experiment in the same directory.
 It refuses a plan or pre-registration that changed. A run is skipped when
 its last attempt's `SHA256SUMS` verifies and it ended `completed` or
-`outcome_failure`. With `retry_incomplete=True`, a run that ended in a
-protocol failure (or whose digests do not verify) gets another attempt; the
+`outcome_failure`, the only states in which a run has finished. With
+`retry_incomplete=True`, any other run gets another attempt: one that ended
+in a protocol failure, whose digests do not verify, or whose state is any
+other (one a later runner may add included); the
 earlier attempt stays on disk and in the index, and the new one records
 `order_broken: true`, since it runs later than planned.
 
 `unfinished_runs(plan, output_dir)` applies that rule to every planned run,
 whichever runner ran it, and returns those that have not finished, by
 label, with their last attempt's state: `protocol_failure`, `unverified`
-(digests that do not match), or `not_run` when no attempt finished, as
-after a stop. An empty result means every planned run finished. It reads
+(digests that do not match), `not_run` when no attempt finished, as after a
+stop, or any other state but those two. An empty result means every planned
+run finished. It reads
 the run directories, not the index, so a `not_run` line a later stop
 appended for a run that had already finished does not count against it.
 

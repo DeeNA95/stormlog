@@ -1779,6 +1779,29 @@ def test_unfinished_runs_reads_each_runs_last_attempt_not_the_index(
     }
 
 
+def test_only_completed_and_outcome_failure_runs_are_finished(tmp_path: Path) -> None:
+    # gate-213-codex's scope note (3): unfinished_runs listed the states that
+    # are unfinished, so a state the runner may one day write would have
+    # counted as finished. It, and a resume's retry, now hold to the two
+    # that are.
+    from stormlog.infer import experiment
+    from stormlog.infer.experiment import unfinished_runs
+
+    document = _plan(_port(), blocks=1)
+    _run(tmp_path, document)
+    plan, exp = plan_from_document(document), tmp_path / "exp"
+    attempt = exp / "runs" / "t213-b00-p0-off-a1"
+    record = json.loads((attempt / "run.json").read_text())
+    (attempt / "run.json").write_text(json.dumps({**record, "state": "paused"}))
+    experiment._write_sums(attempt)
+    assert unfinished_runs(plan, exp) == {"t213-b00-p0-off": "paused"}
+    retried = _run(tmp_path, document, resume=True, retry_incomplete=True)
+    assert [(r["label"], r["state"]) for r in retried] == [
+        ("t213-b00-p0-off-a2", "completed")
+    ]
+    assert unfinished_runs(plan, exp) == {}
+
+
 def test_the_example_cli_exits_3_when_a_stop_leaves_planned_runs_unstarted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
