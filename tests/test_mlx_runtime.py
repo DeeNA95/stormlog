@@ -20,7 +20,19 @@ def test_platform_gate(system, machine):
         MLXRuntime(platform_system=system, platform_machine=machine)
 
 
-@pytest.mark.parametrize("version", ["0.32.2", "0.32.3rc1", "unknown"])
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.32.2",
+        "0.32.2.post1",
+        "0.32.3.dev1",
+        "0.32.3a1",
+        "0.32.3rc1",
+        "0.32.3.0.dev1",
+        "0.32.3-invalid",
+        "unknown",
+    ],
+)
 def test_version_gate(version):
     with pytest.raises(MLXRuntimeError):
         MLXRuntime(
@@ -29,6 +41,30 @@ def test_version_gate(version):
             platform_system="Darwin",
             platform_machine="arm64",
         )
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "0.32.3",
+        "0.32.3.post1",
+        "0.32.3+vendor",
+        "0.32.3.post1+metal.1",
+        "0.32.3.post1.dev1",
+        "0.32.3.0.post1",
+        "0.32.3.1",
+        "0.32.4.dev1",
+        "0.32.4rc1",
+    ],
+)
+def test_version_gate_accepts_compatible_releases(version):
+    adapter = MLXRuntime(
+        core=FakeCore(),
+        runtime_version=version,
+        platform_system="Darwin",
+        platform_machine="arm64",
+    )
+    assert adapter.version == version
 
 
 def test_availability_and_partial_info():
