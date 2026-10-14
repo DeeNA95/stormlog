@@ -54,14 +54,26 @@ class Runtime(Protocol):
 _DISCOVERY_LOCK = threading.Lock()
 _CORE: Any = None
 _CORE_VERSION: str | None = None
+_VERSION_RE = re.compile(
+    r"^v?(?:(?P<epoch>\d+)!)?(?P<release>\d+(?:\.\d+){2,})"
+    r"(?:(?P<pre>[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?\d*)"
+    r"(?:-\d+|[-_.]?(?:post|rev|r)[-_.]?\d*)?(?:[-_.]?dev[-_.]?\d*)?"
+    r"|(?P<post>-\d+|[-_.]?(?:post|rev|r)[-_.]?\d*)(?:[-_.]?dev[-_.]?\d*)?"
+    r"|(?P<dev>[-_.]?dev[-_.]?\d*))?"
+    r"(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?$",
+    re.IGNORECASE,
+)
 
 
 def _validate_version(value: str) -> None:
-    match = re.match(r"^(\d+)\.(\d+)\.(\d+)(.*)$", value)
+    match = _VERSION_RE.match(value.strip())
     if match is None:
         raise MLXRuntimeError(f"Cannot determine MLX compatibility from {value!r}")
-    release = tuple(int(match[i]) for i in (1, 2, 3))
-    if release < MINIMUM_VERSION or (release == MINIMUM_VERSION and match[4]):
+    trimmed = re.sub(r"(\.0)+$", "", match["release"])
+    release = tuple(int(part) for part in trimmed.split("."))
+    epoch = int(match["epoch"] or "0")
+    is_final_or_post = match["pre"] is None and match["dev"] is None
+    if (epoch, release, is_final_or_post) < (0, MINIMUM_VERSION, True):
         raise MLXRuntimeError("MLX >= 0.32.3 is required; upgrade stormlog[mlx]")
 
 
