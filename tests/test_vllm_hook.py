@@ -7,6 +7,7 @@ import errno
 import json
 import os
 import random
+import shutil
 import stat
 import subprocess
 import sys
@@ -24,7 +25,9 @@ from typing import Any, cast
 import pytest
 
 import stormlog.infer.vllm_hook as hook
-from stormlog.infer.vllm_hook import gate
+from stormlog.infer.vllm_execution_log import read_execution_log
+from stormlog.infer.vllm_hook import engine as engine_module
+from stormlog.infer.vllm_hook import gate, process
 from stormlog.infer.vllm_hook import writer as writer_module
 from stormlog.infer.vllm_hook.engine import ITERATION_ATTRIBUTE, EngineRecorder
 from stormlog.infer.vllm_hook.worker import RunnerRecorder
@@ -43,6 +46,12 @@ class FinishReason(enum.IntEnum):
         return ("stop", "length")[self.value]
 
 
+class PauseState(enum.Enum):
+    UNPAUSED = 0
+    PAUSED_NEW = 1
+    PAUSED_ALL = 2
+
+
 @dataclass
 class FakeRequest:
     request_id: str
@@ -57,6 +66,7 @@ class FakeRequest:
     # A streaming-input request: on a stop its next input is appended instead.
     resumable: bool = False
     next_input: int = 0
+    use_structured_output: bool = False
 
     def is_finished(self) -> bool:
         return self.finished
@@ -144,6 +154,30 @@ def _fake_vllm() -> dict[str, types.ModuleType]:
             self.num_sampled_tokens_per_step = 1
             self.next_output: SchedulerOutput | None = None
             self.update_error: Exception | None = None
+            self._pause_state = PauseState.UNPAUSED
+            self.running: list[FakeRequest] = []
+            self.reset_error: Exception | None = None
+
+        @property
+        def pause_state(self) -> PauseState:
+            return self._pause_state
+
+        def set_pause_state(self, pause_state: PauseState) -> None:
+            self._pause_state = pause_state
+
+        def add_request(self, request: Any) -> None:
+            # A live ID's later add is a streaming-input request's next input.
+            self.requests.setdefault(request.request_id, request)
+
+        def reset_prefix_cache(
+            self, reset_running_requests: bool = False, reset_connector: bool = False
+        ) -> bool:
+            """vLLM 0.30.0's order: preempt every running request, then reset."""
+            if reset_running_requests:
+                self.running.clear()
+            if self.reset_error is not None:
+                raise self.reset_error
+            return not self.running
 
         def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
             assert self.next_output is not None
@@ -490,6 +524,170 @@ def test_admission_writes_an_alias(vllm: dict[str, Any]) -> None:
     )
 
 
+def test_pause_transitions_and_the_state_each_step_saw(vllm: dict[str, Any]) -> None:
+    scheduler = vllm["Scheduler"](vllm_config())
+    scheduler.requests = {"a-1": FakeRequest("a-1", 2)}
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    output = SchedulerOutput([_new("a-1", 2)], CachedRequestData(), {"a-1": 2}, 2)
+    scheduler.next_output = output
+    scheduler.schedule()
+    scheduler.set_pause_state(PauseState.PAUSED_ALL)
+    scheduler.set_pause_state(PauseState.UNPAUSED)
+    scheduler.set_pause_state(PauseState.UNPAUSED)  # a wake-up's resume: no change
+    refused = vllm["Scheduler"](vllm_config(pp=2))
+    refused.set_pause_state(PauseState.PAUSED_ALL)
+
+    assert scheduler.pause_state is PauseState.UNPAUSED  # vLLM's own call ran
+    assert refused.pause_state is PauseState.PAUSED_ALL
+    records = _records(vllm["root"], "engine")
+    hellos = _of(records, "hello")
+    assert [hello["observes"] for hello in hellos] == [
+        ["cache_reset", "enqueued", "pause"],
+        [],
+    ]
+    pauses = _of(records, "pause")
+    assert [(p["from"], p["to"]) for p in pauses] == [
+        ("UNPAUSED", "PAUSED_NEW"),
+        ("PAUSED_NEW", "PAUSED_ALL"),
+        ("PAUSED_ALL", "UNPAUSED"),
+    ]
+    assert all(p["wall_ns"] <= p["wall_after_ns"] for p in pauses)
+    assert _of(records, "scheduled")[0]["pause_state"] == "PAUSED_NEW"
+
+
+def test_a_request_entering_the_scheduler_is_stamped_once(vllm: dict[str, Any]) -> None:
+    scheduler = vllm["Scheduler"](vllm_config())
+    scheduler.add_request(FakeRequest("s-1", 4, resumable=True))
+    scheduler.add_request(FakeRequest("s-1", 6, resumable=True))  # its next input
+    scheduler.add_request(FakeRequest("g-1", 3, use_structured_output=True))
+    scheduler.add_request(types.SimpleNamespace(request_id="u-1"))  # flags unknown
+    refused = vllm["Scheduler"](vllm_config(pp=2))
+    refused.add_request(FakeRequest("r-1", 2))
+
+    assert list(scheduler.requests) == ["s-1", "g-1", "u-1"]
+    assert list(refused.requests) == ["r-1"]
+    enqueued = _of(_records(vllm["root"], "engine"), "enqueued")
+    assert [
+        (e["internal"], e["structured_output"], e["resumable"]) for e in enqueued
+    ] == [("s-1", False, True), ("g-1", True, False), ("u-1", None, None)]
+    assert all(e["wall_ns"] <= e["wall_after_ns"] for e in enqueued)
+
+
+def test_a_reservation_left_without_its_record_is_released(
+    vllm: dict[str, Any]
+) -> None:
+    """A streaming-input request's next input and an add_request that raises
+    write no enqueued record. Their reservations must still be released, or
+    the writer reports them pending, and holds every later span, forever."""
+
+    class Unnamed:
+        @property
+        def request_id(self) -> str:
+            raise RuntimeError("no request ID")
+
+    scheduler = vllm["Scheduler"](vllm_config())
+    writer = getattr(scheduler, hook.RECORDER_ATTRIBUTE).writer
+    scheduler.add_request(FakeRequest("s-1", 4, resumable=True))
+    scheduler.add_request(FakeRequest("s-1", 6, resumable=True))  # its next input
+    with pytest.raises(RuntimeError, match="no request ID"):
+        scheduler.add_request(Unnamed())
+
+    assert writer._status()["reserved"] == 0
+    _wait(lambda: writer._status()["pending"] == 0)
+    enqueued = _of(_records(vllm["root"], "engine"), "enqueued")
+    assert [e["internal"] for e in enqueued] == ["s-1"]
+
+
+def test_a_cache_reset_records_who_was_running_and_how_it_ended(
+    vllm: dict[str, Any]
+) -> None:
+    scheduler = vllm["Scheduler"](vllm_config())
+    scheduler.running = [FakeRequest("a-1", 2), FakeRequest("b-1", 2)]
+
+    assert scheduler.reset_prefix_cache() is False  # requests hold the cache
+    assert scheduler.reset_prefix_cache(True, reset_connector=True) is True
+    scheduler.running = [FakeRequest("c-1", 2)]
+    scheduler.reset_error = RuntimeError("remote KV transfer pending")
+    with pytest.raises(RuntimeError, match="remote KV transfer"):
+        scheduler.reset_prefix_cache(reset_running_requests=True)
+
+    resets = _of(_records(vllm["root"], "engine"), "cache_reset")
+    assert [
+        (
+            r["reset_running_requests"],
+            r["reset_connector"],
+            r["running"],
+            r["succeeded"],
+            r["raised"],
+        )
+        for r in resets
+    ] == [
+        (False, False, ["a-1", "b-1"], False, False),
+        (True, True, ["a-1", "b-1"], True, False),
+        # vLLM preempts before it fails, so its running requests still count.
+        (True, False, ["c-1"], None, True),
+    ]
+    for reset in resets:
+        assert reset["start_wall_ns"] <= reset["start_wall_after_ns"]
+        assert reset["start_mono_ns"] <= reset["end_mono_ns"]
+        assert reset["end_wall_ns"] <= reset["end_wall_after_ns"]
+
+
+def test_a_method_vllm_lacks_is_neither_patched_nor_claimed() -> None:
+    class OldScheduler:
+        pass
+
+    hook._patch_optional(OldScheduler, "set_pause_state", "pause", lambda f: f)
+
+    assert not hasattr(OldScheduler, "set_pause_state")
+    assert not hasattr(OldScheduler, hook.OBSERVES_ATTRIBUTE)
+
+
+def test_every_stamp_is_bracketed_by_two_wall_reads(vllm: dict[str, Any]) -> None:
+    scheduler = vllm["Scheduler"](vllm_config())
+    vllm["EngineCore"](scheduler).preprocess_add_request(
+        types.SimpleNamespace(request_id="a-1", external_req_id="chatcmpl-a")
+    )
+    scheduler.requests = {"a-1": FakeRequest("a-1", 2, max_tokens=1)}
+    output = SchedulerOutput([_new("a-1", 2)], CachedRequestData(), {"a-1": 2}, 2)
+    scheduler.next_output = output
+    scheduler.schedule()
+    scheduler.update_from_output(output, ModelRunnerOutput({"a-1": 0}, [[5]]))
+
+    records = _records(vllm["root"], "engine")
+    status = json.loads(next(vllm["root"].glob("*/engine-*/status.json")).read_text())
+    stamps = [("hello", _of(records, "hello")[0]["clock"]), ("status", status)]
+    for record in records:
+        for prefix in ("", "start_", "end_"):
+            if f"{prefix}wall_ns" in record:
+                names = ("wall_ns", "mono_ns", "wall_after_ns")
+                stamps.append(
+                    (record["kind"], {name: record[prefix + name] for name in names})
+                )
+    assert {kind for kind, _ in stamps} == {
+        "hello",
+        "status",
+        "alias",
+        "scheduled",
+        "completed",
+        "terminal",
+        "goodbye",
+    }
+    for _kind, read in stamps:
+        assert read["wall_ns"] <= read["wall_after_ns"]
+    clock = stamps[0][1]
+    assert clock["gap_ns"] == clock["wall_after_ns"] - clock["wall_ns"]
+
+
+def test_a_stamp_reads_the_wall_clock_again_after_the_monotonic_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    walls = iter([10, 30])
+    monkeypatch.setattr(writer_module.time, "time_ns", lambda: next(walls))
+    monkeypatch.setattr(writer_module.time, "monotonic_ns", lambda: 20)
+    assert writer_module.stamp() == {"wall_ns": 10, "mono_ns": 20, "wall_after_ns": 30}
+
+
 @pytest.mark.parametrize(
     ("config", "reason"),
     [
@@ -535,6 +733,143 @@ def test_hello_says_whether_request_ids_are_randomized(
 
     hello = _of(_records(vllm["root"], "engine"), "hello")[0]
     assert hello["config"]["request_id_randomization"] is (not disabled)
+
+
+class CUDAGraphMode(enum.Enum):
+    FULL_AND_PIECEWISE = (2, 1)
+
+
+PROFILER = {
+    "profiler": "torch",
+    "torch_profiler_dir": "/traces",
+    # The .gz name and streaming write a truncated trace is read through.
+    "torch_profiler_use_gzip": True,
+    "torch_profiler_with_stack": False,
+    # Each of these changes what a window costs and how long its stop pauses.
+    "torch_profiler_record_shapes": False,
+    "torch_profiler_with_memory": False,
+    "torch_profiler_with_flops": False,
+    "torch_profiler_dump_cuda_time_total": False,
+    "capture_torch_profiler": False,
+    "ignore_frontend": True,
+    "max_iterations": 40,
+    "delay_iterations": 0,
+    "warmup_iterations": 0,
+    "active_iterations": 5,
+    "wait_iterations": 0,
+}
+
+
+def _sized_config() -> Config:
+    config = vllm_config()
+    config.scheduler_config.max_num_seqs = 256
+    config.cache_config = Config(
+        num_gpu_blocks=9000, block_size=32, gpu_memory_utilization=0.9
+    )
+    config.compilation_config = Config(cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE)
+    config.model_config.enable_cumem_allocator = False
+    config.model_config.enable_sleep_mode = False
+    config.profiler_config = Config(**PROFILER)
+    return config
+
+
+def test_hello_records_the_layout_the_profiler_and_the_process(
+    vllm: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(process, "start_ticks", lambda pid: pid * 10)
+    monkeypatch.setattr(process, "start_ns", lambda pid: pid * 1_000)
+    scheduler_class = vllm["Scheduler"]
+
+    class SizedScheduler(scheduler_class):  # type: ignore[misc, valid-type]
+        def __init__(self, vllm_config: Any) -> None:
+            # vLLM resolves the scheduler's block size and KV groups itself.
+            self.kv_cache_config = Config(kv_cache_groups=[object(), object()])
+            self.block_size = 16
+            super().__init__(vllm_config)
+
+    SizedScheduler.__module__ = scheduler_class.__module__
+    SizedScheduler.__qualname__ = scheduler_class.__qualname__  # passes the gate
+    SizedScheduler(_sized_config())
+    worker = vllm["Worker"](_sized_config())
+    worker.init_device()
+
+    engine = _of(_records(vllm["root"], "engine"), "hello")[0]
+    assert {
+        key: engine["config"][key]
+        for key in (
+            "max_num_seqs",
+            "num_gpu_blocks",
+            "kv_cache_groups",
+            "block_size",
+            "cudagraph_mode",
+            "gpu_memory_utilization",
+            "enable_cumem_allocator",
+            "enable_sleep_mode",
+            "profiler",
+        )
+    } == {
+        "max_num_seqs": 256,
+        "num_gpu_blocks": 9000,
+        "kv_cache_groups": 2,
+        "block_size": 16,
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
+        "gpu_memory_utilization": 0.9,
+        "enable_cumem_allocator": False,
+        "enable_sleep_mode": False,
+        "profiler": PROFILER,
+    }
+    pid, parent = os.getpid(), os.getppid()
+    for hello in (engine, _of(_records(vllm["root"], "worker"), "hello")[0]):
+        assert {
+            key: hello[key]
+            for key in (
+                "process_start_ns",
+                "process_start_ticks",
+                "parent_pid",
+                "parent_process_start_ticks",
+                "parent_process_start_ns",
+            )
+        } == {
+            "process_start_ns": pid * 1_000,
+            "process_start_ticks": pid * 10,
+            "parent_pid": parent,
+            "parent_process_start_ticks": parent * 10,
+            "parent_process_start_ns": parent * 1_000,
+        }
+    assert (engine["enabled"], engine["observes"]) == (
+        True,
+        ["cache_reset", "enqueued", "pause"],
+    )
+    assert _of(_records(vllm["root"], "worker"), "hello")[0]["observes"] == []
+    worker_config = _of(_records(vllm["root"], "worker"), "hello")[0]["config"]
+    # A worker has no scheduler: its layout is the configured one.
+    assert (worker_config["kv_cache_groups"], worker_config["block_size"]) == (None, 32)
+
+
+def test_a_hello_without_these_settings_records_them_as_null(
+    vllm: dict[str, Any]
+) -> None:
+    vllm["Scheduler"](vllm_config())
+
+    config = _of(_records(vllm["root"], "engine"), "hello")[0]["config"]
+    assert config["profiler"] is None
+    assert config["num_gpu_blocks"] is None and config["cudagraph_mode"] is None
+
+
+def test_process_start_is_read_like_psutil(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A command name may hold spaces and parentheses.
+    fields = " ".join(str(n) for n in range(5, 22))  # fields 5 to 21
+    stat = f"4242 (vllm (x) y) S 1 {fields} 777 9"
+    assert process.ticks_from_stat(stat) == 777
+    assert process.ticks_from_stat("4242 (short) S 1") is None
+
+    monkeypatch.setitem(sys.modules, "psutil", None)  # psutil missing
+    monkeypatch.setattr(process, "start_ticks", lambda pid: 250)
+    monkeypatch.setattr(process, "_boot_seconds", lambda: 1_700_000_000)
+    monkeypatch.setattr(process.os, "sysconf", lambda name: 100)
+    assert process.start_ns(4242) == 1_700_000_002_500_000_000
+    monkeypatch.setattr(process, "_boot_seconds", lambda: None)
+    assert process.start_ns(4242) is None
 
 
 def test_vllm_errors_pass_through_and_telemetry_errors_do_not(
@@ -1069,7 +1404,7 @@ def _engine_step(writer: EpochWriter, members: int) -> Callable[[], None]:
     recorder = EngineRecorder(writer, "vllm:h:b:1:1")
 
     def step() -> None:
-        recorder.on_schedule(scheduler, output, (time.time_ns(), time.monotonic_ns()))
+        recorder.on_schedule(scheduler, output, writer_module.stamp())
         before = recorder.before_update(scheduler, output, sampled)
         recorder.after_update(scheduler, output, before, result=result)
 
@@ -1184,6 +1519,260 @@ def test_a_backlog_does_not_hold_up_the_status_or_sealing(
     assert max(path.stat().st_size for path in segments) <= 1024 + longest + 1
 
 
+def test_a_heartbeat_counts_the_records_it_is_written_ahead_of(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a slow disk a heartbeat is written while records accepted before
+    its stamp still wait; it says how many, so a reader knows the span it
+    closes reaches past them."""
+    write = writer_module._Segment.write
+
+    def slow(segment: Any, line: bytes) -> bool:
+        if b'"kind":"heartbeat"' not in line:
+            time.sleep(0.02)
+        return write(segment, line)
+
+    monkeypatch.setattr(writer_module._Segment, "write", slow)
+    writer = EpochWriter(
+        tmp_path, "engine", limits=WriterLimits(heartbeat_seconds=0.05)
+    )
+    for index in range(10):
+        writer.emit("filler", {"index": index})
+    accepted = writer_module.stamp()
+    writer.emit("pause", {"from": "UNPAUSED", "to": "PAUSED_ALL", **accepted})
+    for index in range(10):
+        writer.emit("filler", {"index": 10 + index})
+    writer.close()
+
+    records = _epoch_records(writer.directory)
+    pause = next(r for r in records if r["kind"] == "pause")
+    ahead = [
+        r
+        for r in records
+        if r["kind"] == "heartbeat"
+        and r["mono_ns"] > accepted["mono_ns"]
+        and r["seq"] < pause["seq"]
+    ]
+    assert ahead  # written after the pause was accepted, before it was
+    for beat in ahead:
+        assert beat["seq"] + beat["pending"] >= pause["seq"]
+
+
+def test_a_heartbeat_counts_a_record_still_being_serialized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record's stamps are taken before emit, which serializes it outside
+    the lock (milliseconds for a large step): a heartbeat stamped meanwhile
+    is written ahead of it and must count it as pending."""
+    dumps = writer_module._dumps
+    sizing, release = threading.Event(), threading.Event()
+
+    def slow(value: Any) -> str:
+        if isinstance(value, dict) and value.get("to") == "PAUSED_ALL":
+            sizing.set()
+            release.wait(5)
+        return dumps(value)
+
+    monkeypatch.setattr(writer_module, "_dumps", slow)
+    writer = EpochWriter(tmp_path, "engine")
+    accepted = writer_module.stamp()
+    emitting = threading.Thread(
+        target=writer.emit,
+        args=("pause", {"from": "UNPAUSED", "to": "PAUSED_ALL", **accepted}),
+    )
+    emitting.start()
+    assert sizing.wait(5)
+    try:
+        assert writer._status()["pending"] == 1
+    finally:
+        release.set()
+        emitting.join(5)
+    writer.close()
+
+    assert [r["kind"] for r in _epoch_records(writer.directory)].count("pause") == 1
+
+
+def test_a_record_is_pending_from_before_its_last_stamp(
+    vllm: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A span vouches for the instants before its closing heartbeat's stamp,
+    and a record is matched by its last stamp, so the record must count as
+    pending from before that stamp is taken, not only once emit takes the
+    lock: a heartbeat stamped in between (a GIL handoff, or vLLM's own
+    add_request after an enqueue's stamp) would be written ahead of it with
+    nothing pending."""
+    scheduler = vllm["Scheduler"](vllm_config())
+    core = vllm["EngineCore"](scheduler)
+    writer = getattr(scheduler, hook.RECORDER_ATTRIBUTE).writer
+    _wait(lambda: writer._status()["pending"] == 0)  # the hello is written
+    # From here the writer thread writes nothing, so pending only grows.
+    written = threading.Event()
+    write = writer_module._Segment.write
+
+    def held(segment: Any, line: bytes) -> bool:
+        written.wait(10)
+        return write(segment, line)
+
+    monkeypatch.setattr(writer_module._Segment, "write", held)
+    pending_at: dict[int, int] = {}
+
+    def stamped() -> dict[str, int]:
+        value = writer_module.stamp()
+        pending_at[value["mono_ns"]] = writer._status()["pending"]
+        return value
+
+    monkeypatch.setattr(engine_module, "stamp", stamped)
+    monkeypatch.setattr(hook, "stamp", stamped)
+    output = SchedulerOutput([_new("a-1", 2)], CachedRequestData(), {"a-1": 2}, 2)
+    scheduler.next_output = output
+    request = FakeRequest("a-1", 2)
+    steps: list[Callable[[], object]] = [
+        lambda: core.preprocess_add_request(
+            types.SimpleNamespace(request_id="a-1", external_req_id="chatcmpl-a")
+        ),
+        lambda: scheduler.add_request(request),
+        scheduler.schedule,
+        lambda: scheduler.update_from_output(
+            output, ModelRunnerOutput({"a-1": 0}, [[5]])
+        ),
+        lambda: scheduler.set_pause_state(PauseState.PAUSED_ALL),
+        scheduler.reset_prefix_cache,
+        lambda: scheduler._free_request(request),
+    ]
+    before = []
+    for step in steps:
+        before.append(writer._status()["pending"])
+        step()
+    written.set()
+
+    records = _records(vllm["root"], "engine")
+    unstamped = ("hello", "heartbeat", "goodbye")
+    stamped_records = [r for r in records if r["kind"] not in unstamped]
+    assert [r["kind"] for r in stamped_records] == [
+        "alias",
+        "enqueued",
+        "scheduled",
+        "completed",
+        "pause",
+        "cache_reset",
+        "terminal",
+    ]
+    for record, pending in zip(stamped_records, before):
+        last = record.get("end_mono_ns", record.get("mono_ns"))
+        assert pending_at[last] == pending + 1, record["kind"]
+
+
+def test_a_heartbeat_says_how_many_pending_records_are_still_reserved(
+    tmp_path: Path,
+) -> None:
+    """A reserved record is pending but not queued, so another thread's
+    later record can be queued ahead of it: the heartbeat says how many
+    such records it counts, and the reader holds its span for them."""
+    writer = EpochWriter(
+        tmp_path, "engine", limits=WriterLimits(heartbeat_seconds=0.05)
+    )
+    status = writer.directory / "status.json"
+
+    def beat() -> dict[str, Any]:
+        return _status_file(status)
+
+    with writer.reserve() as reservation:
+        _wait(lambda: beat().get("reserved") == 1)
+        assert beat()["pending"] == 1
+        reservation.emit("pause", {"from": "UNPAUSED", "to": "PAUSED_ALL"})
+    _wait(lambda: beat().get("reserved") == 0 and beat().get("pending") == 0)
+    writer.close()
+
+
+def test_a_record_overtaken_and_then_lost_leaves_no_span_over_its_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Thread A reserves a pause and stamps it; two heartbeats are written;
+    thread B emits an alias, which is queued first; A's pause is then lost
+    at write. Neither a live read taken before A emits nor the full read of
+    the stopped server may have a span covering A's stamp: it would say no
+    pause happened when one did."""
+    write = writer_module._Segment.write
+
+    def lose_pauses(segment: Any, line: bytes) -> bool:
+        return False if b'"kind":"pause"' in line else write(segment, line)
+
+    monkeypatch.setattr(writer_module._Segment, "write", lose_pauses)
+    root = tmp_path / "hook"
+    writer = EpochWriter(root, "engine", limits=WriterLimits(heartbeat_seconds=0.05))
+    writer.emit("hello", {"observes": ["pause"], **writer_module.stamp()})
+    status = writer.directory / "status.json"
+
+    def beat() -> dict[str, Any]:
+        return _status_file(status)
+
+    _wait(lambda: beat().get("last_seq", -1) >= 2)  # heartbeats, nothing held
+    with writer.reserve() as reservation:
+        stamped = writer_module.stamp()
+        after = beat().get("last_seq", 0)
+        _wait(lambda: beat().get("last_seq", 0) >= after + 2)  # two heartbeats
+        other = threading.Thread(
+            target=writer.emit,
+            args=("alias", {"internal": "b-1", **writer_module.stamp()}),
+        )
+        other.start()
+        other.join()
+        queued = beat().get("last_seq", 0)
+        _wait(lambda: beat().get("last_seq", 0) >= queued + 2)  # alias and a beat
+        shutil.copytree(root, tmp_path / "live")
+        reservation.emit("pause", {"from": "UNPAUSED", "to": "PAUSED_ALL", **stamped})
+    _wait(lambda: beat().get("errors") == 1)  # the pause's write failed
+    writer.close()
+
+    for directory, stopped in ((tmp_path / "live", False), (root, True)):
+        (epoch,) = read_execution_log(directory, server_stopped=stopped).engines()
+        assert not any(r.kind == "pause" for r in epoch.records)
+        spans = epoch.coverage()["spans"]
+        covering = [
+            span
+            for span in spans
+            if span["start_mono_ns"] <= stamped["mono_ns"] <= span["end_mono_ns"]
+        ]
+        assert covering == [], directory.name
+
+
+def test_emit_never_lets_go_of_a_record_it_has_not_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record stops counting as pending in the same hold of the lock that
+    queues or drops it: whenever the emitting thread lets the lock go, the
+    record is still reserved, queued or dropped, so a heartbeat stamped at
+    any moment counts it one way or another."""
+    emitting = threading.Event()
+    unaccounted: list[str] = []
+
+    class Checked(threading.Condition):
+        def __exit__(self, *args: Any) -> None:
+            if emitting.is_set() and threading.current_thread() is caller:
+                if not (
+                    writer._reserved
+                    or any(kind == "probe" for kind, _ in writer._queue)
+                    or writer._counters.dropped["probe"]
+                ):
+                    unaccounted.append("lock released with the record uncounted")
+            super().__exit__(*args)
+
+    caller = threading.current_thread()
+    with monkeypatch.context() as patched:
+        patched.setattr(writer_module.threading, "Condition", Checked)
+        writer = EpochWriter(tmp_path, "engine")
+    emitting.set()
+    writer.emit("probe", {"index": 0})
+    emitting.clear()
+    writer.close()
+
+    assert unaccounted == []
+    assert [r["kind"] for r in _epoch_records(writer.directory)] == [
+        "probe",
+        "goodbye",
+    ]
+
+
 def test_a_short_write_leaves_only_whole_lines(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1291,6 +1880,14 @@ def _epoch_records(directory: Path) -> list[dict[str, Any]]:
 def _queued_bytes(writer: EpochWriter) -> int:
     with writer._condition:
         return writer._queued_bytes
+
+
+def _status_file(path: Path) -> dict[str, Any]:
+    """The writer's status file, or nothing before its first heartbeat."""
+    if not path.exists():
+        return {}
+    status: dict[str, Any] = json.loads(path.read_text())
+    return status
 
 
 def _wait(condition: Callable[[], bool], seconds: float = 5.0) -> None:

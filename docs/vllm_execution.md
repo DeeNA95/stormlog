@@ -9,7 +9,8 @@ to the requests that shared it.
 The hook runs inside the vLLM server. It writes a raw log on the server host and
 never writes to the inference artifact itself. The import turns that log into
 `infer.iteration`, `infer.membership`, `infer.request` and
-`infer.clock_alignment` records (see
+`infer.clock_alignment` records, with `infer.stage` records for preemptions,
+cache resets and pauses (see
 [Execution correlation](inference_correlation.md)).
 
 ## Enable it
@@ -114,16 +115,25 @@ Every line is one JSON object with these common fields:
 | `epoch` | the epoch directory name, `<role>-<pid>-<start ns>` |
 | `seq` | 0, 1, 2, … within the epoch, with no gaps; a dropped record takes no number |
 
-Times are pairs: `*_wall_ns` from `time.time_ns()` and `*_mono_ns` from
-`time.monotonic_ns()`, read in the same process.
+Times are bracketed reads in the writing process: `*_wall_ns` from
+`time.time_ns()`, then `*_mono_ns` from `time.monotonic_ns()`, then
+`*_wall_after_ns` from `time.time_ns()` again. The wall time at the
+monotonic read lies between `*_wall_ns` and `*_wall_after_ns`, so the pair
+is known to within their difference. The hello's `clock` is one such read,
+also giving that difference as `gap_ns`. Logs from before
+`*_wall_after_ns` have it only in the hello, and their other pairs have no
+stated bound.
 
 | Kind | Written by | When |
 | --- | --- | --- |
 | `hello` | every epoch | first record |
 | `alias` | engine | a request is admitted |
+| `enqueued` | engine | a request enters the scheduler |
 | `scheduled` | engine | `Scheduler.schedule` returns |
 | `completed` | engine | `Scheduler.update_from_output` returns |
 | `terminal` | engine | `Scheduler._free_request` runs |
+| `pause` | engine | `Scheduler.set_pause_state` returns |
+| `cache_reset` | engine | `Scheduler.reset_prefix_cache` returns or raises |
 | `heartbeat` | every epoch | every second |
 | `goodbye` | every epoch | the process exits cleanly |
 
@@ -132,14 +142,63 @@ Times are pairs: `*_wall_ns` from `time.time_ns()` and `*_mono_ns` from
 ```json
 {"kind": "hello", "role": "engine", "host": "node-7", "boot_id": "…",
  "pid": 2600, "start_ns": 1790000000000000000,
+ "process_start_ns": 1789999990120000000, "process_start_ticks": 81234567,
+ "parent_pid": 2512, "parent_process_start_ticks": 81230011,
+ "parent_process_start_ns": 1789999944560000000,
  "vllm_version": "0.30.0", "enabled": true, "refused": null,
  "producer": "vllm:node-7:<boot>:2600:1790000000000000000",
+ "observes": ["cache_reset", "enqueued", "pause"],
  "config": {"executor": "mp", "scheduler": "vllm.v1.core.sched.async_scheduler.AsyncScheduler",
             "runner": null, "tp": 2, "pp": 1, "dp": 1, "async_scheduling": true,
             "speculative": "ngram", "max_num_batched_tokens": 2048,
-            "request_id_randomization": true},
- "clock": {"wall_ns": 1790000000000123456, "mono_ns": 123456789000, "gap_ns": 1200}}
+            "request_id_randomization": true,
+            "max_num_seqs": 256, "num_gpu_blocks": 9000, "kv_cache_groups": 1,
+            "block_size": 16, "cudagraph_mode": "FULL_AND_PIECEWISE",
+            "gpu_memory_utilization": 0.9, "enable_cumem_allocator": false,
+            "enable_sleep_mode": false,
+            "profiler": {"profiler": "torch", "torch_profiler_dir": "/traces",
+                         "torch_profiler_use_gzip": true,
+                         "torch_profiler_with_stack": false,
+                         "torch_profiler_record_shapes": false,
+                         "torch_profiler_with_memory": false,
+                         "torch_profiler_with_flops": false,
+                         "torch_profiler_dump_cuda_time_total": false,
+                         "capture_torch_profiler": false,
+                         "ignore_frontend": true, "max_iterations": 40,
+                         "delay_iterations": 0, "warmup_iterations": 0,
+                         "active_iterations": 5, "wait_iterations": 0}},
+ "clock": {"wall_ns": 1790000000000123456, "mono_ns": 123456789000,
+           "wall_after_ns": 1790000000000124656, "gap_ns": 1200}}
 ```
+
+`start_ns` is when the hook's writer started. The process fields name the
+process across pid reuse: `process_start_ticks` is field 22 of
+`/proc/<pid>/stat` (clock ticks after boot, exact within one boot), and
+`process_start_ns` is the wall-clock start as psutil's `create_time` gives
+it, the value Stormlog's server collector records. `parent_pid` and the two
+`parent_process_*` fields say the same of the parent process; a multiproc
+worker's parent is the engine core. Each is null where it cannot be read.
+
+`observes` lists the optional record kinds this epoch's hook writes, of
+those described below; only kinds the installed vLLM can produce are
+listed, and the list is empty when the hook is refused and on a worker. A
+listed kind's absence over an interval means none happened only when no
+record was lost across it: `seq` has no gap, and heartbeats on either side
+show every `dropped` count and `errors` unchanged and the writer not
+`capped`. For a kind not listed, absence says nothing.
+
+`config` records vLLM's settings as JSON values (an enum by its name), each
+null when vLLM does not have it. `max_num_seqs`, `num_gpu_blocks`,
+`kv_cache_groups` (how many), `block_size`, `cudagraph_mode`,
+`gpu_memory_utilization`, `enable_cumem_allocator` and `enable_sleep_mode`
+describe capacity and memory; an engine's are what its scheduler was built
+with, after vLLM sized the KV cache, while a worker records the configured
+values before that. `profiler` holds fifteen of vLLM's profiler settings, or
+is null without a profiler configuration. They decide what a profiler window
+records and costs (stacks, shapes, memory, FLOPs), how long its stop pauses
+the server, whether it stops by itself, and whether the trace is written as
+a streamed `.gz` file (`torch_profiler_use_gzip`), which decides how a trace
+cut short can be read.
 
 `refused` is null when enabled, else a short reason.
 `config.request_id_randomization` is false when vLLM was told not to add a random
@@ -154,18 +213,39 @@ trace file name. The `config.runner` field is filled by workers.
 
 ```json
 {"kind": "alias", "internal": "chatcmpl-stormlog-r1-q0-0f3a9c1d",
- "external": "chatcmpl-stormlog-r1-q0", "wall_ns": …, "mono_ns": …}
+ "external": "chatcmpl-stormlog-r1-q0",
+ "wall_ns": …, "mono_ns": …, "wall_after_ns": …}
 ```
 
 Written from vLLM's input thread, so it may come before or after the request's
 first `scheduled` record.
 
+**`enqueued`**
+
+```json
+{"kind": "enqueued", "internal": "chatcmpl-stormlog-r1-q0-0f3a9c1d",
+ "structured_output": false, "resumable": false,
+ "wall_ns": …, "mono_ns": …, "wall_after_ns": …}
+```
+
+Stamped just before `Scheduler.add_request` puts the request in the waiting
+queue, on the engine's own thread; the wait from here to the request's first
+`scheduled` record is spent in the scheduler, while the time from `alias`
+to here is spent getting into the engine. One per internal ID while it is
+live: a streaming-input request's later inputs reuse its ID and write none.
+`structured_output` says whether the request is constrained by a grammar,
+which can hold it waiting while others run, and `resumable` whether it is a
+streaming-input request; each is null when vLLM's request does not say. A
+call that raises is not recorded. Listed in `observes` as `enqueued`.
+
 **`scheduled`**
 
 ```json
 {"kind": "scheduled", "iteration": "41",
- "start_wall_ns": …, "start_mono_ns": …, "end_wall_ns": …, "end_mono_ns": …,
+ "start_wall_ns": …, "start_mono_ns": …, "start_wall_after_ns": …,
+ "end_wall_ns": …, "end_mono_ns": …, "end_wall_after_ns": …,
  "total_tokens": 2048, "zero_token": false, "preempted": ["…"],
+ "pause_state": "UNPAUSED",
  "members": [
    {"internal": "…", "sighting": "first", "phase": "context", "scheduled": 2000,
     "computed_before": 0, "prompt_tokens": 4000,
@@ -174,7 +254,8 @@ first `scheduled` record.
     "recompute": false, "output_before": 0, "resumable": false}]}
 ```
 
-`iteration` counts the engine's `schedule()` calls from 0. `computed_before` is
+`iteration` counts the engine's `schedule()` calls from 0. `pause_state` is
+the scheduler's pause state when the call returned (see `pause` below). `computed_before` is
 the context before this step, read from the scheduler output. `phase` is vLLM's
 own classification: `context` for a request new in this output (including one
 resumed after preemption) or still in its context phase, else `generation`.
@@ -190,7 +271,8 @@ only.
 **`completed`**
 
 ```json
-{"kind": "completed", "iteration": "41", "wall_ns": …, "mono_ns": …,
+{"kind": "completed", "iteration": "41",
+ "wall_ns": …, "mono_ns": …, "wall_after_ns": …,
  "members": [
    {"internal": "…", "outcome": "kept", "stale": false,
     "sampled": 1, "accepted_drafts": 0, "retained": 1,
@@ -217,21 +299,68 @@ exception passes through, and the step's fate was not seen.
 
 ```json
 {"kind": "terminal", "internal": "…", "status": "FINISHED_STOPPED",
- "finish_reason": "stop", "output_tokens": 128, "wall_ns": …, "mono_ns": …}
+ "finish_reason": "stop", "output_tokens": 128,
+ "wall_ns": …, "mono_ns": …, "wall_after_ns": …}
 ```
+
+**`pause`**
+
+```json
+{"kind": "pause", "from": "UNPAUSED", "to": "PAUSED_ALL",
+ "wall_ns": …, "mono_ns": …, "wall_after_ns": …}
+```
+
+One per call to `set_pause_state`, vLLM's single place for changing the
+scheduler's pause state, stamped after the call returns; `from` and `to` are
+the states before and after (`UNPAUSED`, `PAUSED_NEW` or `PAUSED_ALL`). A
+call that leaves the state as it was is not recorded: vLLM resumes the
+scheduler on every `wake_up`, whether or not it was paused.
+`PAUSED_ALL` stops the engine from stepping, so no `scheduled` record shows
+it; `PAUSED_NEW` holds new requests while running ones keep stepping. A call
+that raises is not recorded. Listed in `observes` as `pause`.
+
+**`cache_reset`**
+
+```json
+{"kind": "cache_reset", "reset_running_requests": true, "reset_connector": false,
+ "running": ["…", "…"], "succeeded": true, "raised": false,
+ "start_wall_ns": …, "start_mono_ns": …, "start_wall_after_ns": …,
+ "end_wall_ns": …, "end_mono_ns": …, "end_wall_after_ns": …}
+```
+
+One per call to `reset_prefix_cache`, which empties vLLM's prefix cache.
+`running` lists the internal IDs running when the call started. With
+`reset_running_requests`, vLLM preempts every one of them before it resets
+the cache, so they are preempted even when the reset then fails; without it,
+the reset succeeds only when no running request holds cache blocks.
+`succeeded` is the call's return value, or null when it raised (`raised`
+true; vLLM's exception passes through). The start stamp is read before the
+call and the end stamp after it. Listed in `observes` as `cache_reset`.
 
 **`heartbeat`** and `status.json`
 
 ```json
-{"kind": "heartbeat", "wall_ns": …, "mono_ns": …, "last_seq": 1234,
+{"kind": "heartbeat", "wall_ns": …, "mono_ns": …, "wall_after_ns": …,
+ "last_seq": 1234,
  "dropped": {"alias": 3, "alias_oversized": 1},
- "errors": 0, "bytes": 1048576, "capped": false, "queued": 0}
+ "errors": 0, "bytes": 1048576, "capped": false, "queued": 0, "pending": 0,
+ "reserved": 0}
 ```
 
 `dropped` counts dropped records by kind, and `<kind>_oversized` counts single
 records over 4 MiB. A record dropped unserialized because the queue was full or
 record writing had stopped counts under its kind, whatever its size. `queued`
-is the number of records waiting to be written.
+is the number of records waiting to be written. `pending` is the number
+accepted before the heartbeat's stamp and not yet written, the batch being
+written included: under a backlog the heartbeat is written ahead of them, and
+they take the next sequences after it. A record counts from just before its
+last stamp is taken, while it is serialized, until it is queued or dropped:
+the hook reserves it first, so a heartbeat stamped after a record's stamp
+counts it even when vLLM's own call (an enqueue's `add_request`) or a thread
+switch comes between the stamp and the record. `reserved` is how many of the
+pending records were not queued yet: another thread's record, reserved after
+the stamp, may be queued ahead of them, so they need not take the next
+sequences.
 
 A worker's heartbeat adds `range_misses` (serving calls that ran without an
 iteration range), `startup_unranged` (warm-up, dummy and CUDA-graph capture
@@ -241,7 +370,7 @@ calls before the first serving step, which never have one), and
 `status.json` holds the latest heartbeat's fields and is still updated after
 the disk cap stops record writing, so loss stays visible.
 
-**`goodbye`** has `wall_ns`, `mono_ns` and `last_seq`. A process that is killed,
+**`goodbye`** has `wall_ns`, `mono_ns`, `wall_after_ns` and `last_seq`. A process that is killed,
 including by vLLM's default shutdown, writes no `goodbye`.
 
 ## Iteration ranges
@@ -293,6 +422,71 @@ server that has since stopped, `--server-stopped` says so, and every epoch
 without `goodbye` is then gone and its pending steps final. `infer profile`
 imports while its server may still be up and needs no such flag.
 
+**Loss coverage.** Each epoch's summary has a `coverage` block saying where
+its log is known to be whole: `spans` from one heartbeat to a later one
+(their `seq`, `mono_ns` and `wall_ns`) with every `dropped` count (of any
+kind, `<kind>_oversized` included) and `errors` unchanged and the writer not
+capped, and with every record read that was accepted by the later
+heartbeat's stamp: through its `seq` plus its `pending`, plus any heartbeat
+the writer wrote before those records came (the span's `end_seq`). A later
+heartbeat with records still `reserved` cannot say where they will land, so
+its span reaches as far as the first heartbeat after it with nothing
+reserved does. The first heartbeat written after those records must also
+show nothing lost, since a record lost while being written counts only
+later. A heartbeat without `reserved` (a hook from before the count, #217's
+included) closes no span on any read: a record it counted, or one its
+`queued` left out, may have been overtaken by another thread's record and
+then lost at write, and even a read that holds every record the epoch wrote
+cannot tell. `held` counts the heartbeats whose reservations closed no
+span, by reason: `reserved_unknown` for those, `reserved_open` for one
+whose reserved records no later heartbeat has bounded yet; a span broken by
+a loss or a gap is not counted there.
+
+For a live or prefix read, such as #219's watcher's or the import `infer
+profile` runs while its server is up, this means a span never vouches past a record
+whose last stamp came before its closing heartbeat's stamp, even one still
+reserved there and overtaken by another thread's record: until a heartbeat
+with nothing reserved is read, the newest stretch of a busy server's log
+stays uncovered, and the next read covers it. How much stays uncovered
+depends on concurrency and loss, since a loss anywhere between a heartbeat
+and the one that settles its reservations breaks every span held behind
+it. On a synthetic writer with 8 threads reserving continuously (85-93% of
+heartbeats with records reserved), the share of a full log covered was:
+
+| Records lost at write | Before the `reserved` count | With it |
+| --- | --- | --- |
+| none | 100% | 100% |
+| 0.2% | 90-95% | 9-60% |
+| 1% | 58-62% | 8-12% |
+
+Part of the earlier coverage vouched for records it never saw. On vLLM
+every reservation but an enqueue's (held across `add_request`) lasts
+microseconds; the share of heartbeats with records reserved on a real
+server is not yet measured.
+
+`observes` is the hello's list, or null for a hook that does not give one.
+Every import computes the block from all the heartbeats it read, including
+ones an earlier import consumed, under `basis` `heartbeat_counters/1`.
+
+A kind the hello observes is known not to have happened in an interval only
+when a span covers it, and a record is matched by its last stamp: the hook
+stamps a record before it emits it, and a call's record (a `cache_reset`'s
+`end_*` stamp) is emitted only when the call returns. A call still running
+when a span ends is not vouched against.
+
+**Liveness.** Beside it, a `liveness` block says when the hook's writer was
+heard from, under `basis` `heartbeat_gaps/1`: the number of heartbeats, the
+`first` and `last` (each a `seq`, `mono_ns` and `wall_ns`), the longest
+interval between two (`max_interval_ns`), and the `gaps` between consecutive
+heartbeats more than `gap_ns` apart, each from the heartbeat before
+(`start_seq`, `start_mono_ns`, `start_wall_ns`) to the heartbeat after
+(`end_seq`, `end_mono_ns`, `end_wall_ns`). The writer beats once a second, but under load its thread
+slips: on real vLLM 0.30.0 runs the longest interval was 2.3 s with nothing
+lost, so `gap_ns` is 5 s. An interval between the first and the last that no
+gap overlaps had a writer beating throughout; whether anything was lost there
+is the coverage's to say. It is computed from every heartbeat read, like the
+coverage.
+
 **Records.** One `infer.iteration` per step on the engine's monotonic clock
 (`<host>/<boot id>/monotonic_ns`, `clock_kind` `monotonic`), whose
 `elapsed_ns` is the scheduler residence from `schedule()` to the processed
@@ -301,17 +495,47 @@ whose role follows vLLM's `phase` (`context` is `prefill`, `generation` is
 `decode` or, with drafts scheduled, `spec_decode`; no phase is `unknown`), with
 the step's token counts, outcome and, for the step a request was freed in,
 its finish; one `infer.request` per backend execution, holding admission
-facts only; and one `infer.clock_alignment` per epoch from the hello's
-wall/monotonic pair, with half the sampling gap as its uncertainty. The raw
+facts only, among them `enqueued_mono_ns`, `enqueued_wall_ns`,
+`enqueued_wall_after_ns` and `structured_output` from its `enqueued` record
+(null without one); and one `infer.clock_alignment` per epoch from the hello's
+bracketed read: the wall clock at the monotonic read lies between the wall
+reads before and after it, so the offset is that bracket's midpoint and the
+uncertainty half its width. Its metadata gives `alignment_basis`
+(`hello_bracket_midpoint/1`) and the raw `bracket`. A hello the wall clock
+stepped back across gives no alignment. Earlier imports wrote the offset at
+the bracket's lower end, with no `alignment_basis`; `align_timestamp` reads
+such a record as the interval from its offset to its offset plus `gap_ns`,
+and an existing record is never rewritten. The raw
 log is never registered as an attachment. A step whose `update_from_output`
 raised (`update_failed`) keeps its memberships with outcome `unknown`, no
 output tokens and nothing read from its counters; the coverage block counts
 such steps. A request's `input_tokens` is its prompt at the first sighting;
 a `resumable` request's later prompts are on its memberships.
 
+Each wall stamp the import copies keeps its second read beside it
+(`start_wall_after_ns`, `schedule_end_wall_after_ns` and
+`completed_wall_after_ns` on a step, `admitted_wall_after_ns` and
+`enqueued_wall_after_ns` on a request, and `wall_after_ns` in a finish), so
+a reader can place the stamp on the shared wall clock with a stated bound;
+it is null for a hook from before the field.
+
+Every record the import writes names its epoch and its `source_seq_max` in
+its metadata: the `seq` of the last raw record it was derived from, so an
+import whose read had reached that record could have written it. For a step
+that is the record that made it final (its `completed` record, the first
+completion of a later step when its own output never came, or the last
+record of an ended epoch); a membership adds the `terminal` record of a
+finish it carries; a request takes its first final step, its alias and its
+`enqueued` record; a clock alignment takes the hello, and names the
+goodbye that ends its validity apart, in `valid_to_source_seq` (null until
+one is read); a preemption stage, written only with its request, takes the
+later of its own record and its request's.
+
 **Binding.** A request is the run's when its alias `external` is
 `chatcmpl-<x_request_id>` or `cmpl-<x_request_id>-<i>` for an
-`x_request_id` the artifact recorded; without an alias, the internal ID's
+`x_request_id` the artifact recorded, in an `infer.dispatch` record (at the
+send) or an `infer.request` record (at the end), so an import of a run still
+under way binds the requests in flight; without an alias, the internal ID's
 shape only proposes the same exact match, with vLLM's random suffix
 stripped only when the hello says `request_id_randomization` is on (both
 forms are tried when it is unknown). Every other ID is foreign, or
@@ -333,12 +557,50 @@ A reused internal
 ID (randomization off) is split into one execution per admission, also
 across imports.
 
-**Which steps are kept.** Steps an imported GPU activity references and
-steps with a run member are always kept. A step with only other clients'
+**Which steps are kept.** Steps an imported GPU activity references, steps
+with a run member, and steps that preempted a run request are always kept. A step with only other clients'
 requests is kept when the engine's wall clock is the client's (same host
-and boot) and the step lies inside a run phase or trace window; otherwise
-it is counted in the summary, not written. A step that scheduled no request
+and boot) and the step lies inside a run phase, a trace window or an
+incident watcher's `infer.incident_window`; otherwise
+it is counted in the summary, not written. A phase that has an
+`infer.phase_start` record but no `infer.phase_window` yet runs from its
+start to the session's terminal `infer.session` record, or with no end while
+the session is still running. A client that was killed writes no terminal
+record, and its artifact cannot be told from a run still under way, so its
+phase stays open; with `--server-stopped` no step can follow, and the phase
+ends at the last record the client wrote. A step that scheduled no request
 (an idle scheduler call) is counted as empty, not written.
+
+**Stages.** Preemptions, cache resets and pause changes are written as
+`infer.stage` records on the engine's monotonic clock, each with its
+`epoch`, the raw `seq` and its `source_seq_max` in the metadata, and the
+bracketing wall reads:
+
+| `name` | One per | Refers to | Dated by |
+| --- | --- | --- | --- |
+| `engine.preempted` | attempt a step preempted to free memory | the attempt's request (`metadata.attempt`) and that step | the step's `schedule()` call |
+| `engine.cache_reset` | `cache_reset` record | the last step written before it | the reset call |
+| `engine.preempted_by_reset` | request running at a reset with `reset_running_requests` | its request, and the reset's step if it has one | the reset call |
+| `engine.pause_transition` | `pause` record, with `from` and `to` | the last step written before it | its stamp |
+
+vLLM lists a reset's preemptions in the next step's `preempted` along with
+the step's own, so of a step's preemptions those a reset since the previous
+step made are the reset's. Until that next step is final (read, and its
+output too), the import holds its mark below the reset and reads it again,
+so a later import never reads the step without the reset and takes the
+reset's preemptions for the step's own. A reset with nothing running, as
+vLLM's default pause makes after aborting every request, holds nothing. A reset's preemptions stand
+even when the reset failed, since vLLM preempts before it checks.
+`engine.preempted` says in `reset_observed` whether the hook records resets
+at all: without them, a reset's preemptions look like the step's own. A
+request preempted by a reset whose request record a pending step will
+write waits for it in the same way; another client's that no written step
+ran is counted as `unreferenced`, and one in an epoch without its key as
+`withheld`, in the epoch's `stages` counts. A reset or pause with no step
+written before it goes in the epoch's `unanchored` list with its `seq`, its
+times and its fields. Every import that reads such a record again lists it
+again, so a reader joining imports keys these facts by epoch and `seq`. Each stage's ID is fixed by the epoch and the raw
+`seq`, so no import writes one twice.
 
 **Device binding for traces.** A worker hello names the worker's host, pid,
 CUDA ordinal and GPU UUID. `import-trace --vllm-execution-dir DIR` and the
@@ -372,6 +634,12 @@ clock scope, never a sum:
    range, and finishes no step could carry. The warm-up and graph-capture
    calls before the first serving step (`startup_unranged`) are shown apart:
    they never have a range, so they are not loss.
+
+The `requests` part counts the imported executions by ownership, the
+run's requests bound to one (`run_requests_bound`), and the run's requests
+(`run_requests_total`): each with an `infer.request` or `infer.dispatch`
+record, so a request a crashed client sent but never recorded the end of
+still counts.
 
 A case's figure covers every step one of its requests shared, so a case
 that shared a batch with another case or with other clients is labelled

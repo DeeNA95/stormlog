@@ -10,7 +10,7 @@ overrode a value.
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 
 THRESHOLDS_VERSION = "diagnosis_thresholds_v1"
 
@@ -18,6 +18,7 @@ QUEUE_MEDIAN_WAITING = "queue_saturation.median_waiting_requests"
 KV_PREEMPTIONS = "kv_preemption_pressure.preemptions"
 PREFIX_HIT_RATIO_DROP = "prefix_cache_loss.hit_ratio_drop"
 PREFIX_MIN_QUERIED = "prefix_cache_loss.min_queried_tokens"
+PREFIX_WORKING_SET_RATIO = "prefix_cache_loss.working_set_ratio"
 LOOP_STALL_FACTOR = "host_stall.stall_factor"
 LOOP_STALL_FLOOR_NS = "host_stall.stall_floor_ns"
 LOOP_NO_BASELINE_FLOOR_NS = "host_stall.no_baseline_floor_ns"
@@ -25,6 +26,21 @@ LOOP_BASELINE_WINDOW_NS = "host_stall.baseline_window_ns"
 LOOP_MIN_BUSY_STEPS = "host_stall.min_busy_steps"
 LOOP_MATCHED_BIN_MIN_STEPS = "host_stall.matched_bin_min_steps"
 LOOP_HEARTBEAT_GRACE_NS = "host_stall.heartbeat_grace_ns"
+QUEUE_WITNESS_SHARE = "queue_saturation.witness_request_share"
+QUEUE_CONTRIBUTION = "queue_saturation.ttft_excess_share"
+QUEUE_STALL_SHARE = "queue_saturation.stall_excess_share"
+QUEUE_FRONT_SHARE = "queue_saturation.front_excess_share"
+QUEUE_KV_SHARE = "queue_saturation.kv_hold_share"
+QUEUE_COMPETITOR_FLOOR = "queue_saturation.competitor_floor_share"
+WORKLOAD_RATE_RATIO = "load_increase.arrival_rate_ratio"
+WORKLOAD_LENGTH_RATIO = "workload.length_ratio"
+WORKLOAD_SHARE_DROP = "prefix_sharing_drop.share_drop"
+SELECTION_WINDOW_S = "selection.window_seconds"
+SELECTION_SPAN_CAP_S = "selection.span_cap_seconds"
+SELECTION_MIN_REQUESTS = "selection.min_requests"
+SELECTION_REFERENCE_MIN = "selection.reference_min_requests"
+SELECTION_ALPHA = "selection.alpha"
+SELECTION_MIN_ABOVE = "selection.min_above"
 
 DEFAULT_THRESHOLDS: Mapping[str, float] = MappingProxyType(
     {
@@ -38,6 +54,10 @@ DEFAULT_THRESHOLDS: Mapping[str, float] = MappingProxyType(
         # decides: vLLM counts every prompt token of a new request as a
         # query, so one short, unseen prompt alone has a ratio of 0.
         PREFIX_MIN_QUERIED: 2048.0,
+        # The shared prefixes a subject's requests declare, against as many
+        # of the latest reference requests: a working set this much larger
+        # is evicted by an LRU cache without any fault.
+        PREFIX_WORKING_SET_RATIO: 1.1,
         # An engine-loop stall is at least this many times the median
         # completion cadence of the busy steps before it...
         LOOP_STALL_FACTOR: 10.0,
@@ -56,8 +76,105 @@ DEFAULT_THRESHOLDS: Mapping[str, float] = MappingProxyType(
         # heard from this recently: three of its one-second heartbeats, since
         # under load they slip (2.3 s apart on a real vLLM 0.30.0 run).
         LOOP_HEARTBEAT_GRACE_NS: 3_000_000_000.0,
+        # A capacity witness: the share of steps spanning the waits that ran
+        # at max_num_seqs or at the max_num_batched_tokens budget.
+        # A capacity witness: the share of the subject's requests whose wait
+        # ran mostly through steps at capacity (max_num_seqs, counting slots
+        # freed in the step before, or the max_num_batched_tokens budget).
+        QUEUE_WITNESS_SHARE: 0.5,
+        # The queue explains the incident when its wait excess is at least
+        # this share of the TTFT excess.
+        QUEUE_CONTRIBUTION: 0.5,
+        # Engine stalls explain the waits instead when they hold the median
+        # waiting request back for this share of the wait excess: a stall
+        # holds a request back by no more than its own length.
+        QUEUE_STALL_SHARE: 0.5,
+        # Time before the queue (engine ingress, the API server) explains the
+        # excess instead when its own excess is this share of the wait's.
+        QUEUE_FRONT_SHARE: 0.25,
+        # The subject's own preempted requests, back at the head of the queue
+        # until they resume, held its waits for this share of the excess: an
+        # eligible KV finding is then upstream of the queue.
+        QUEUE_KV_SHARE: 0.5,
+        # Below this share of the wait excess a competitor is ruled out;
+        # between it and the competitor's own cut it is contributing, which
+        # leaves the queue no fault claim.
+        QUEUE_COMPETITOR_FLOOR: 0.1,
+        # Workload changes: arrivals faster by this ratio (interval's lower
+        # bound), prompts or outputs longer by this ratio, or this much less
+        # of the requests declaring a shared prefix.
+        WORKLOAD_RATE_RATIO: 1.25,
+        WORKLOAD_LENGTH_RATIO: 1.1,
+        WORKLOAD_SHARE_DROP: 0.1,
+        # Incident selection: base windows of 1 s, joined until each holds
+        # 20 requests or spans 30 s.
+        SELECTION_WINDOW_S: 1.0,
+        SELECTION_SPAN_CAP_S: 30.0,
+        SELECTION_MIN_REQUESTS: 20.0,
+        # Reference requests needed before a window is tested: the fewest
+        # that bound a p90 under the shared sufficiency rule (#213's
+        # quantile_minimum_n(0.90) with margin 5 at 95%).
+        SELECTION_REFERENCE_MIN: 114.0,
+        # One-sided Fisher's exact test level, and the fewest requests above
+        # the reference p90 a flagged window must hold.
+        SELECTION_ALPHA: 0.01,
+        SELECTION_MIN_ABOVE: 3.0,
     }
 )
+
+
+# What an override must be to mean anything: a share outside 0 to 1, a
+# ratio below 1 or a negative count would turn a rule inside out, and a
+# window under a nanosecond holds nothing.
+_Range = tuple[Callable[[float], bool], str]
+_SHARE: _Range = (lambda v: 0.0 <= v <= 1.0, "a share from 0 to 1")
+_RATIO: _Range = (lambda v: v >= 1.0, "a ratio of at least 1")
+_COUNT: _Range = (lambda v: v >= 0.0, "a count of at least 0")
+_POSITIVE: _Range = (lambda v: v > 0.0, "positive")
+_AT_LEAST_ONE: _Range = (lambda v: v >= 1.0, "at least 1")
+_NANOSECOND: _Range = (lambda v: int(v * 1e9) >= 1, "at least one nanosecond")
+_LEVEL: _Range = (lambda v: 0.0 < v <= 1.0, "a level above 0 and at most 1")
+
+RANGES: Mapping[str, _Range] = MappingProxyType(
+    {
+        QUEUE_MEDIAN_WAITING: _COUNT,
+        KV_PREEMPTIONS: _COUNT,
+        PREFIX_HIT_RATIO_DROP: _SHARE,
+        PREFIX_MIN_QUERIED: _COUNT,
+        PREFIX_WORKING_SET_RATIO: _RATIO,
+        LOOP_STALL_FACTOR: _POSITIVE,
+        LOOP_STALL_FLOOR_NS: _POSITIVE,
+        LOOP_NO_BASELINE_FLOOR_NS: _POSITIVE,
+        LOOP_BASELINE_WINDOW_NS: _POSITIVE,
+        LOOP_MIN_BUSY_STEPS: _POSITIVE,
+        LOOP_MATCHED_BIN_MIN_STEPS: _POSITIVE,
+        LOOP_HEARTBEAT_GRACE_NS: _POSITIVE,
+        QUEUE_WITNESS_SHARE: _SHARE,
+        QUEUE_CONTRIBUTION: _SHARE,
+        QUEUE_STALL_SHARE: _SHARE,
+        QUEUE_FRONT_SHARE: _SHARE,
+        QUEUE_KV_SHARE: _SHARE,
+        QUEUE_COMPETITOR_FLOOR: _SHARE,
+        WORKLOAD_RATE_RATIO: _RATIO,
+        WORKLOAD_LENGTH_RATIO: _RATIO,
+        WORKLOAD_SHARE_DROP: _SHARE,
+        SELECTION_WINDOW_S: _NANOSECOND,
+        SELECTION_SPAN_CAP_S: _NANOSECOND,
+        SELECTION_MIN_REQUESTS: _AT_LEAST_ONE,
+        SELECTION_REFERENCE_MIN: _AT_LEAST_ONE,
+        SELECTION_ALPHA: _LEVEL,
+        SELECTION_MIN_ABOVE: _COUNT,
+    }
+)
+
+
+def range_error(key: str, value: float) -> str | None:
+    """Why ``value`` cannot be the finite threshold ``key`` of the table, or
+    None when it can."""
+    test, description = RANGES[key]
+    return (
+        None if test(value) else f"threshold {key} must be {description}, not {value!r}"
+    )
 
 
 def resolve_threshold(
@@ -85,7 +202,25 @@ __all__ = [
     "LOOP_STALL_FLOOR_NS",
     "PREFIX_HIT_RATIO_DROP",
     "PREFIX_MIN_QUERIED",
+    "PREFIX_WORKING_SET_RATIO",
+    "QUEUE_COMPETITOR_FLOOR",
+    "QUEUE_CONTRIBUTION",
+    "QUEUE_FRONT_SHARE",
+    "QUEUE_KV_SHARE",
     "QUEUE_MEDIAN_WAITING",
+    "QUEUE_STALL_SHARE",
+    "QUEUE_WITNESS_SHARE",
+    "RANGES",
+    "SELECTION_ALPHA",
+    "SELECTION_MIN_ABOVE",
+    "SELECTION_MIN_REQUESTS",
+    "SELECTION_REFERENCE_MIN",
+    "SELECTION_SPAN_CAP_S",
+    "SELECTION_WINDOW_S",
     "THRESHOLDS_VERSION",
+    "WORKLOAD_LENGTH_RATIO",
+    "WORKLOAD_RATE_RATIO",
+    "WORKLOAD_SHARE_DROP",
+    "range_error",
     "resolve_threshold",
 ]

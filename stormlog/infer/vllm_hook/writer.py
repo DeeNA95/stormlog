@@ -90,6 +90,13 @@ class EpochWriter:
         self._counters = _Counters()
         self._queue: deque[_Queued] = deque()
         self._queued_bytes = 0
+        # Records taken from the queue and not yet written: with the queue,
+        # what a heartbeat says is still to come.
+        self._in_flight = 0
+        # Records reserved and not yet queued or dropped: their last stamps
+        # are taken after the reservation, so a heartbeat stamped meanwhile
+        # must count them too.
+        self._reserved = 0
         self._condition = threading.Condition()
         self._closing = False
         # Set once goodbye is written; no heartbeat record may follow it.
@@ -112,27 +119,63 @@ class EpochWriter:
         backlog nor a client's long request IDs cost the caller an encoding.
         The rest are serialized now. ``fields`` must not reuse the common
         fields' names, which the writer thread adds with the sequence number.
+
+        The record is pending from the call on, while it is serialized; a
+        caller that stamps it before the call reserves it first (``reserve``)
+        so that it is pending from before its stamps.
         """
-        if self._dropped_unserialized(kind, _floor(fields)):
-            return
-        body = self._body(fields)
-        if body is None:
-            return
-        size = len(body)
+        with self.reserve() as reservation:
+            reservation.emit(kind, fields)
+
+    def reserve(self) -> Reservation:
+        """Count one record as pending from now, before its stamps are
+        taken, so a heartbeat stamped after them is written knowing it is to
+        come. It stops being pending in the same hold of the lock that
+        queues or drops it, so no heartbeat falls between; a reservation
+        left without its record stops when it is closed."""
         with self._condition:
-            if size > self.limits.record_bytes:
-                self._counters.dropped[f"{kind}_oversized"] += 1
-                return
-            full = (
-                len(self._queue) >= self.limits.queue_records
-                or self._queued_bytes + size > self.limits.queue_bytes
-            )
-            if full or self._closing:
-                self._counters.dropped[kind] += 1
-                return
-            self._queue.append((kind, body))
-            self._queued_bytes += size
-            self._condition.notify()
+            self._reserved += 1
+        return Reservation(self)
+
+    def _emit_reserved(self, kind: str, fields: dict[str, Any]) -> None:
+        try:
+            body = self._serialized(kind, fields)
+        except BaseException:
+            self._release()
+            raise
+        with self._condition:
+            self._reserved -= 1
+            if body is not None:
+                self._enqueue(kind, body)
+
+    def _release(self) -> None:
+        with self._condition:
+            self._reserved -= 1
+
+    def _serialized(self, kind: str, fields: dict[str, Any]) -> str | None:
+        """The record's JSON object, or None when it was dropped unserialized
+        or could not be encoded (each counted)."""
+        if self._dropped_unserialized(kind, _floor(fields)):
+            return None
+        return self._body(fields)
+
+    def _enqueue(self, kind: str, body: str) -> None:
+        """Queue a serialized record, or drop and count it; the caller holds
+        the lock."""
+        size = len(body)
+        if size > self.limits.record_bytes:
+            self._counters.dropped[f"{kind}_oversized"] += 1
+            return
+        full = (
+            len(self._queue) >= self.limits.queue_records
+            or self._queued_bytes + size > self.limits.queue_bytes
+        )
+        if full or self._closing:
+            self._counters.dropped[kind] += 1
+            return
+        self._queue.append((kind, body))
+        self._queued_bytes += size
+        self._condition.notify()
 
     def count_error(self) -> None:
         with self._condition:
@@ -164,6 +207,7 @@ class EpochWriter:
                 self._write(kind, body)
                 with self._condition:
                     self._queued_bytes -= len(body)
+                    self._in_flight -= 1
                 if self._segment.size >= self.limits.segment_bytes:
                     self._seal()
                 # Checked per record, so a slow disk delays these by one write.
@@ -191,6 +235,7 @@ class EpochWriter:
             batch: list[_Queued] = []
             while self._queue and len(batch) < self.limits.batch_records:
                 batch.append(self._queue.popleft())
+            self._in_flight = len(batch)
             closing = self._closing and not self._queue
             return batch, closing
 
@@ -227,7 +272,7 @@ class EpochWriter:
                 return
             seq = self._counters.last_seq + 1
         if kind == "goodbye":
-            body = _dumps({**_stamp(), "last_seq": seq})
+            body = _dumps({**stamp(), "last_seq": seq})
         common = {"format": FORMAT, "kind": kind, "epoch": self.epoch, "seq": seq}
         line = _join(_dumps(common), body)
         with self._condition:
@@ -261,13 +306,19 @@ class EpochWriter:
         with self._condition:
             counters = self._counters
             status: dict[str, Any] = {
-                **_stamp(),
+                **stamp(),
                 "last_seq": counters.last_seq,
                 "dropped": dict(counters.dropped),
                 "errors": counters.errors,
                 "bytes": counters.bytes,
                 "capped": counters.capped,
                 "queued": len(self._queue),
+                # Accepted before this stamp and not yet written: they take
+                # the next sequences, after this record.
+                "pending": len(self._queue) + self._in_flight + self._reserved,
+                # Of those, the ones not queued yet: another thread's later
+                # record may be queued ahead of them.
+                "reserved": self._reserved,
             }
         try:
             status.update(self._status_fields())
@@ -297,6 +348,33 @@ class EpochWriter:
             return True
         self.count_error()
         return False
+
+
+class Reservation:
+    """One record counted as pending until it is emitted, or until the
+    reservation is closed without it."""
+
+    def __init__(self, writer: EpochWriter) -> None:
+        self._writer = writer
+        self._open = True
+
+    def __enter__(self) -> Reservation:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def emit(self, kind: str, fields: dict[str, Any]) -> None:
+        """Emit the reserved record, as ``EpochWriter.emit`` does."""
+        if not self._open:
+            raise RuntimeError("a reservation is for one record")
+        self._open = False
+        self._writer._emit_reserved(kind, fields)
+
+    def close(self) -> None:
+        if self._open:
+            self._open = False
+            self._writer._release()
 
 
 class _Segment:
@@ -414,8 +492,12 @@ def _write_all(fd: int, data: bytes) -> bool:
     return True
 
 
-def _stamp() -> dict[str, int]:
-    return {"wall_ns": time.time_ns(), "mono_ns": time.monotonic_ns()}
+def stamp() -> dict[str, int]:
+    """A monotonic read bracketed by two wall reads: the wall time at the
+    monotonic read lies between ``wall_ns`` and ``wall_after_ns``."""
+    wall = time.time_ns()
+    mono = time.monotonic_ns()
+    return {"wall_ns": wall, "mono_ns": mono, "wall_after_ns": time.time_ns()}
 
 
 def _write_key(path: Path) -> bytes:
@@ -455,4 +537,11 @@ def _unlink(path: Path) -> None:
         pass
 
 
-__all__ = ["FORMAT", "EpochWriter", "WriterLimits", "remove_old_epochs"]
+__all__ = [
+    "FORMAT",
+    "EpochWriter",
+    "Reservation",
+    "WriterLimits",
+    "remove_old_epochs",
+    "stamp",
+]

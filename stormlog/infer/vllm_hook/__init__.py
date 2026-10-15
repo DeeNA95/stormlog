@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 import socket
 import threading
-import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -22,14 +21,18 @@ from typing import Any
 from ..host_clock import host_boot_id
 from . import gate
 from .engine import EngineRecorder
+from .process import process_fields
 from .worker import RunnerRecorder, worker_identity
-from .writer import EpochWriter, WriterLimits, remove_old_epochs
+from .writer import EpochWriter, WriterLimits, remove_old_epochs, stamp
 
 ENV_DIR = "STORMLOG_VLLM_HOOK_DIR"
 ENV_NVTX = "STORMLOG_VLLM_HOOK_NVTX"
 ENV_RETAIN_HOURS = "STORMLOG_VLLM_HOOK_RETAIN_HOURS"
 ENV_MAX_BYTES = "STORMLOG_VLLM_HOOK_MAX_BYTES"
 RECORDER_ATTRIBUTE = "_stormlog_recorder"
+# The optional record kinds a patched class emits; only methods the installed
+# vLLM has are patched, so only their kinds are claimed.
+OBSERVES_ATTRIBUTE = "_stormlog_observes"
 
 _LOCK = threading.Lock()
 _PATCHED = False
@@ -115,7 +118,7 @@ def _patch_engine(settings: _Settings) -> None:
 
     def scheduler_schedule(self: Any, *args: Any, **kwargs: Any) -> Any:
         recorder = getattr(self, RECORDER_ATTRIBUTE, None)
-        start = (time.time_ns(), time.monotonic_ns())
+        start = stamp()
         output = schedule(self, *args, **kwargs)
         if recorder is not None:
             _guard(recorder, lambda: recorder.on_schedule(self, output, start))
@@ -172,13 +175,85 @@ def _patch_engine(settings: _Settings) -> None:
     setattr(Scheduler, "update_from_output", scheduler_update)
     setattr(Scheduler, "_free_request", scheduler_free)
     setattr(EngineCore, "preprocess_add_request", engine_admit)
+    _patch_optional(Scheduler, "set_pause_state", "pause", _wrap_set_pause_state)
+    _patch_optional(Scheduler, "add_request", "enqueued", _wrap_add_request)
+    _patch_optional(
+        Scheduler, "reset_prefix_cache", "cache_reset", _wrap_reset_prefix_cache
+    )
+
+
+def _patch_optional(cls: Any, name: str, kind: str, wrap: Callable[[Any], Any]) -> None:
+    """Wrap ``cls.name`` when this vLLM has it, and claim ``kind`` for it."""
+    original = getattr(cls, name, None)
+    if original is None:
+        return
+    setattr(cls, name, wrap(original))
+    setattr(cls, OBSERVES_ATTRIBUTE, (*getattr(cls, OBSERVES_ATTRIBUTE, ()), kind))
+
+
+def _wrap_set_pause_state(set_pause_state: Any) -> Any:
+    def scheduler_set_pause_state(
+        self: Any, pause_state: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        recorder = getattr(self, RECORDER_ATTRIBUTE, None)
+        if recorder is None:
+            return set_pause_state(self, pause_state, *args, **kwargs)
+        before = _guard(recorder, lambda: getattr(self, "pause_state", None))
+        result = set_pause_state(self, pause_state, *args, **kwargs)
+        _guard(recorder, lambda: recorder.on_pause(before, pause_state))
+        return result
+
+    return scheduler_set_pause_state
+
+
+def _wrap_add_request(add_request: Any) -> Any:
+    def scheduler_add_request(
+        self: Any, request: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        recorder = getattr(self, RECORDER_ATTRIBUTE, None)
+        if recorder is None:
+            return add_request(self, request, *args, **kwargs)
+        # A streaming-input request's later inputs reuse its live ID; only
+        # its first add enters it into the scheduler.
+        new = _guard(recorder, lambda: str(request.request_id) not in self.requests)
+        # Reserved before the stamp: vLLM's own call runs between the two.
+        with recorder.writer.reserve() as reservation:
+            at = stamp()
+            result = add_request(self, request, *args, **kwargs)
+            if new:
+                _guard(recorder, lambda: recorder.on_enqueue(request, at, reservation))
+        return result
+
+    return scheduler_add_request
+
+
+def _wrap_reset_prefix_cache(reset: Any) -> Any:
+    def scheduler_reset_prefix_cache(self: Any, *args: Any, **kwargs: Any) -> Any:
+        recorder = getattr(self, RECORDER_ATTRIBUTE, None)
+        if recorder is None:
+            return reset(self, *args, **kwargs)
+        # Read before the call: with reset_running_requests vLLM preempts
+        # every running request first, and then checks the reset succeeded.
+        call = _guard(recorder, lambda: recorder.reset_call(self, args, kwargs))
+        try:
+            result = reset(self, *args, **kwargs)
+        except BaseException:
+            _guard(recorder, lambda: recorder.on_cache_reset(call, None))
+            raise
+        _guard(recorder, lambda: recorder.on_cache_reset(call, bool(result)))
+        return result
+
+    return scheduler_reset_prefix_cache
 
 
 def _enable_engine(scheduler: Any, vllm_config: Any, settings: _Settings) -> None:
     result = gate.check(vllm_config, scheduler=scheduler)
     writer = writer_for(settings, "engine")
     producer = producer_name(writer)
-    writer.emit("hello", _hello(writer, result, producer=producer))
+    observes = (
+        getattr(type(scheduler), OBSERVES_ATTRIBUTE, ()) if result.enabled else ()
+    )
+    writer.emit("hello", _hello(writer, result, producer=producer, observes=observes))
     if result.enabled:
         recorder = EngineRecorder(writer, producer)
         setattr(scheduler, RECORDER_ATTRIBUTE, recorder)
@@ -222,23 +297,27 @@ def _enable_worker(worker: Any, settings: _Settings) -> None:
 
 
 def _hello(
-    writer: EpochWriter, result: gate.GateResult, *, producer: str | None
+    writer: EpochWriter,
+    result: gate.GateResult,
+    *,
+    producer: str | None,
+    observes: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    wall = time.time_ns()
-    mono = time.monotonic_ns()
-    wall_after = time.time_ns()
+    clock = stamp()
     return {
         "role": writer.role,
         "host": writer.host,
         "boot_id": writer.boot_id,
         "pid": writer.pid,
         "start_ns": writer.start_ns,
+        **process_fields(),
         "vllm_version": result.config.get("vllm_version"),
         "enabled": result.enabled,
         "refused": result.refused,
         "producer": producer,
+        "observes": sorted(observes),
         "config": result.config,
-        "clock": {"wall_ns": wall, "mono_ns": mono, "gap_ns": wall_after - wall},
+        "clock": {**clock, "gap_ns": clock["wall_after_ns"] - clock["wall_ns"]},
     }
 
 
