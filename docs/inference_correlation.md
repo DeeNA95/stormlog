@@ -33,6 +33,10 @@ consumers can use `expand_inference_records(records)`. Expansion is idempotent.
 with busy intervals. Wire v4 changes storage only: interval union, attribution,
 request totals, deduplication, and clock alignment retain their meanings.
 
+Comparison summaries and manifest attachment expand contexts before reading
+run identity or clocks. Diagnosis keeps a decoder for each file while retaining
+the original physical line numbers, record IDs and hashes used to cite evidence.
+
 | Representation | Current readers | Older readers |
 | --- | --- | --- |
 | Legacy v1 and embedded v2/v3 | Supported unchanged | Supported as before |
