@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
 import pytest
 
+import stormlog.infer.vllm_hook as vllm_hook
 from stormlog.infer.vllm_execution_log import (
     FORMAT,
+    RECORD_KINDS,
     STATE_ALIVE,
     STATE_ENDED,
     STATE_GONE,
@@ -39,6 +42,30 @@ HERE = importer(NOW - WALL_OFFSET)  # on the server's host and boot
 
 def _line(epoch: str, seq: int, **fields: object) -> str:
     return json.dumps({"format": FORMAT, "epoch": epoch, "seq": seq, **fields}) + "\n"
+
+
+def _kinds_the_hook_writes() -> set[str]:
+    """Every record kind the hook's code names where it writes one: the first
+    argument of an emit or a write, or a record queued as ``(kind, body)``."""
+    writes = {"emit", "_emit_reserved", "_enqueue", "_write"}
+    kinds: set[str] = set()
+    for path in Path(vllm_hook.__file__).parent.glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            name = getattr(node.func, "attr", None)
+            first = node.args[0]
+            if name == "append" and isinstance(first, ast.Tuple) and first.elts:
+                first = first.elts[0]
+            elif name not in writes:
+                continue
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                kinds.add(first.value)
+    return kinds
+
+
+def test_record_kinds_are_the_kinds_the_hook_writes() -> None:
+    assert _kinds_the_hook_writes() == RECORD_KINDS
 
 
 def test_reads_sealed_segments_and_complete_lines_of_the_open_one(

@@ -9,12 +9,15 @@ import os
 import signal
 import sys
 import threading
+import time
 import urllib.parse
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Callable, Iterator, Sequence
 
+from .. import __version__
 from ..exit_codes import ExitCode
+from ..report import write_report
 from .analysis import (
     analyze_inference_events,
     format_analysis_text,
@@ -30,10 +33,44 @@ from .arrivals import (
     load_arrival_trace,
 )
 from .cache_state import CACHE_STATES, COLD, RESET_RETRY_SECONDS, UNSPECIFIED
+from .compare import (
+    ALL_BUDGETS,
+    EXCLUDE,
+    FAIL_INCOMPLETE,
+    FAMILIES,
+    ComparisonSpec,
+    compare_runs,
+)
+from .compare_metrics import (
+    metric_names,
+    metric_unit,
+    vacuous_budget,
+)
+from .compare_report import comparison_lines, comparison_report, error_report
+from .comparison_stats import INDEPENDENT, PAIRED, GateRule
+from .compatibility import CONFIG, MODES
 from .config import ProfileConfig, parse_float_list, parse_int_list, resolve_endpoint
+from .describe_server import (
+    DescribeOptions,
+    describe_server,
+    load_description,
+    write_description,
+)
+from .diagnosis_cli import add_diagnose_parser, cmd_diagnose
 from .errors import InferInputError, InferUsageError
+from .export_collector import CollectorExport
+from .export_config import (
+    add_export_arguments,
+    add_prometheus_arguments,
+    add_trace_context_arguments,
+    export_config_from_args,
+)
+from .manifest import AFTER as MANIFEST_AFTER
+from .manifest import attach_manifest, load_declarations
+from .populations import Segment
 from .profile import InferenceProfiler
 from .prompts import MIN_CONTROLLED_TOKENS, PROMPT_MODES, REPEAT, SHARED_PREFIX
+from .run_summary import RunSummary, summarize_run
 from .server_collector import (
     STOP_GPU_IDENTITY_CHANGED,
     STOP_SERVER_PROCESS_ENDED,
@@ -41,6 +78,7 @@ from .server_collector import (
     NvmlUnavailableError,
     collect_server_telemetry,
 )
+from .server_probe import AUTO, PROBE_MODES
 from .slo import (
     CLIENT,
     SERVER,
@@ -83,19 +121,27 @@ def main(argv: Sequence[str] | None = None, *, restore_signals: bool = True) -> 
 def _run_command(
     parser: argparse.ArgumentParser, args: argparse.Namespace, restore_signals: bool
 ) -> int:
-    if args.infer_command == "profile":
-        return cmd_profile(args)
-    if args.infer_command == "analyze":
-        return cmd_analyze(args)
-    if args.infer_command == "collect-server":
-        return cmd_collect_server(args)
-    if args.infer_command == "import-trace":
-        return cmd_import_trace(args)
-    if args.infer_command == "import-execution":
-        return cmd_import_execution(args)
     if args.infer_command == "watch":
         return cmd_watch(args, restore_signals=restore_signals)
-    parser.error(f"Unsupported infer command: {args.infer_command}")
+    handler = _handlers().get(args.infer_command)
+    if handler is None:
+        parser.error(f"Unsupported infer command: {args.infer_command}")
+    return handler(args)
+
+
+def _handlers() -> dict[str, Callable[[argparse.Namespace], int]]:
+    """Each command's handler by name; watch, which takes more, aside."""
+    return {
+        "profile": cmd_profile,
+        "analyze": cmd_analyze,
+        "collect-server": cmd_collect_server,
+        "describe-server": cmd_describe_server,
+        "attach-manifest": cmd_attach_manifest,
+        "compare": cmd_compare,
+        "import-trace": cmd_import_trace,
+        "import-execution": cmd_import_execution,
+        "diagnose": cmd_diagnose,
+    }
 
 
 def _exit_code_for(exc: Exception) -> ExitCode:
@@ -135,6 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile_parser.add_argument(
         "--run-id", default=None, help="Shared run ID for an on-host collector"
     )
+    _add_label_arguments(profile_parser)
     profile_parser.add_argument(
         "--concurrency",
         default=None,
@@ -312,10 +359,39 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _add_slo_arguments(profile_parser, "record in the artifact and judge the run by")
+    profile_parser.add_argument(
+        "--server-probe",
+        choices=PROBE_MODES,
+        default=AUTO,
+        help=(
+            "Ask the server about itself before and after the run: basic is "
+            "/version and /v1/models; auto adds vLLM's /server_info on a "
+            "loopback or private host (default: auto)"
+        ),
+    )
+    profile_parser.add_argument(
+        "--describe-server",
+        default=None,
+        metavar="FILE",
+        help="A describe-server description taken before the run, recorded as its before manifest",
+    )
+    profile_parser.add_argument(
+        "--declare",
+        default=None,
+        metavar="FILE",
+        help="A stormlog.infer.declared file of settings the operator states",
+    )
+    profile_parser.add_argument(
+        "--allow-remote-probe",
+        action="store_true",
+        help="Ask /server_info of a public host too; vLLM's dev routes skip its API key",
+    )
     _add_arrival_arguments(profile_parser)
     _add_prompt_arguments(profile_parser)
     _add_cache_arguments(profile_parser)
     _add_trace_arguments(profile_parser)
+    add_export_arguments(profile_parser)
+    add_trace_context_arguments(profile_parser)
 
     analyze_parser = subparsers.add_parser(
         "analyze",
@@ -432,10 +508,93 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Number of group members; each rank 0..N-1 needs a collector",
     )
+    add_prometheus_arguments(collector_parser)
+    _add_describe_server_parser(subparsers)
+    _add_attach_manifest_parser(subparsers)
+    _add_compare_parser(subparsers)
     _add_import_trace_parser(subparsers)
     _add_import_execution_parser(subparsers)
     add_watch_parser(subparsers)
+    add_diagnose_parser(subparsers)
     return parser
+
+
+def _add_describe_server_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "describe-server",
+        help="Describe a running vLLM server from the host that serves it",
+    )
+    parser.add_argument(
+        "--pid", required=True, type=int, help="vLLM's API server process"
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="The run this description belongs to, as passed to `infer profile`",
+    )
+    parser.add_argument("--output", required=True, help="JSON path to write")
+    parser.add_argument(
+        "--server-log",
+        default=None,
+        help="The server's log file, for the choices it made at start-up",
+    )
+    parser.add_argument(
+        "--python",
+        default="auto",
+        help=(
+            "Interpreter to ask for Python and package versions: auto (the "
+            "server's own, from its command line), a path, or none"
+        ),
+    )
+    parser.add_argument(
+        "--hash-weights",
+        action="store_true",
+        help="Hash every file of a local model directory (SHA-256, cached)",
+    )
+    parser.add_argument(
+        "--verify-model-files",
+        action="store_true",
+        help="Hash every hub-cache blob to check it against its name",
+    )
+    parser.add_argument(
+        "--digest-cache",
+        default=None,
+        help="Where --hash-weights keeps digests between runs",
+    )
+    parser.add_argument("--no-gpu", action="store_true", help="Describe without NVML")
+
+
+def _add_label_arguments(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group(
+        "experiment labels", "Recorded with the run; infer compare pairs runs by block"
+    )
+    group.add_argument("--experiment", default=None, help="The experiment's ID")
+    group.add_argument("--arm", default=None, help="This run's arm, e.g. baseline")
+    group.add_argument("--block", default=None, help="This run's block")
+    group.add_argument(
+        "--position", type=int, default=None, help="Its position within the block"
+    )
+    group.add_argument(
+        "--attempt", type=int, default=None, help="Its attempt number (default 1)"
+    )
+
+
+def _labels(args: argparse.Namespace) -> dict[str, Any] | None:
+    """The run's experiment labels, or None when none was given."""
+    labels = {
+        "experiment": args.experiment,
+        "arm": args.arm,
+        "block": args.block,
+        "position": args.position,
+        "attempt": args.attempt,
+    }
+    if all(value is None for value in labels.values()):
+        return None
+    if labels["block"] is not None and (
+        labels["experiment"] is None or labels["arm"] is None
+    ):
+        raise InferUsageError("--block needs --experiment and --arm")
+    return labels
 
 
 def _add_slo_arguments(parser: argparse.ArgumentParser, purpose: str) -> None:
@@ -550,7 +709,8 @@ def _add_import_execution_parser(subparsers: Any) -> None:
             "The server that wrote this log is no longer running: an epoch "
             "without a goodbye record is gone and its pending steps are final. "
             "Without it, silence is judged only on the server's own host and "
-            "boot; from anywhere else such an epoch's pending steps wait"
+            "boot; from anywhere else such an epoch's pending steps wait. A "
+            "phase a killed client left begun then ends at its last record"
         ),
     )
     parser.add_argument(
@@ -609,6 +769,15 @@ def _add_arrival_arguments(parser: argparse.ArgumentParser) -> None:
             "Seconds that requests still running when the measured window ends "
             "may take to finish before they are recorded as cancelled "
             "(default: --timeout)"
+        ),
+    )
+    parser.add_argument(
+        "--stop-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "End the measured window when PATH appears, as if --duration had "
+            "run out: arrivals stop, the drain runs and the run completes"
         ),
     )
     parser.add_argument(
@@ -796,7 +965,10 @@ def cmd_profile(args: argparse.Namespace) -> int:
             "the cache, and each case records its cache state as unverified"
         )
     with _usage_errors():
-        profiler = InferenceProfiler(_profile_config(args), on_warning=_print_warning)
+        profiler = InferenceProfiler(
+            _profile_config(args), on_warning=_print_warning, on_notice=_print_notice
+        )
+        profiler.prepare()
     _warn_about_unjudgeable_criteria(profiler.config)
     report = profiler.run()
     print(format_analysis_text(report))
@@ -835,6 +1007,20 @@ def _usage_errors() -> Iterator[None]:
         raise InferUsageError(
             f"{exc}; install it or choose another --tokenizer or --system-sampler"
         ) from exc
+
+
+def _manifest_inputs(args: argparse.Namespace) -> dict[str, Any]:
+    """The before description and the declarations, read and checked now."""
+    return {
+        "server_description": (
+            load_description(Path(args.describe_server))
+            if args.describe_server
+            else None
+        ),
+        "declarations": (
+            load_declarations(Path(args.declare)) if args.declare else None
+        ),
+    }
 
 
 def _profile_config(args: argparse.Namespace) -> ProfileConfig:
@@ -882,6 +1068,7 @@ def _profile_config(args: argparse.Namespace) -> ProfileConfig:
         max_in_flight=128 if args.max_in_flight is None else int(args.max_in_flight),
         overflow=args.overflow or "wait",
         drain_timeout_seconds=args.drain_timeout,
+        stop_file=args.stop_file,
         prompt_mode=args.prompt_mode,
         shared_prefix_ratio=args.shared_prefix_ratio,
         prefix_groups=args.prefix_groups,
@@ -903,6 +1090,11 @@ def _profile_config(args: argparse.Namespace) -> ProfileConfig:
         ),
         slo=slo,
         slo_source=slo_source if slo is not None else None,
+        export=export_config_from_args(args),
+        server_probe=args.server_probe,
+        allow_remote_probe=args.allow_remote_probe,
+        **_manifest_inputs(args),
+        labels=_labels(args),
     )
 
 
@@ -979,8 +1171,300 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     return int(ExitCode.OK)
 
 
+def _add_compare_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "compare",
+        help="Compare a baseline arm of inference runs with a candidate arm",
+    )
+    parser.add_argument("--baseline", nargs="+", required=True, metavar="ARTIFACT")
+    parser.add_argument("--candidate", nargs="+", required=True, metavar="ARTIFACT")
+    parser.add_argument("--case", action="append", default=None, help="Only this case")
+    _add_slo_arguments(parser, "judge both arms by, instead of each run's own")
+    parser.add_argument(
+        "--mode",
+        choices=MODES,
+        default=CONFIG,
+        help="config: only allowed fields differ; overhead: the candidate adds "
+        "observers to an observer-free baseline; incremental: it adds declared "
+        "observers to shared ones",
+    )
+    parser.add_argument(
+        "--design",
+        choices=("auto", PAIRED, INDEPENDENT),
+        default="auto",
+        help="auto pairs runs by block when every run has one",
+    )
+    parser.add_argument(
+        "--allow",
+        action="append",
+        default=[],
+        metavar="FIELD",
+        help="A field or vllm_config JSON pointer that may differ between arms",
+    )
+    parser.add_argument(
+        "--allow-within-arm",
+        action="append",
+        default=[],
+        metavar="FIELD",
+        help="A field or vllm_config JSON pointer that may differ between the "
+        "runs of one arm; each such pair is named in the diagnostics",
+    )
+    parser.add_argument(
+        "--added-observers",
+        default="",
+        metavar="NAME,...",
+        help="Observers the candidate adds, in incremental mode",
+    )
+    parser.add_argument(
+        "--gate",
+        action="append",
+        default=[],
+        metavar="METRIC=RULE:BUDGET",
+        help="Gate a metric (or pattern), e.g. client.e2e.p95=non-inferiority:0.05; "
+        "budgets are fractions: 0.05 is 5%%, or 5 points for attainment",
+    )
+    parser.add_argument(
+        "--fallback",
+        action="append",
+        default=[],
+        metavar="METRIC=BUDGET:UNIT",
+        help="A pre-registered budget on the difference, for a log ratio left "
+        "undefined by a zero",
+    )
+    parser.add_argument("--min-complete-blocks", type=int, default=None)
+    parser.add_argument("--min-attainment", type=float, default=None)
+    parser.add_argument("--min-run-pass", type=float, default=0.5)
+    parser.add_argument(
+        "--attainment-model",
+        choices=("runs", "bernoulli"),
+        default="runs",
+        help="bernoulli pools requests as independent trials: model-based",
+    )
+    parser.add_argument("--family", choices=FAMILIES, default=ALL_BUDGETS)
+    parser.add_argument(
+        "--on-incomplete", choices=(EXCLUDE, FAIL_INCOMPLETE), default=EXCLUDE
+    )
+    parser.add_argument(
+        "--allow-not-evaluable",
+        action="store_true",
+        help="Exit 0 when a gate cannot be evaluated: for exploration, recorded",
+    )
+    parser.add_argument("--evidence-floor", type=float, default=1.0)
+    parser.add_argument("--confidence", type=float, default=0.95)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--vllm-spans",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="vLLM spans collected elsewhere, for every run",
+    )
+    parser.add_argument(
+        "--segment",
+        action="append",
+        default=[],
+        metavar="NAME=START:END",
+        help="Also compare this slice of each case's measured phase, in seconds "
+        "from its start; repeatable",
+    )
+    parser.add_argument(
+        "--segment-membership",
+        choices=("arrival", "overlap"),
+        default="arrival",
+        help="A segment's requests: those that arrived in it, or that overlap it",
+    )
+    parser.add_argument("--format", choices=("txt", "json"), default="txt")
+    parser.add_argument("--report", default=None, metavar="FILE")
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    """Compare two arms of runs; the report is written even for exit 5."""
+    spec = _comparison_spec(args)
+    argv = sys.argv[1:]
+    try:
+        slo, slo_source = _slo_policy(args)
+        comparison = compare_runs(
+            [_summary(path, slo, slo_source, args) for path in args.baseline],
+            [_summary(path, slo, slo_source, args) for path in args.candidate],
+            spec,
+        )
+    except InferInputError as exc:
+        _emit_report(
+            error_report(str(exc), exit_code=int(ExitCode.INVALID_INPUT), argv=argv),
+            args,
+        )
+        raise
+    exit_code = comparison.exit_code
+    report_path = Path(args.report) if args.report else None
+    if args.format == "json" or report_path is not None:
+        report = comparison_report(comparison, exit_code=exit_code, argv=argv)
+        if report_path is not None:
+            on_file = comparison_report(
+                comparison, exit_code=exit_code, argv=argv, report_path=report_path
+            )
+            write_report(report_path, on_file)
+        if args.format == "json":
+            print(json.dumps(report, indent=2, allow_nan=False))
+    if args.format == "txt":
+        print("\n".join(comparison_lines(comparison)))
+    return exit_code
+
+
+def _summary(
+    path: str, slo: SloSpec | None, slo_source: str, args: argparse.Namespace
+) -> RunSummary:
+    if not Path(path).exists():
+        raise InferInputError(f"artifact {path} not found")
+    return summarize_run(
+        path,
+        slo=slo,
+        slo_source=slo_source,
+        span_paths=args.vllm_spans,
+        segments=[_segment(item) for item in args.segment],
+        membership=args.segment_membership,
+    )
+
+
+def _segment(text: str) -> Segment:
+    """``NAME=START:END`` in seconds from the measured phase's start."""
+    name, _, span = text.partition("=")
+    start, _, end = span.partition(":")
+    if not name or not start or not end:
+        raise InferUsageError(f"--segment {text!r}: use NAME=START:END")
+    begin = _number(start, f"--segment {text!r}")
+    finish = _number(end, f"--segment {text!r}")
+    try:
+        return Segment(name, round(begin * 1e9), round(finish * 1e9))
+    except ValueError as exc:
+        raise InferUsageError(f"--segment {text!r}: {exc}") from exc
+
+
+def _emit_report(report: dict[str, Any], args: argparse.Namespace) -> None:
+    if args.report:
+        write_report(Path(args.report), report)
+    if args.format == "json":
+        print(json.dumps(report, indent=2, allow_nan=False))
+
+
+def _comparison_spec(args: argparse.Namespace) -> ComparisonSpec:
+    gates = tuple(_gate(item, args.min_complete_blocks) for item in args.gate)
+    fallbacks = tuple(_fallback(item) for item in args.fallback)
+    gated = {name for pattern, _rule in gates for name in metric_names(pattern)}
+    for pattern, _budget, _unit in fallbacks:
+        if not set(metric_names(pattern)) & gated:
+            raise InferUsageError(
+                f"--fallback {pattern}: matches no gated metric, so it would "
+                "never apply"
+            )
+    return ComparisonSpec(
+        confidence=args.confidence,
+        design=args.design,
+        mode=args.mode,
+        allow=tuple(args.allow),
+        allow_within_arm=tuple(args.allow_within_arm),
+        on_incomplete=args.on_incomplete,
+        gates=gates,
+        allow_not_evaluable=args.allow_not_evaluable,
+        min_attainment=args.min_attainment,
+        min_complete_blocks=args.min_complete_blocks,
+        min_run_pass=args.min_run_pass,
+        attainment_model=args.attainment_model,
+        family=args.family,
+        added_observers=tuple(n for n in args.added_observers.split(",") if n),
+        evidence_floor=args.evidence_floor,
+        cases=tuple(args.case) if args.case else None,
+        seed=args.seed,
+        fallbacks=fallbacks,
+    )
+
+
+def _gate(text: str, min_blocks: int | None) -> tuple[str, GateRule]:
+    """``METRIC=RULE:BUDGET`` with the metric's own unit."""
+    metric, _, rest = text.partition("=")
+    rule, _, budget = rest.partition(":")
+    unit = metric_unit(metric)
+    if not metric or not rule or not budget:
+        raise InferUsageError(f"--gate {text!r}: use METRIC=RULE:BUDGET")
+    if unit is None:
+        raise InferUsageError(
+            f"--gate {text!r}: {metric!r} names no metric, or metrics in different units"
+        )
+    amount = _number(budget, f"--gate {text!r}")
+    vacuous = vacuous_budget(metric, amount)
+    if vacuous is not None:
+        raise InferUsageError(f"--gate {text!r}: {vacuous}")
+    return metric, GateRule(rule, amount, unit, min_complete_blocks=min_blocks)
+
+
+def _fallback(text: str) -> tuple[str, float, str]:
+    metric, _, rest = text.partition("=")
+    budget, _, unit = rest.partition(":")
+    if not metric or not budget or not unit:
+        raise InferUsageError(f"--fallback {text!r}: use METRIC=BUDGET:UNIT")
+    return metric, _number(budget, f"--fallback {text!r}"), unit
+
+
+def _number(text: str, flag: str) -> float:
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise InferUsageError(f"{flag}: {text!r} is not a number") from exc
+    if not math.isfinite(value):
+        raise InferUsageError(f"{flag}: {text!r} is not a finite number")
+    return value
+
+
+def _add_attach_manifest_parser(subparsers: Any) -> None:
+    parser = subparsers.add_parser(
+        "attach-manifest",
+        help="Attach a server description taken after a run to its artifact",
+    )
+    parser.add_argument("artifact", help="The run's inference JSONL artifact")
+    parser.add_argument("description", help="A describe-server description")
+    parser.add_argument(
+        "--role",
+        choices=(MANIFEST_AFTER,),
+        default=MANIFEST_AFTER,
+        help="Which manifest it is; only after descriptions are attached later",
+    )
+
+
+def cmd_attach_manifest(args: argparse.Namespace) -> int:
+    """Append an after description to an artifact, or refuse it."""
+    record = attach_manifest(Path(args.artifact), Path(args.description))
+    print(
+        f"Attached the {record['role']} description {record['sha256'][:12]} "
+        f"to: {Path(args.artifact)}"
+    )
+    return int(ExitCode.OK)
+
+
+def cmd_describe_server(args: argparse.Namespace) -> int:
+    """Write one description of a running vLLM server."""
+    options = DescribeOptions(
+        pid=args.pid,
+        run_id=args.run_id,
+        server_log=Path(args.server_log) if args.server_log else None,
+        python=args.python,
+        hash_weights=args.hash_weights,
+        verify_model_files=args.verify_model_files,
+        digest_cache=Path(args.digest_cache) if args.digest_cache else None,
+        no_gpu=args.no_gpu,
+    )
+    try:
+        document = describe_server(options)
+    except NvmlUnavailableError as exc:
+        raise InferUsageError(f"{exc}; pass --no-gpu to describe without it") from exc
+    write_description(document, Path(args.output))
+    for issue in document.get("issues", []):
+        _print_warning(issue)
+    print(f"Server description saved to: {Path(args.output)}")
+    return int(ExitCode.OK)
+
+
 def cmd_collect_server(args: argparse.Namespace) -> int:
     """Collect telemetry on the server while a profile uses the same run ID."""
+    export = _collector_export(args)
     stop_event = threading.Event()
     previous_handlers = _stop_on_signals(stop_event)
     try:
@@ -999,6 +1483,7 @@ def cmd_collect_server(args: argparse.Namespace) -> int:
             world_size=args.world_size,
             stop_event=stop_event,
             on_warning=_print_warning,
+            observer=export,
         )
     except NvmlUnavailableError as exc:
         raise InferUsageError(
@@ -1006,11 +1491,58 @@ def cmd_collect_server(args: argparse.Namespace) -> int:
         ) from exc
     finally:
         _restore_signal_handlers(previous_handlers)
+        if export is not None:
+            _end_collector_export(export, failed=sys.exc_info()[0] is not None)
     print(
         f"Collected {result.polls} server polls to: {Path(args.output)} "
         f"(stopped: {result.stop_reason})"
     )
+    if export is not None:
+        _linger(export, args)
     return _collection_exit_code(result)
+
+
+def _end_collector_export(export: CollectorExport, *, failed: bool) -> None:
+    # A no-op after the collector closed it; a start that failed before then
+    # still frees the slot it took.
+    export.close("error")
+    if failed:
+        # No linger follows a failure, so the endpoint stops with it rather
+        # than outliving the command in a caller's process.
+        export.stop_serving()
+
+
+def _collector_export(args: argparse.Namespace) -> CollectorExport | None:
+    """The health export, checked and with its slot taken before collecting."""
+    try:
+        config = export_config_from_args(args, command="collect-server")
+    except ValueError as exc:
+        raise InferUsageError(str(exc)) from exc
+    if not config.prometheus_enabled:
+        return None
+    export = CollectorExport(
+        config,
+        run_id=args.run_id,
+        version=__version__,
+        forbidden_paths=[Path(args.output)],
+        on_warning=_print_warning,
+    )
+    try:
+        export.prepare()
+    except ValueError as exc:
+        raise InferUsageError(str(exc)) from exc
+    return export
+
+
+def _linger(export: CollectorExport, args: argparse.Namespace) -> None:
+    """Serve the final values for --prometheus-linger; Ctrl+C ends only that."""
+    try:
+        if args.prometheus_linger and export.server is not None:
+            time.sleep(args.prometheus_linger)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        export.stop_serving()
 
 
 def _collection_exit_code(result: CollectionResult) -> int:
@@ -1032,6 +1564,10 @@ def _collection_exit_code(result: CollectionResult) -> int:
 
 def _print_warning(message: str) -> None:
     print(f"Warning: {message}", file=sys.stderr)
+
+
+def _print_notice(message: str) -> None:
+    print(message, file=sys.stderr)
 
 
 def _stop_on_signals(stop_event: threading.Event) -> dict[int, Any]:

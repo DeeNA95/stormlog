@@ -57,6 +57,13 @@ the same completed session. Disk retention and in-memory retention are separate.
 
 ## Reproduction and gates
 
+The 2026-10-16 merge of `release/dev` revision `330f7fe` into
+`mlx-integration` passed 269 codec/capture/accounting/execution/docs regressions
+and 79 framework-independent MLX contracts. The merged import tests retain
+the upstream newer-hook cases and embedded/compact seed coverage. CI-pinned
+formatting, lint, mypy (257 source files) and the complexity gate passed.
+Native results below and above remain tied to their recorded qualification.
+
 ```bash
 python3 -m venv /tmp/stormlog-mlx-isolation
 /tmp/stormlog-mlx-isolation/bin/python -m pip install -e '.[mlx]' pytest jsonschema packaging

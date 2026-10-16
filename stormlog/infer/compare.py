@@ -1,0 +1,1448 @@
+"""Comparing a baseline arm of runs with a candidate arm, case by case.
+
+``compare_runs`` takes run summaries (``run_summary``) and:
+
+1. sets aside each run that cannot stand for a case, with its protocol
+   failure, and lists it. In a paired design the whole block goes, both
+   arms; a gate's pre-registered ``min_complete_blocks`` says how many may
+   go. Outcome failures are never set aside: a run that did not finish,
+   or a case a run lacks, is compared, and a value it lost fails the
+   candidate's gate (``outcome_unrecoverable``). A baseline outcome
+   failure leaves the case's contrasts ``not_evaluable``
+   (``control_failed``): a broken baseline must not pass the candidate. A
+   retried block keeps its last attempt and lists the others; a retry
+   never replaces an outcome failure;
+2. checks the runs are comparable (``compatibility``): within each arm,
+   and across arms in the comparison's mode. ``incompatible`` is an input
+   error; ``unverified`` leaves every gate ``not_evaluable``;
+3. checks the observers against the mode's contract: an ``overhead``
+   baseline has none, an ``incremental`` candidate's added observers are
+   declared, and the observers that matter are active and healthy;
+4. pairs runs by block when every run is labelled, and otherwise treats
+   the arms as independent;
+5. compares each metric (``comparison_stats``) and applies its gate;
+6. for ``--min-attainment``, judges the share of candidate runs that meet
+   the target, a claim about runs, not requests.
+
+The result is ``stormlog.infer.comparison`` v1.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any
+
+from scipy import stats
+
+from .compare_metrics import RUN_MISSES, MetricSpec, default_metrics, evidence_coverage
+from .comparison_stats import (
+    FAIL,
+    FRACTION_UNIT,
+    INDEPENDENT,
+    MIN_GATE_PAIRS,
+    NOT_EVALUABLE,
+    PAIRED,
+    PASS,
+    SIGNIFICANT,
+    GateOutcome,
+    GateRule,
+    MetricComparison,
+    clopper_pearson,
+    compare_values,
+    holm,
+    run_pass_gate,
+)
+from .compatibility import (
+    CONFIG,
+    INCOMPATIBLE,
+    INCREMENTAL,
+    MODES,
+    OVERHEAD,
+    UNVERIFIED,
+    Compatibility,
+    compatible,
+)
+from .errors import InferInputError, InferUsageError
+from .run_summary import RunSummary
+
+COMPARISON_FORMAT = "stormlog.infer.comparison"
+COMPARISON_VERSION = 1
+BASELINE = "baseline"
+CANDIDATE = "candidate"
+ALL_BUDGETS = "all_budgets"
+ANY_REGRESSION = "any_regression"
+FAMILIES = (ALL_BUDGETS, ANY_REGRESSION)
+EXCLUDE = "exclude"
+FAIL_INCOMPLETE = "fail"
+OUTCOME_UNRECOVERABLE = "outcome_unrecoverable"
+CONTROL_FAILED = "control_failed"
+PROTOCOL_FAILURE = "protocol_failure"
+# Reasons that fail a gate outright rather than leave it unjudged.
+_FAILING = (PROTOCOL_FAILURE, OUTCOME_UNRECOVERABLE)
+# A lost outcome is why a metric has too few values, whatever the
+# statistics say.
+_LOST = (OUTCOME_UNRECOVERABLE, CONTROL_FAILED)
+
+
+@dataclass(frozen=True)
+class ComparisonSpec:
+    """How to compare: design, mode, gates and what may differ."""
+
+    confidence: float = 0.95
+    design: str = "auto"
+    mode: str = CONFIG
+    # What may differ between the arms, and what may differ within one.
+    allow: tuple[str, ...] = ()
+    allow_within_arm: tuple[str, ...] = ()
+    on_incomplete: str = EXCLUDE
+    gates: tuple[tuple[str, GateRule], ...] = ()
+    allow_not_evaluable: bool = False
+    min_attainment: float | None = None
+    min_run_pass: float = 0.5
+    attainment_model: str = "runs"
+    family: str = ALL_BUDGETS
+    added_observers: tuple[str, ...] = ()
+    evidence_floor: float = 1.0
+    cases: tuple[str, ...] | None = None
+    bootstrap_min_n: int = 10
+    seed: int = 0
+    # Pre-registered fallback budgets: (metric name or pattern, budget, unit).
+    fallbacks: tuple[tuple[str, float, str], ...] = ()
+    # The pre-registered fewest complete blocks, for the attainment gate as
+    # for the metric gates: a gate rule without one takes it, and a rule that
+    # names another is refused.
+    min_complete_blocks: int | None = None
+
+    def __post_init__(self) -> None:
+        checks = (
+            (self.design in ("auto", PAIRED, INDEPENDENT), "design"),
+            (self.mode in MODES, "mode"),
+            (self.on_incomplete in (EXCLUDE, FAIL_INCOMPLETE), "on_incomplete"),
+            (self.attainment_model in ("runs", "bernoulli"), "attainment_model"),
+            (self.family in FAMILIES, "family"),
+            (0 < self.confidence < 1, "confidence"),
+            # Shares that cannot be met or cannot fail mean nothing.
+            (_share(self.min_attainment, low_open=True), "min_attainment"),
+            (_share(self.min_run_pass, low_open=True), "min_run_pass"),
+            (_share(self.evidence_floor, low_open=False), "evidence_floor"),
+        )
+        for ok, name in checks:
+            if not ok:
+                raise InferUsageError(
+                    f"comparison {name} {getattr(self, name)!r} is not valid"
+                )
+        if self.family == ANY_REGRESSION and any(
+            rule.rule != SIGNIFICANT for _, rule in self.gates
+        ):
+            raise InferUsageError(
+                "--family any_regression gates with the significant rule"
+            )
+        object.__setattr__(
+            self, "gates", _with_floor(self.gates, self.min_complete_blocks)
+        )
+
+    def gate_for(self, metric: str) -> GateRule | None:
+        """The gate on a metric: the last pattern that matches its name.
+
+        A fallback budget whose name or pattern matches the metric applies
+        to it, whichever gate pattern named the metric.
+        """
+        found = None
+        for pattern, rule in self.gates:
+            if fnmatch.fnmatchcase(metric, pattern):
+                found = rule
+        for pattern, budget, unit in self.fallbacks:
+            if found is not None and fnmatch.fnmatchcase(metric, pattern):
+                found = replace(found, fallback_budget=budget, fallback_unit=unit)
+        return found
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            "confidence": self.confidence,
+            "design": self.design,
+            "mode": self.mode,
+            "allow": list(self.allow),
+            "allow_within_arm": list(self.allow_within_arm),
+            "on_incomplete": self.on_incomplete,
+            "gates": {pattern: rule.to_record() for pattern, rule in self.gates},
+            "allow_not_evaluable": self.allow_not_evaluable,
+            "min_attainment": self.min_attainment,
+            "min_run_pass": self.min_run_pass,
+            "attainment_model": self.attainment_model,
+            "family": self.family,
+            "added_observers": list(self.added_observers),
+            "evidence_floor": self.evidence_floor,
+            "cases": None if self.cases is None else list(self.cases),
+            "seed": self.seed,
+            "fallbacks": [list(item) for item in self.fallbacks],
+            "min_complete_blocks": self.block_floor(),
+        }
+
+    def block_floor(self) -> dict[str, Any]:
+        """The fewest complete pairs a gate needs, and whether it was planned.
+
+        Without a pre-registered ``min_complete_blocks`` only the floor of
+        3 pairs stops attrition from shrinking a contrast.
+        """
+        planned = {rule.min_complete_blocks for _pattern, rule in self.gates}
+        if self.min_complete_blocks is not None:
+            planned = (planned - {None}) | {self.min_complete_blocks}
+        value = planned.pop() if len(planned) == 1 else None
+        if value is None:
+            statement = f"not pre-registered (floor of {MIN_GATE_PAIRS} pairs)"
+        else:
+            statement = f"{value} (pre-registered)"
+        return {"preregistered": value, "floor": MIN_GATE_PAIRS, "statement": statement}
+
+
+def _with_floor(
+    gates: tuple[tuple[str, GateRule], ...], floor: int | None
+) -> tuple[tuple[str, GateRule], ...]:
+    """Each gate's rule with the comparison's pre-registered block floor."""
+    if floor is None:
+        return gates
+    floored = []
+    for pattern, rule in gates:
+        if rule.min_complete_blocks not in (None, floor):
+            raise InferUsageError(
+                f"gate {pattern} pre-registers {rule.min_complete_blocks} complete "
+                f"blocks, the comparison {floor}"
+            )
+        floored.append((pattern, replace(rule, min_complete_blocks=floor)))
+    return tuple(floored)
+
+
+def _share(value: float | None, *, low_open: bool) -> bool:
+    """None, or a share in (0, 1] (``low_open``) or [0, 1]."""
+    if value is None:
+        return True
+    if not math.isfinite(value) or value > 1:
+        return False
+    return value > 0 if low_open else value >= 0
+
+
+@dataclass(frozen=True)
+class Comparison:
+    """Everything a comparison found, and the exit code it implies."""
+
+    spec: ComparisonSpec
+    design: str
+    runs: list[dict[str, Any]]
+    excluded: list[dict[str, Any]]
+    comparability: Compatibility
+    observer_issues: list[str]
+    cases: dict[str, dict[str, Any]]
+    family: dict[str, Any] | None = None
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def gates(self) -> list[tuple[str, str, GateOutcome]]:
+        """Every gate outcome, a requested gate that matched no metric included."""
+        found = []
+        for case_id, case in self.cases.items():
+            for name, metric in case["metrics"].items():
+                if metric.gate is not None:
+                    found.append((case_id, name, metric.gate))
+            for pattern, outcome in case.get("absent_gates", {}).items():
+                found.append((case_id, pattern, outcome))
+        return found
+
+    @property
+    def gate_count(self) -> int:
+        """Every gate judged: the metric gates and each case's attainment gate."""
+        attainment = sum(
+            1 for case in self.cases.values() if case.get("attainment_gate")
+        )
+        return len(self.gates) + attainment
+
+    @property
+    def failed(self) -> list[tuple[str, str]]:
+        failed = [
+            (case, name) for case, name, gate in self.gates if gate.status == FAIL
+        ]
+        failed += [
+            (case_id, "min_attainment")
+            for case_id, case in self.cases.items()
+            if (case.get("attainment_gate") or {}).get("status") == FAIL
+        ]
+        return failed
+
+    @property
+    def not_evaluable(self) -> list[tuple[str, str, str | None]]:
+        found = [
+            (case, name, gate.reason)
+            for case, name, gate in self.gates
+            if gate.status == NOT_EVALUABLE
+        ]
+        found += [
+            (case_id, "min_attainment", gate.get("reason"))
+            for case_id, case in self.cases.items()
+            if (gate := case.get("attainment_gate") or {}).get("status")
+            == NOT_EVALUABLE
+        ]
+        return found
+
+    @property
+    def exit_code(self) -> int:
+        """4 when a gate failed, or could not be evaluated unless that is allowed."""
+        if self.failed:
+            return 4
+        if self.not_evaluable and not self.spec.allow_not_evaluable:
+            return 4
+        return 0
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "format": COMPARISON_FORMAT,
+            "version": COMPARISON_VERSION,
+            "spec": self.spec.to_record(),
+            "design": self.design,
+            "runs": self.runs,
+            "excluded": self.excluded,
+            "compatibility": self.comparability.to_record(),
+            "observer_issues": self.observer_issues,
+            "cases": {
+                case_id: {
+                    "metrics": {
+                        name: metric.to_record()
+                        for name, metric in case["metrics"].items()
+                    },
+                    "absent_gates": {
+                        pattern: outcome.to_record()
+                        for pattern, outcome in case.get("absent_gates", {}).items()
+                    },
+                    "attainment_gate": case.get("attainment_gate"),
+                    "attainment_mean": case.get("attainment_mean"),
+                    "attrition": case.get("attrition", []),
+                    "set_aside": case.get("set_aside"),
+                    "membership": case.get("membership"),
+                    "gated": case.get("gated", True),
+                }
+                for case_id, case in self.cases.items()
+            },
+            "family": self.family,
+            "verdict": {
+                "exit_code": self.exit_code,
+                "failed": [list(item) for item in self.failed],
+                "not_evaluable": [list(item) for item in self.not_evaluable],
+                "allow_not_evaluable": self.spec.allow_not_evaluable,
+            },
+            "diagnostics": self.diagnostics,
+            "limits": LIMITS,
+        }
+
+
+LIMITS = [
+    "Paired t is nominal for roughly symmetric block log ratios; under strongly "
+    "skewed noise it covers 86-88% instead of 95%.",
+    "Guards flag; they do not certify coverage.",
+    "The independent design's intervals are conservative by construction.",
+    "Latency quantile screens assume independent requests, which queueing violates.",
+    "A fraction's interval under-covers when failures cluster within runs; its "
+    "gate is the run-level claim, exact under independent runs.",
+    "Segments by overlap are length-biased in rates and quantiles: diagnostics, "
+    "never gated.",
+]
+
+
+# ------------------------------------------------------------------ entry
+
+
+def compare_runs(
+    baseline: Sequence[RunSummary],
+    candidate: Sequence[RunSummary],
+    spec: ComparisonSpec,
+) -> Comparison:
+    """Compare two arms of runs; InferInputError when they cannot be compared."""
+    if not baseline or not candidate:
+        raise InferInputError("each arm needs at least one run")
+    arms = {BASELINE: list(baseline), CANDIDATE: list(candidate)}
+    _check_each_run_once(arms)
+    _check_cases_exist(arms, spec)
+    _check_cases_hold_requests(arms, spec)
+    _check_one_slo_policy(arms, spec)
+    design = _design(arms, spec)
+    excluded, standing = _standing(arms, spec, design)
+    usable = {arm: _usable(runs) for arm, runs in standing.items()}
+    if not usable[BASELINE] or not usable[CANDIDATE]:
+        raise InferInputError("an arm has no usable run: every run was excluded")
+    compatibility, unverified_pairs, allowed_within_arm = _compatibility(usable, spec)
+    observer_issues = _observer_contract(usable, spec)
+    if design == PAIRED:
+        excluded += _unpaired_blocks(standing, spec, excluded)
+        excluded += _partners(standing, spec, excluded)
+    cases = {
+        case_id: _case(
+            case_id, standing, excluded, design, spec, compatibility, observer_issues
+        )
+        for case_id in _case_ids(arms, spec)
+    }
+    _unjudged_overlap(cases, spec)
+    comparison = Comparison(
+        spec=spec,
+        design=design,
+        runs=[_run_record(arm, run) for arm, runs in arms.items() for run in runs],
+        excluded=excluded,
+        comparability=compatibility,
+        observer_issues=observer_issues,
+        cases=cases,
+        diagnostics={
+            **_diagnostics(arms, compatibility),
+            "unverified_pairs": unverified_pairs,
+            "allowed_within_arm": allowed_within_arm,
+        },
+    )
+    return _with_family(comparison)
+
+
+# ---------------------------------------------------------- set-asides
+
+
+def _check_each_run_once(arms: Mapping[str, list[RunSummary]]) -> None:
+    """One run given twice would count as two: twice in an arm, or once in
+    each, as its own baseline, so every within-block difference is zero. A
+    run is known by its path, its SHA-256 and its profile session, so a copy
+    whose bytes differ (one an attach or an import appended to in place) is
+    the same run. Not by its run ID: the runner names each run by its label,
+    which another experiment with the same ID repeats."""
+    seen: dict[tuple[str, str], tuple[str, str]] = {}
+    for arm, runs in arms.items():
+        for run in runs:
+            keys = _identities(run)
+            matched = [key for key in keys if key in seen]
+            if matched:
+                raise InferInputError(_given_twice(run, arm, matched, seen))
+            seen.update(dict.fromkeys(keys, (arm, run.name)))
+
+
+def _identities(run: RunSummary) -> set[tuple[str, str]]:
+    keys = {("path", run.name)}
+    if run.sha256:
+        keys.add(("sha256", run.sha256))
+    if run.session_id:
+        keys.add(("session", run.session_id))
+    return keys
+
+
+def _given_twice(
+    run: RunSummary,
+    arm: str,
+    matched: list[tuple[str, str]],
+    seen: Mapping[tuple[str, str], tuple[str, str]],
+) -> str:
+    other_arm, other = seen[matched[0]]
+    where = "twice" if other_arm == arm else "in both arms"
+    if {kind for kind, _ in matched} == {"session"}:
+        session = matched[0][1]
+        return (
+            f"run {run.name} is the same run (session {session}) as {other}, "
+            f"given {where}"
+        )
+    return f"run {run.name} is given {where}"
+
+
+def _item(arm: str, run: RunSummary, case_id: str, reasons: list[str]) -> dict:
+    return {"arm": arm, "run": run.name, "case": case_id, "reasons": reasons}
+
+
+def _standing(
+    arms: Mapping[str, list[RunSummary]], spec: ComparisonSpec, design: str
+) -> tuple[list[dict[str, Any]], dict[str, list[RunSummary]]]:
+    """Each arm's runs once superseded attempts are listed, and every
+    (run, case) set aside so far."""
+    excluded = _superseded(arms, spec, design)
+    replaced = {item["run"] for item in excluded}
+    standing = {
+        arm: [run for run in runs if run.name not in replaced]
+        for arm, runs in arms.items()
+    }
+    return excluded + _excluded(standing, spec), standing
+
+
+def _excluded(
+    arms: Mapping[str, list[RunSummary]], spec: ComparisonSpec
+) -> list[dict[str, Any]]:
+    """Every (run, case) a protocol failure sets aside, with its reasons.
+
+    A case the run lacks is an outcome, not a set-aside: the treatment may
+    have stopped the run before it.
+    """
+    return [
+        _with_evidence(_item(arm, run, case_id, list(run.failures_for(case_id))), run)
+        for arm, runs in arms.items()
+        for run in runs
+        for case_id in _case_ids(arms, spec)
+        if run.failures_for(case_id)
+    ]
+
+
+def _with_evidence(item: dict[str, Any], run: RunSummary) -> dict[str, Any]:
+    """An external cause's set-aside lists the evidence given for it."""
+    evidence = {
+        reason: text
+        for reason, text in run.external_evidence.items()
+        if reason in item["reasons"]
+    }
+    return {**item, "evidence": evidence} if evidence else item
+
+
+def _superseded(
+    arms: Mapping[str, list[RunSummary]], spec: ComparisonSpec, design: str
+) -> list[dict[str, Any]]:
+    """Every attempt at a block that another attempt of its arm replaces.
+
+    A block's arm keeps its last attempt, except that a retry never
+    replaces an outcome failure: the first attempt that failed as an
+    outcome stands, and each later one is listed as
+    ``retry_of_outcome_failure``. Every attempt is listed, never dropped.
+    """
+    if design != PAIRED:
+        return []
+    found = []
+    for arm, attempts in _repeated_blocks(arms):
+        kept = _kept_attempt(attempts)
+        for index, run in enumerate(attempts):
+            if run is kept:
+                continue
+            after = index > attempts.index(kept)
+            reason = "retry_of_outcome_failure" if after else "superseded"
+            for case_id in _case_ids(arms, spec):
+                item = _item(arm, run, case_id, [reason, *run.failures_for(case_id)])
+                item = _with_evidence(item, run)
+                item["attempt_kept"] = kept.name
+                found.append(item)
+    return found
+
+
+def _repeated_blocks(
+    arms: Mapping[str, list[RunSummary]],
+) -> list[tuple[str, list[RunSummary]]]:
+    """Each arm's attempts at a block it ran more than once, in start order."""
+    found: dict[tuple[str, str], list[RunSummary]] = {}
+    for arm, runs in arms.items():
+        for run in runs:
+            found.setdefault((arm, _block_key(run)), []).append(run)
+    return [
+        (arm, _in_start_order(attempts))
+        for (arm, _), attempts in found.items()
+        if len(attempts) > 1
+    ]
+
+
+def _in_start_order(attempts: list[RunSummary]) -> list[RunSummary]:
+    """By start time, or as given when any start is unknown."""
+    if any(run.started_at_ns is None for run in attempts):
+        return attempts
+    return sorted(attempts, key=lambda run: run.started_at_ns or 0)
+
+
+def _kept_attempt(attempts: list[RunSummary]) -> RunSummary:
+    outcome = next(
+        (run for run in attempts if run.outcome_failures and not run.protocol_failures),
+        None,
+    )
+    return outcome or attempts[-1]
+
+
+def _partners(
+    arms: Mapping[str, list[RunSummary]],
+    spec: ComparisonSpec,
+    excluded: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The other run of each block set aside: the block goes, both arms."""
+    found = []
+    for case_id in _case_ids(arms, spec):
+        lost = _blocks_set_aside(arms, excluded, case_id)
+        found += [
+            _item(arm, run, case_id, ["block_set_aside"])
+            for arm, runs in arms.items()
+            for run in runs
+            if _block_key(run) in lost and not _set_aside(excluded, run, case_id)
+        ]
+    return found
+
+
+def _blocks_set_aside(
+    arms: Mapping[str, list[RunSummary]], excluded: list[dict[str, Any]], case_id: str
+) -> set[str]:
+    return {
+        _block_key(run)
+        for runs in arms.values()
+        for run in runs
+        if _set_aside(excluded, run, case_id)
+    }
+
+
+def _lost(
+    case_id: str,
+    arms: Mapping[str, list[RunSummary]],
+    excluded: list[dict[str, Any]],
+    design: str,
+) -> dict[str, Any]:
+    """The blocks (or runs) this case lost: set aside, or missing an arm's run.
+
+    A block given for one arm only lost its other run without a recorded
+    cause, so it is listed like one set aside. How many a gate may lose is
+    its pre-registered ``min_complete_blocks``.
+    """
+    if design != PAIRED:
+        items = {
+            run.name
+            for runs in arms.values()
+            for run in runs
+            if _set_aside(excluded, run, case_id)
+        }
+        return {"unit": "run", "items": sorted(items)}
+    blocks = [{_block_key(run) for run in arms[arm]} for arm in (BASELINE, CANDIDATE)]
+    items = _blocks_set_aside(arms, excluded, case_id) | (blocks[0] ^ blocks[1])
+    return {"unit": "block", "items": sorted(items)}
+
+
+def _unpaired_blocks(
+    arms: Mapping[str, list[RunSummary]],
+    spec: ComparisonSpec,
+    excluded: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Blocks whose two runs sent different workload realizations.
+
+    A pair stands for one block's conditions: the same realization (the
+    block's seed) in both arms. Runs already set aside are left alone.
+    """
+    blocks: dict[str, dict[str, RunSummary]] = {}
+    for arm, runs in arms.items():
+        for run in _usable(runs):
+            blocks.setdefault(_block_key(run), {})[arm] = run
+    found = []
+    for pair in blocks.values():
+        if len(pair) != 2 or _same_realization(pair[BASELINE], pair[CANDIDATE]):
+            continue
+        for arm, run in pair.items():
+            for case_id in _case_ids(arms, spec):
+                if not _set_aside(excluded, run, case_id):
+                    found.append(
+                        {
+                            "arm": arm,
+                            "run": run.name,
+                            "case": case_id,
+                            "reasons": ["block_realization_differs"],
+                        }
+                    )
+    return found
+
+
+def _same_realization(first: RunSummary, second: RunSummary) -> bool:
+    """Unknown on either side is not shown different."""
+    a = first.fields.get("workload.realization_digest")
+    b = second.fields.get("workload.realization_digest")
+    if a is None or b is None or not (a.known and b.known):
+        return True
+    return bool(a.value == b.value)
+
+
+def _usable(runs: list[RunSummary]) -> list[RunSummary]:
+    """Runs with no run-level protocol failure, for the comparability checks."""
+    return [run for run in runs if not run.protocol_failures]
+
+
+def _set_aside(excluded: list[dict[str, Any]], run: RunSummary, case_id: str) -> bool:
+    return any(item["run"] == run.name and item["case"] == case_id for item in excluded)
+
+
+# --------------------------------------------------------- comparability
+
+
+def _compatibility(
+    usable: Mapping[str, list[RunSummary]], spec: ComparisonSpec
+) -> tuple[Compatibility, list[list[Any]], list[dict[str, Any]]]:
+    """Every run within its arm (config mode), and every run across arms.
+
+    Comparability is not transitive once a value is unknown, so each run is
+    checked, not only each arm's first. ``--allow`` names what may differ
+    between the arms, and ``--allow-within-arm`` what may differ within
+    one, and so across them as well. The reported result is the first runs'
+    across the arms, made unverified, with every unverified field, when any
+    pair was; the unverified pairs are returned with their fields, and each
+    allowed field an arm's runs differ in with every run's value.
+    """
+    within = _within_arms(usable, spec)
+    across = _across_arms(usable, spec)
+    results = [*within, *across]
+    pairs = [
+        [a, b, sorted(item.name for item in result.unverified)]
+        for a, b, result in results
+        if result.status == UNVERIFIED
+    ]
+    worst = _worst(across[0][2], [result for _a, _b, result in results])
+    return worst, pairs, _mixed(usable, within)
+
+
+def _mixed(
+    usable: Mapping[str, list[RunSummary]],
+    within: list[tuple[str, str, Compatibility]],
+) -> list[dict[str, Any]]:
+    """Each allowed field an arm's runs differ in, with every run's value."""
+    arm_of = {run.name: arm for arm, runs in usable.items() for run in runs}
+    names: dict[str, set[str]] = {}
+    for first, _second, result in within:
+        names.setdefault(arm_of[first], set()).update(i.name for i in result.allowed)
+    return [
+        {
+            "arm": arm,
+            "field": name,
+            "values": {run.name: _value(run, name) for run in usable[arm]},
+        }
+        for arm in usable
+        for name in sorted(names.get(arm, ()))
+    ]
+
+
+def _value(run: RunSummary, name: str) -> Any:
+    found = run.fields.get(name)
+    return None if found is None else found.value
+
+
+def _within_arms(
+    usable: Mapping[str, list[RunSummary]], spec: ComparisonSpec
+) -> list[tuple[str, str, Compatibility]]:
+    """Each run against its arm's first; only --allow-within-arm may differ."""
+    within = []
+    for arm, runs in usable.items():
+        for run in runs[1:]:
+            result = compatible(
+                runs[0].fields, run.fields, allowed=spec.allow_within_arm
+            )
+            if result.status == INCOMPATIBLE:
+                raise InferInputError(
+                    _incompatible(f"{arm} runs", result, "--allow-within-arm")
+                )
+            within.append((runs[0].name, run.name, result))
+    return within
+
+
+def _across_arms(
+    usable: Mapping[str, list[RunSummary]], spec: ComparisonSpec
+) -> list[tuple[str, str, Compatibility]]:
+    """The arms' runs against each other's first."""
+    # A field that may differ within an arm differs across the arms too.
+    anywhere = (*spec.allow, *spec.allow_within_arm)
+    across = []
+    for first, second in _cross_pairs(usable):
+        result = compatible(
+            first.fields, second.fields, allowed=anywhere, mode=spec.mode
+        )
+        if result.status == INCOMPATIBLE:
+            raise InferInputError(_incompatible("the arms", result))
+        across.append((first.name, second.name, result))
+    return across
+
+
+def _cross_pairs(
+    usable: Mapping[str, list[RunSummary]]
+) -> list[tuple[RunSummary, RunSummary]]:
+    """The first runs, then each other run against the other arm's first."""
+    baseline, candidate = usable[BASELINE], usable[CANDIDATE]
+    return [
+        (baseline[0], candidate[0]),
+        *((baseline[0], run) for run in candidate[1:]),
+        *((run, candidate[0]) for run in baseline[1:]),
+    ]
+
+
+def _worst(reference: Compatibility, results: list[Compatibility]) -> Compatibility:
+    """``reference``, made unverified with every unverified field if any was."""
+    unverified = [result for result in results if result.status == UNVERIFIED]
+    if not unverified:
+        return reference
+    names: dict[str, Any] = {}
+    for result in unverified:
+        for item in result.unverified:
+            names.setdefault(item.name, item)
+    return replace(reference, status=UNVERIFIED, unverified=tuple(names.values()))
+
+
+def _incompatible(what: str, result: Compatibility, flag: str = "--allow") -> str:
+    fields = ", ".join(
+        f"{item.name} ({item.a!r} vs {item.b!r})" for item in result.blocking[:5]
+    )
+    more = f" and {len(result.blocking) - 5} more" if len(result.blocking) > 5 else ""
+    where = "within an arm " if flag == "--allow-within-arm" else ""
+    return f"{what} are incompatible: {fields}{more}; allow a difference {where}with {flag}"
+
+
+def _observer_contract(
+    usable: Mapping[str, list[RunSummary]], spec: ComparisonSpec
+) -> list[str]:
+    """Problems with the observers under the mode's contract.
+
+    An observer present where the contract forbids it, or an undeclared one
+    added, is an input error; one that did not hold up makes the gates
+    ``not_evaluable``, and is returned.
+    """
+    if spec.mode == OVERHEAD:
+        present = _requested(usable[BASELINE])
+        if present:
+            raise InferInputError(
+                "an overhead comparison needs a baseline without observers; it ran "
+                + ", ".join(sorted(present))
+            )
+        return _unhealthy(usable[CANDIDATE], _requested(usable[CANDIDATE]))
+    if spec.mode == INCREMENTAL:
+        added = _requested(usable[CANDIDATE]) - _requested(usable[BASELINE])
+        undeclared = added - set(spec.added_observers)
+        if undeclared:
+            raise InferInputError(
+                "observers added in the candidate must be declared with "
+                "--added-observers: " + ", ".join(sorted(undeclared))
+            )
+        shared = _requested(usable[BASELINE]) & _requested(usable[CANDIDATE])
+        return _unhealthy(usable[BASELINE], shared) + _unhealthy(
+            usable[CANDIDATE], shared | added
+        )
+    return []
+
+
+def _requested(runs: list[RunSummary]) -> set[str]:
+    return {
+        name
+        for run in runs
+        for name, state in run.observers.items()
+        if state.get("requested")
+    }
+
+
+def _unhealthy(runs: list[RunSummary], names: set[str]) -> list[str]:
+    issues = []
+    for run in runs:
+        for name in sorted(names):
+            state = run.observers.get(name) or {}
+            if state.get("healthy") is True:
+                continue
+            word = (
+                "unjudged"
+                if state.get("active") and state.get("healthy") is None
+                else "not active and healthy"
+            )
+            issues.append(f"{name} {word} in {run.name}")
+    return issues
+
+
+# ---------------------------------------------------------------- design
+
+
+def _design(arms: Mapping[str, list[RunSummary]], spec: ComparisonSpec) -> str:
+    """Paired by block when every run is labelled with one, else independent."""
+    runs = [run for group in arms.values() for run in group]
+    labelled = all(run.label("block") is not None for run in runs)
+    if spec.design == PAIRED and not labelled:
+        raise InferInputError("a paired design needs every run labelled with --block")
+    if spec.design == INDEPENDENT or not labelled:
+        return INDEPENDENT
+    return PAIRED
+
+
+def _block_key(run: RunSummary) -> str:
+    return f"{run.label('experiment')}/{run.label('block')}"
+
+
+# ----------------------------------------------------------------- cases
+
+
+def _case_ids(arms: Mapping[str, list[RunSummary]], spec: ComparisonSpec) -> list[str]:
+    if spec.cases is not None:
+        return list(spec.cases)
+    ids: set[str] = set()
+    for runs in arms.values():
+        for run in runs:
+            ids.update(run.comparable_cases)
+    return sorted(ids)
+
+
+def _case(
+    case_id: str,
+    arms: Mapping[str, list[RunSummary]],
+    excluded: list[dict[str, Any]],
+    design: str,
+    spec: ComparisonSpec,
+    compatibility: Compatibility,
+    observer_issues: list[str],
+) -> dict[str, Any]:
+    kept = {
+        arm: [run for run in runs if not _set_aside(excluded, run, case_id)]
+        for arm, runs in arms.items()
+    }
+    attrition = [item for item in excluded if item["case"] == case_id]
+    lost = _lost(case_id, arms, excluded, design)
+    membership = _membership(case_id, kept)
+    if membership == "overlap":
+        # Requests in flight during a segment are length-biased: diagnostics.
+        spec = replace(spec, gates=(), fallbacks=(), min_attainment=None)
+    blocked = _case_blocker(compatibility, observer_issues, lost, spec)
+    contrast = blocked or _control_failed(case_id, kept[BASELINE])
+    metrics = _case_metrics(case_id, kept, design, spec, contrast)
+    case: dict[str, Any] = {
+        "metrics": metrics,
+        "absent_gates": _absent_gates(metrics, spec),
+        "attrition": attrition,
+        "set_aside": lost,
+        "membership": membership,
+        "gated": membership != "overlap",
+    }
+    if spec.min_attainment is not None:
+        slo_blocked = blocked or _slo_blocker(case_id, kept)
+        case.update(_attainment_gate(case_id, kept[CANDIDATE], spec, slo_blocked))
+    return case
+
+
+OVERLAP_NOT_GATED = "overlap_not_gated"
+
+
+def _unjudged_overlap(
+    cases: Mapping[str, dict[str, Any]], spec: ComparisonSpec
+) -> None:
+    """Gates asked when only overlap segments are compared cannot be evaluated.
+
+    No other case carries them, so gating nothing would read as a pass; each
+    requested gate is recorded ``not_evaluable`` on each overlap segment. With
+    a whole case or a segment by arrival to carry them, the overlap segments
+    add none.
+    """
+    if any(case.get("gated", True) for case in cases.values()):
+        return
+    for case in cases.values():
+        case["absent_gates"] = {
+            pattern: GateOutcome(NOT_EVALUABLE, OVERLAP_NOT_GATED, rule)
+            for pattern, rule in spec.gates
+        }
+        if spec.min_attainment is not None:
+            case["attainment_gate"] = {
+                "status": NOT_EVALUABLE,
+                "reason": OVERLAP_NOT_GATED,
+            }
+
+
+def _membership(case_id: str, kept: Mapping[str, list[RunSummary]]) -> str | None:
+    """A segment's membership, ``arrival`` or ``overlap``; None for a case."""
+    found = {
+        (run.comparable_cases[case_id].get("intervals") or {}).get("membership")
+        for runs in kept.values()
+        for run in runs
+        if case_id in run.comparable_cases
+    } - {None}
+    # A mix is read as overlap: any of it is length-biased.
+    return "overlap" if "overlap" in found else (found.pop() if found else None)
+
+
+def _check_cases_exist(
+    arms: Mapping[str, list[RunSummary]], spec: ComparisonSpec
+) -> None:
+    """Every case asked for is in some run: a misspelled one compares nothing."""
+    present = {
+        case for runs in arms.values() for run in runs for case in run.comparable_cases
+    }
+    missing = [case for case in spec.cases or () if case not in present]
+    if missing:
+        raise InferUsageError(
+            f"case {', '.join(missing)} is in no run; the runs have "
+            + (", ".join(sorted(present)) or "no case")
+        )
+
+
+def _absent_gates(
+    metrics: Mapping[str, MetricComparison], spec: ComparisonSpec
+) -> dict[str, GateOutcome]:
+    """Each requested gate that matched no metric this case has.
+
+    A gate on what the runs never measured (server latency without spans)
+    gated nothing; reading that as a pass would hide the change it asked
+    about.
+    """
+    return {
+        pattern: GateOutcome(NOT_EVALUABLE, "metric_absent", rule)
+        for pattern, rule in spec.gates
+        if not any(fnmatch.fnmatchcase(name, pattern) for name in metrics)
+    }
+
+
+def _case_metrics(
+    case_id: str,
+    kept: Mapping[str, list[RunSummary]],
+    design: str,
+    spec: ComparisonSpec,
+    blocked: str | None,
+) -> dict[str, MetricComparison]:
+    reference = next(
+        (
+            run.comparable_cases[case_id]
+            for runs in kept.values()
+            for run in runs
+            if case_id in run.comparable_cases
+        ),
+        None,
+    )
+    if reference is None:
+        return {}
+    return {
+        metric.name: _metric(metric, case_id, kept, design, spec, blocked)
+        for metric in default_metrics(reference)
+    }
+
+
+def _check_cases_hold_requests(
+    arms: Mapping[str, list[RunSummary]], spec: ComparisonSpec
+) -> None:
+    """Refuse a case no run offered a request: a segment outside every phase."""
+    for case_id in _case_ids(arms, spec):
+        offered = [
+            (run.comparable_cases[case_id].get("population") or {}).get("offered")
+            for runs in arms.values()
+            for run in runs
+            if case_id in run.comparable_cases
+        ]
+        if offered and all(value == 0 for value in offered):
+            raise InferInputError(
+                f"{case_id} holds no request in any run: a segment outside every "
+                "run's measured phase compares nothing"
+            )
+
+
+def _case_blocker(
+    compatibility: Compatibility,
+    observer_issues: list[str],
+    lost: Mapping[str, Any],
+    spec: ComparisonSpec,
+) -> str | None:
+    """Why no gate of this case can be decided, before any metric is read."""
+    if compatibility.status == UNVERIFIED:
+        return "unverified"
+    if observer_issues:
+        return "observer_not_active"
+    if lost["items"] and spec.on_incomplete == FAIL_INCOMPLETE:
+        return PROTOCOL_FAILURE
+    return None
+
+
+def _control_failed(case_id: str, baseline: list[RunSummary]) -> str | None:
+    """A baseline run that failed as an outcome, or lacks the case.
+
+    A baseline that served nothing, or crashed slow, would make any
+    candidate look better, so the contrast cannot be judged. Only an
+    external cause sets such a run aside.
+    """
+    broken = any(
+        run.outcome_failures or case_id not in run.comparable_cases for run in baseline
+    )
+    return CONTROL_FAILED if broken else None
+
+
+def _metric(
+    metric: MetricSpec,
+    case_id: str,
+    kept: Mapping[str, list[RunSummary]],
+    design: str,
+    spec: ComparisonSpec,
+    blocked: str | None,
+) -> MetricComparison:
+    first, second, reasons, lost = _readings(metric, case_id, kept)
+    gate = spec.gate_for(metric.name)
+    unavailable = _lost_outcome(lost, blocked) or _metric_blocker(
+        metric, case_id, kept, reasons, spec
+    )
+    failing = unavailable in _FAILING
+    compared = compare_values(
+        metric.name,
+        first,
+        second,
+        direction=metric.direction,  # type: ignore[arg-type]
+        scale=metric.scale,  # type: ignore[arg-type]
+        unit=metric.unit,
+        value_unit=metric.value_unit,
+        blocks=_blocks(kept, design),
+        confidence=spec.confidence,
+        gate=None if failing else gate,
+        bootstrap_min_n=spec.bootstrap_min_n,
+        seed=spec.seed,
+        unavailable=unavailable,
+        trials=_trials(metric, case_id, kept),
+    )
+    if unavailable is not None and (compared.reason is None or unavailable in _LOST):
+        # Why it was not compared, gated or not.
+        compared = replace(compared, reason=unavailable)
+    if not failing or gate is None:
+        return compared
+    return replace(compared, gate=GateOutcome(FAIL, str(unavailable), gate))
+
+
+def _lost_outcome(lost: set[str], blocked: str | None) -> str | None:
+    """A candidate outcome lost, or a set-aside run under --on-incomplete
+    fail, fails the contrast outright; a lost baseline one leaves it
+    unjudged, like any baseline outcome failure."""
+    if CANDIDATE in lost:
+        return OUTCOME_UNRECOVERABLE
+    if blocked is not None:
+        return blocked
+    return CONTROL_FAILED if BASELINE in lost else None
+
+
+def _readings(
+    metric: MetricSpec, case_id: str, kept: Mapping[str, list[RunSummary]]
+) -> tuple[list[Any], list[Any], list[str], set[str]]:
+    """Each arm's values for a metric, every reason a run gave for none, and
+    the arms that lost an outcome: a value missing from a run that did not
+    finish, or from a run that lacks the case."""
+    values: dict[str, list[Any]] = {}
+    reasons: list[str] = []
+    lost: set[str] = set()
+    for arm, runs in kept.items():
+        values[arm] = []
+        for run in runs:
+            case = run.comparable_cases.get(case_id)
+            value, reason = (
+                (None, "case_missing") if case is None else metric.read(case)
+            )
+            values[arm].append(value)
+            if reason:
+                reasons.append(reason)
+            if value is None and (case is None or run.outcome_failures):
+                lost.add(arm)
+    return values[BASELINE], values[CANDIDATE], reasons, lost
+
+
+def _trials(
+    metric: MetricSpec, case_id: str, kept: Mapping[str, list[RunSummary]]
+) -> tuple[list[int | None], list[int | None]] | None:
+    """A fraction's requests in each run, aligned with its readings."""
+    if metric.trials is None:
+        return None
+    count = metric.trials
+    counts = {
+        arm: [
+            (
+                count(run.comparable_cases[case_id])
+                if case_id in run.comparable_cases
+                else None
+            )
+            for run in runs
+        ]
+        for arm, runs in kept.items()
+    }
+    return counts[BASELINE], counts[CANDIDATE]
+
+
+def _metric_blocker(
+    metric: MetricSpec,
+    case_id: str,
+    kept: Mapping[str, list[RunSummary]],
+    reasons: list[str],
+    spec: ComparisonSpec,
+) -> str | None:
+    """Why this metric's gate cannot be decided, from the runs' readings.
+
+    A fraction's run that could not be measured is a miss in its run-level
+    claim, as in ``compare_values``, not a reason the claim cannot be made.
+    """
+    if metric.unit == FRACTION_UNIT:
+        reasons = [reason for reason in reasons if reason not in RUN_MISSES]
+    if reasons:
+        return sorted(set(reasons))[0]
+    return _slo_metric_blocker(case_id, kept, spec) if metric.slo else None
+
+
+def _slo_metric_blocker(
+    case_id: str, kept: Mapping[str, list[RunSummary]], spec: ComparisonSpec
+) -> str | None:
+    """An SLO metric's policy must be one, and its evidence cover the floor."""
+    differs = _slo_blocker(case_id, kept)
+    if differs is not None:
+        return differs
+    coverages = [
+        evidence_coverage(run.comparable_cases[case_id])
+        for runs in kept.values()
+        for run in runs
+        if case_id in run.comparable_cases
+    ]
+    if any(c is None or c < spec.evidence_floor for c in coverages):
+        return "evidence_coverage_below_floor"
+    return None
+
+
+def _slo_blocker(case_id: str, kept: Mapping[str, list[RunSummary]]) -> str | None:
+    """SLO metrics are comparable only when one policy judged every run.
+
+    Without ``--slo``, each run is judged by the policy it recorded; a
+    candidate judged by a looser one would meet it however slow it was.
+    """
+    digests = {
+        _slo(run, case_id).get("slo_digest") for runs in kept.values() for run in runs
+    }
+    return "slo_policy_differs" if len(digests - {None}) > 1 else None
+
+
+def _slo(run: RunSummary, case_id: str) -> Mapping[str, Any]:
+    """A case's SLO evaluation; empty when the run lacks the case."""
+    return (run.comparable_cases.get(case_id) or {}).get("slo") or {}
+
+
+def _check_one_slo_policy(
+    arms: Mapping[str, list[RunSummary]], spec: ComparisonSpec
+) -> None:
+    """An SLO gate needs one policy to have judged every run.
+
+    Without ``--slo``, each run is judged by the policy it recorded; a
+    candidate judged by a looser one would meet it however slow it was.
+    """
+    gated = spec.min_attainment is not None or any(
+        spec.gate_for(name) is not None for name in SLO_METRICS
+    )
+    if not gated:
+        return
+    digests = {
+        (case.get("slo") or {}).get("slo_digest")
+        for runs in arms.values()
+        for run in runs
+        for case in run.comparable_cases.values()
+    } - {None}
+    if len(digests) > 1:
+        raise InferInputError(
+            "the runs were judged by different SLO policies ("
+            + ", ".join(sorted(str(d)[:12] for d in digests))
+            + "); give --slo or --slo-file to judge them all by one"
+        )
+
+
+SLO_METRICS = ("goodput_rps", "attainment")
+
+
+def _blocks(
+    kept: Mapping[str, list[RunSummary]], design: str
+) -> tuple[list[str], list[str]] | None:
+    if design != PAIRED:
+        return None
+    return (
+        [_block_key(run) for run in kept[BASELINE]],
+        [_block_key(run) for run in kept[CANDIDATE]],
+    )
+
+
+# ------------------------------------------------------------ attainment
+
+
+def _attainment_gate(
+    case_id: str,
+    candidate: list[RunSummary],
+    spec: ComparisonSpec,
+    blocked: str | None,
+) -> dict[str, Any]:
+    """Whether a share of candidate runs meets the target, and the mean, described.
+
+    It obeys the case's blockers like any gate. A candidate run whose SLO
+    could not be judged counts as not meeting the target: leaving it out
+    would keep only the runs that met it. Pooling requests would leave a
+    lost run's requests out of both counts, so a lost one fails a
+    ``bernoulli`` gate.
+    """
+    target = spec.min_attainment
+    assert target is not None
+    lowers = _attainment_lowers(case_id, candidate)
+    known = [x for x in lowers if x is not None]
+    undecided = _attainment_undecided(case_id, candidate, spec, blocked, known)
+    if undecided is not None:
+        return {"attainment_gate": undecided}
+    if spec.attainment_model == "bernoulli":
+        gate = _pooled_attainment(case_id, candidate, target, spec)
+    else:
+        meeting = sum(1 for value in known if value >= target)
+        gate = run_pass_gate(meeting, len(lowers), spec.min_run_pass, spec.confidence)
+    gate["target"] = target
+    gate["runs_unmeasurable"] = len(lowers) - len(known)
+    return {"attainment_gate": gate, "attainment_mean": _mean_interval(known, spec)}
+
+
+def _attainment_undecided(
+    case_id: str,
+    candidate: list[RunSummary],
+    spec: ComparisonSpec,
+    blocked: str | None,
+    known: list[float],
+) -> dict[str, Any] | None:
+    """The attainment gate when the runs cannot decide it."""
+    if blocked is not None:
+        status = FAIL if blocked == PROTOCOL_FAILURE else NOT_EVALUABLE
+        return {"status": status, "reason": blocked}
+    if (
+        spec.min_complete_blocks is not None
+        and len(candidate) < spec.min_complete_blocks
+    ):
+        return {"status": NOT_EVALUABLE, "reason": "blocks_below_preregistered"}
+    if spec.attainment_model == "bernoulli" and _lost_slo(case_id, candidate):
+        return {"status": FAIL, "reason": OUTCOME_UNRECOVERABLE}
+    if not known:
+        return {"status": NOT_EVALUABLE, "reason": "no_slo_evaluation"}
+    return None
+
+
+def _attainment_lowers(case_id: str, runs: list[RunSummary]) -> list[float | None]:
+    """Each run's attainment lower bound, or None where its SLO was not judged."""
+    lowers: list[float | None] = []
+    for run in runs:
+        value = _slo(run, case_id).get("attainment_lower")
+        lowers.append(float(value) if isinstance(value, (int, float)) else None)
+    return lowers
+
+
+def _lost_slo(case_id: str, runs: list[RunSummary]) -> bool:
+    """A run lacks the case, or did not finish and has no SLO evaluation."""
+    return any(
+        case_id not in run.comparable_cases
+        or (run.outcome_failures and not _slo(run, case_id))
+        for run in runs
+    )
+
+
+def _pooled_attainment(
+    case_id: str, candidate: list[RunSummary], target: float, spec: ComparisonSpec
+) -> dict[str, Any]:
+    """Requests as independent trials: model-based, and only when asked for."""
+    met = sum(int(_slo(r, case_id).get("met") or 0) for r in candidate)
+    offered = sum(int(_slo(r, case_id).get("offered") or 0) for r in candidate)
+    bound = clopper_pearson(
+        met, max(offered, 1), spec.confidence, model="independent_requests"
+    )
+    return {
+        **bound.to_record(),
+        "status": PASS if bound.lower >= target else FAIL,
+    }
+
+
+def _mean_interval(values: list[float], spec: ComparisonSpec) -> dict[str, Any]:
+    """The runs' mean attainment with a t interval: descriptive, model-based."""
+    mean = sum(values) / len(values)
+    if len(values) < 2:
+        return {"mean": mean, "lower": None, "upper": None, "model": "normal_run_means"}
+    sd = math.sqrt(sum((v - mean) ** 2 for v in values) / (len(values) - 1))
+    half = (
+        float(stats.t.ppf(0.5 + spec.confidence / 2, len(values) - 1))
+        * sd
+        / math.sqrt(len(values))
+    )
+    return {
+        "mean": mean,
+        "lower": mean - half,
+        "upper": mean + half,
+        "model": "normal_run_means",
+    }
+
+
+# ---------------------------------------------------------------- family
+
+
+def _with_family(comparison: Comparison) -> Comparison:
+    """Under any_regression, Holm adjusts the regression tests across the family."""
+    if comparison.spec.family != ANY_REGRESSION:
+        return comparison
+    p_values = _family_p_values(comparison)
+    # One-sided tests, as each regression rule reads one side of its interval.
+    rejected = holm(p_values, alpha=(1 - comparison.spec.confidence) / 2)
+    cases = {
+        case_id: {
+            **case,
+            "metrics": {
+                name: _holm_gate(metric, rejected.get(f"{case_id}/{name}"))
+                for name, metric in case["metrics"].items()
+            },
+        }
+        for case_id, case in comparison.cases.items()
+    }
+    family = {
+        "name": ANY_REGRESSION,
+        "method": "holm",
+        "tests": len(p_values),
+        "rejected": sorted(key for key, value in rejected.items() if value),
+    }
+    return replace(comparison, cases=cases, family=family)
+
+
+def _family_p_values(comparison: Comparison) -> dict[str, float | None]:
+    """Each gated metric's one-sided p-value for a regression, best case.
+
+    Gates decided otherwise (not evaluable, a zero, a degenerate metric) are
+    left out of the family and keep their decision.
+    """
+    found: dict[str, float | None] = {}
+    for case_id, case in comparison.cases.items():
+        for name, metric in case["metrics"].items():
+            gate = metric.gate
+            if gate is None or gate.reason not in (None, "exceeds_budget"):
+                continue
+            if metric.best is not None and metric.best.p_worse is not None:
+                found[f"{case_id}/{name}"] = metric.best.p_worse
+    return found
+
+
+def _holm_gate(metric: MetricComparison, rejected: bool | None) -> MetricComparison:
+    """A significant-rule gate, with Holm deciding whether the change is real."""
+    gate = metric.gate
+    if gate is None or rejected is None or gate.status == NOT_EVALUABLE:
+        return metric
+    best = metric.best
+    assert best is not None and best.effect is not None
+    bad = best.effect if metric.direction == "lower_is_better" else -best.effect
+    failed = rejected and bad > gate.rule.budget
+    status = FAIL if failed else PASS
+    reason = "exceeds_budget_holm" if failed else None
+    return replace(metric, gate=GateOutcome(status, reason, gate.rule, "best_case"))
+
+
+# ------------------------------------------------------------ reporting
+
+
+def _run_record(arm: str, run: RunSummary) -> dict[str, Any]:
+    return {
+        "arm": arm,
+        "path": None if run.path is None else str(run.path),
+        "sha256": run.sha256,
+        "run_id": run.run_id,
+        "session_id": run.session_id,
+        "labels": dict(run.labels),
+        "session_status": run.session_status,
+        "protocol_failures": list(run.protocol_failures),
+        "outcome_failures": list(run.outcome_failures),
+        "started_at_ns": run.started_at_ns,
+    }
+
+
+def _diagnostics(
+    arms: Mapping[str, list[RunSummary]], compatibility: Compatibility
+) -> dict[str, Any]:
+    """Covariates, and whether the arms were run interleaved."""
+    starts = {
+        arm: sorted(run.started_at_ns for run in runs if run.started_at_ns is not None)
+        for arm, runs in arms.items()
+    }
+    warnings = []
+    if starts[BASELINE] and starts[CANDIDATE]:
+        if max(starts[BASELINE]) < min(starts[CANDIDATE]):
+            warnings.append(
+                "every baseline run came before every candidate run: drift over "
+                "time is confounded with the change"
+            )
+    return {
+        "started_at_ns": starts,
+        "covariates": [item.to_record() for item in compatibility.covariates],
+        "warnings": warnings,
+    }
+
+
+__all__ = [
+    "ALL_BUDGETS",
+    "ANY_REGRESSION",
+    "BASELINE",
+    "CANDIDATE",
+    "COMPARISON_FORMAT",
+    "COMPARISON_VERSION",
+    "Comparison",
+    "ComparisonSpec",
+    "compare_runs",
+]

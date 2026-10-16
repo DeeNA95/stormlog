@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from itertools import count
 from typing import Any, Iterator
@@ -48,6 +49,7 @@ from .vllm_execution_log import (
     LogRead,
     RawRecord,
 )
+from .vllm_execution_stages import ResetPreemptions, StageBuilder
 
 SOURCE = "stormlog.infer.import_execution"
 OWN = "run"
@@ -62,6 +64,9 @@ ROLE_DECODE = "decode"
 ROLE_SPEC_DECODE = "spec_decode"
 ROLE_UNKNOWN = "unknown"
 _ROLE_BY_PHASE = {"context": ROLE_PREFILL, "generation": ROLE_DECODE}
+# How an alignment's offset and uncertainty were derived from the hello's
+# bracketed read; an alignment without it is from an earlier import.
+ALIGNMENT_BASIS = "hello_bracket_midpoint/1"
 
 # vLLM's request IDs: an optional n>1 child index, the API's prefix, the
 # external ID, and the 8 random characters vLLM adds unless told not to.
@@ -103,6 +108,7 @@ class RunFacts:
     existing_iterations: frozenset[EntityRef] = frozenset()
     existing_attempts: frozenset[EntityRef] = frozenset()
     existing_alignments: frozenset[str] = frozenset()  # event ids
+    existing_stages: frozenset[str] = frozenset()  # this import's stage event ids
     # Admissions the artifact already holds, by (epoch, alias seq): a replayed
     # alias continues that attempt instead of becoming a new one.
     existing_admissions: dict[tuple[str, int], EntityRef] = field(default_factory=dict)
@@ -142,6 +148,8 @@ class Execution:
     resumable: bool | None = None
     terminal: dict[str, Any] | None = None
     terminal_seq: int | None = None
+    enqueued: dict[str, Any] | None = None  # entering the scheduler's queue
+    enqueued_seq: int | None = None
     reused: bool = False
     seen_final: bool = False
     memberships: list[Member] = field(default_factory=list)
@@ -169,6 +177,9 @@ class Iteration:
     # Every scheduled member's ownership, withheld ones included.
     ownerships: list[str] = field(default_factory=list)
     withheld_members: int = 0
+    # The raw record that made the step final: its completion, the later
+    # completion that superseded it, or the last one read of an ended epoch.
+    final_seq: int | None = None
 
     @property
     def number(self) -> int | None:
@@ -264,6 +275,9 @@ class _EpochReducer:
         # Terminals no step could carry, by record sequence: each is one
         # lost finish however many imports read it.
         self.unattached: list[int] = []
+        # Executions with a member in a step that is not final yet.
+        self.waiting_keys: set[str] = set()
+        self.reset_preemptions = ResetPreemptions(epoch.records)
 
     def reduce(self) -> tuple[list[CorrelationEvent], dict[str, Any]]:
         self._gather()
@@ -279,10 +293,27 @@ class _EpochReducer:
         for item in kept:
             events.extend(self._iteration_events(item))
         events.extend(self._request_events())
-        return events, self._summary(kept, pending)
+        # Last: a stage refers only to records already written.
+        stages = StageBuilder(self, kept, pending)
+        events.extend(stages.build())
+        return events, self._summary(kept, pending, stages)
 
     # ----------------------------------------------------------- gathering
     def _gather(self) -> None:
+        aliases, first_use = self._index_records()
+        for record in self.epoch.records:
+            if record.kind == "completed":
+                self._attach_completed(record)
+        self._build_executions(aliases, first_use)
+        # Both belong to the execution admitted last before them.
+        attach = {"terminal": self._attach_terminal, "enqueued": self._attach_enqueued}
+        for record in self.epoch.records:
+            if record.kind in attach:
+                attach[record.kind](record)
+
+    def _index_records(self) -> tuple[dict[str, list[RawRecord]], dict[str, int]]:
+        """Steps by iteration, and per internal ID its admissions and the
+        first time a step or exit used it."""
         aliases: dict[str, list[RawRecord]] = {}
         first_use: dict[str, int] = {}
         for record in self.epoch.records:
@@ -295,13 +326,7 @@ class _EpochReducer:
                     _note_use(first_use, member, record.data.get("start_mono_ns"))
             elif record.kind == "terminal":
                 _note_use(first_use, record.data, record.data.get("mono_ns"))
-        for record in self.epoch.records:
-            if record.kind == "completed":
-                self._attach_completed(record)
-        self._build_executions(aliases, first_use)
-        for record in self.epoch.records:
-            if record.kind == "terminal":
-                self._attach_terminal(record)
+        return aliases, first_use
 
     def _attach_completed(self, record: RawRecord) -> None:
         item = self.iterations.get(str(record.data.get("iteration")))
@@ -393,6 +418,29 @@ class _EpochReducer:
             return candidates[0]
         return self._continue_execution(internal)
 
+    def _attempt_execution(self, internal: str, mono_ns: int | None) -> Execution:
+        """The execution of an internal ID at a time, as ``_execution_for``
+        finds it, without adding one: an ID these records never used is the
+        execution an earlier import knew, or a new one."""
+        known = [e for e in self.executions.values() if e.internal == internal]
+        if known:
+            return self._execution_for(internal, mono_ns)
+        binding = self.binder.bind(internal, None)
+        return Execution(self._latest_known_key(internal, binding), internal, binding)
+
+    def request_source(self, execution: Execution) -> int | None:
+        """The last raw record a request record needs: its alias, its entry
+        into the scheduler and its first final step. None when this read
+        holds none of its steps (an earlier import wrote it)."""
+        if not execution.memberships:
+            return None
+        first = min(m.iteration.final_seq or 0 for m in execution.memberships)
+        return _max_seq([execution.alias_seq, execution.enqueued_seq, first])
+
+    def withholds(self, execution: Execution) -> bool:
+        """Another client's, in an epoch whose identities cannot be keyed."""
+        return self.withhold and execution.binding.ownership != OWN
+
     def _attach_terminal(self, record: RawRecord) -> None:
         execution = self._execution_for(
             str(record.data.get("internal")), _integer(record.data.get("mono_ns"))
@@ -401,36 +449,38 @@ class _EpochReducer:
             execution.terminal = record.data
             execution.terminal_seq = record.seq
 
+    def _attach_enqueued(self, record: RawRecord) -> None:
+        execution = self._execution_for(
+            str(record.data.get("internal")), _integer(record.data.get("mono_ns"))
+        )
+        if execution.enqueued is None:
+            execution.enqueued = record.data
+            execution.enqueued_seq = record.seq
+
     # ------------------------------------------------------------ selection
     def _split_iterations(self) -> tuple[list[Iteration], list[Iteration]]:
         """Final iterations in sequence order, and the pending ones."""
         # Only a known end finalizes pending steps: an epoch whose liveness
         # could not be judged keeps them for a later import.
         ended = self.epoch.state in (STATE_ENDED, STATE_GONE)
-        latest_completed = self._latest_completed_number()
+        superseded = _Supersession(self.epoch.records)
         final: list[Iteration] = []
         pending: list[Iteration] = []
         for item in sorted(self.iterations.values(), key=lambda i: i.scheduled.seq):
+            at = superseded.at(item.number)
             if item.completed is not None:
-                final.append(item)
+                item.final_seq = item.completed.seq
             elif ended:
                 _mark_incomplete(item, REASON_EPOCH_ENDED)
-                final.append(item)
-            elif _superseded(item, latest_completed):
+                item.final_seq = self.epoch.last_seq if at is None else at
+            elif at is not None:
                 _mark_incomplete(item, REASON_COMPLETED_MISSING)
-                final.append(item)
+                item.final_seq = at
             else:
                 pending.append(item)
+                continue
+            final.append(item)
         return final, pending
-
-    def _latest_completed_number(self) -> int | None:
-        numbers = [
-            _digits(record.data.get("iteration"))
-            for record in self.epoch.records
-            if record.kind == "completed"
-        ]
-        known = [number for number in numbers if number is not None]
-        return max(known) if known else None
 
     def _keep(self, item: Iteration) -> bool:
         ref = EntityRef(self.producer, item.iteration)
@@ -441,9 +491,7 @@ class _EpochReducer:
         for execution in executions:
             execution.seen_final = True
         item.ownerships = [e.binding.ownership for e in executions]
-        if ref in self.facts.referenced_iterations:
-            return True
-        if OWN in item.ownerships:
+        if self._the_run_needs(item, ref):
             return True
         if not executions:
             # An idle scheduler step: nothing to attribute, nothing lost.
@@ -457,6 +505,27 @@ class _EpochReducer:
             return True
         self._count("foreign_only_counted")
         return False
+
+    def _the_run_needs(self, item: Iteration, ref: EntityRef) -> bool:
+        """A step GPU activity refers to, one with a run member, or one that
+        preempted a run request (its stage needs the step)."""
+        return (
+            ref in self.facts.referenced_iterations
+            or OWN in item.ownerships
+            or self._preempted_own(item)
+        )
+
+    def _preempted_own(self, item: Iteration) -> bool:
+        preempted = item.scheduled.data.get("preempted")
+        if not isinstance(preempted, list):
+            return False
+        start = _integer(item.scheduled.data.get("start_mono_ns"))
+        by_reset = self.reset_preemptions.of(item)
+        return any(
+            self._attempt_execution(str(internal), start).binding.ownership == OWN
+            for internal in preempted
+            if str(internal) not in by_reset
+        )
 
     def _member_execution(self, member: dict[str, Any], item: Iteration) -> Execution:
         return self._execution_for(
@@ -508,6 +577,7 @@ class _EpochReducer:
             for item in pending
             for m in _members(item.scheduled)
         }
+        self.waiting_keys = waiting
         for execution in self.executions.values():
             seq = execution.terminal_seq
             if execution.terminal is None or seq is None:
@@ -551,21 +621,38 @@ class _EpochReducer:
         )
 
     def _alignment(self) -> ClockAlignmentEvent | None:
-        clock = self.hello.get("clock") or {}
-        wall, mono = _integer(clock.get("wall_ns")), _integer(clock.get("mono_ns"))
+        """The hello's read: the wall clock at its monotonic read lies between
+        the wall reads before and after it, so the offset is the midpoint of
+        that bracket and the uncertainty half its width."""
         event_id = f"alignment:{self.epoch.epoch}"
-        if wall is None or mono is None or event_id in self.facts.existing_alignments:
+        bracket = _clock_bracket(self.hello.get("clock"))
+        if bracket is None or event_id in self.facts.existing_alignments:
             return None
-        gap = _integer(clock.get("gap_ns")) or 0
+        wall, mono, wall_after = bracket
+        gap = wall_after - wall
         goodbye = self.epoch.goodbye or {}
         return ClockAlignmentEvent(
             context=self._context(),
             event_id=event_id,
-            metadata={"epoch": self.epoch.epoch, "gap_ns": gap, "ended": bool(goodbye)},
+            metadata={
+                "epoch": self.epoch.epoch,
+                # The offset needs the hello alone; its validity ends at the
+                # goodbye, when one was read, which is dated apart.
+                "source_seq_max": _integer(self.hello.get("seq")),
+                "valid_to_source_seq": _integer(goodbye.get("seq")),
+                "gap_ns": gap,
+                "ended": bool(goodbye),
+                "alignment_basis": ALIGNMENT_BASIS,
+                "bracket": {
+                    "wall_ns": wall,
+                    "mono_ns": mono,
+                    "wall_after_ns": wall_after,
+                },
+            },
             from_clock_domain=self.mono_domain,
             to_clock_domain=self.wall_domain,
-            offset_ns=wall - mono,
-            uncertainty_ns=(gap + 1) // 2,
+            offset_ns=wall - mono + gap // 2,
+            uncertainty_ns=gap - gap // 2,
             valid_from_ns=mono,
             valid_to_ns=_integer(goodbye.get("mono_ns")),
         )
@@ -621,6 +708,7 @@ class _EpochReducer:
 
     def _request(self, execution: Execution, attempt: EntityRef) -> RequestEvent:
         binding, alias = execution.binding, execution.alias or {}
+        enqueued = execution.enqueued or {}
         own = binding.ownership == OWN
         metadata: dict[str, Any] = {
             "ownership": binding.ownership,
@@ -631,9 +719,18 @@ class _EpochReducer:
             # The admission's identity: a later import that reads this alias
             # again (behind a mark another request held back) reuses the attempt.
             "epoch": self.epoch.epoch,
+            # Written with its first final step: the raw records it needed.
+            "source_seq_max": self.request_source(execution),
             "admission_seq": execution.alias_seq,
             "admission_seen": execution.alias is not None,
             "admitted_wall_ns": _integer(alias.get("wall_ns")),
+            "admitted_wall_after_ns": _integer(alias.get("wall_after_ns")),
+            # Entering the scheduler's waiting queue, on the engine thread;
+            # null when the hook does not record it or the record was lost.
+            "enqueued_mono_ns": _integer(enqueued.get("mono_ns")),
+            "enqueued_wall_ns": _integer(enqueued.get("wall_ns")),
+            "enqueued_wall_after_ns": _integer(enqueued.get("wall_after_ns")),
+            "structured_output": _flag(enqueued.get("structured_output")),
             "cached_at_admission": execution.cached_at_admission,
             "resumable": execution.resumable,
         }
@@ -689,15 +786,19 @@ class _EpochReducer:
     def _count(self, name: str) -> None:
         self.counts[name] = self.counts.get(name, 0) + 1
 
-    def _high_water(self, pending: list[Iteration]) -> int | None:
+    def _high_water(
+        self, pending: list[Iteration], holds: list[int] | None = None
+    ) -> int | None:
         """Just below the first record a later import still needs: a pending
-        step, the admission of a request no final step has shown yet, or a
-        sequence not read yet (the mark never passes what was read)."""
+        step, the admission of a request no final step has shown yet, a
+        record whose stages wait (``holds``), or a sequence not read yet (the
+        mark never passes what was read)."""
         consumed = self.epoch.consumed_seq
         before = self.epoch.high_water_before
         if consumed is None or self.epoch.state in (STATE_ENDED, STATE_GONE):
             return consumed
         waiting = [item.scheduled.seq for item in pending]
+        waiting.extend(holds or ())
         waiting.extend(
             e.alias_seq
             for e in self.executions.values()
@@ -707,9 +808,10 @@ class _EpochReducer:
         return mark if before is None else max(mark, before)
 
     def _summary(
-        self, kept: list[Iteration], pending: list[Iteration]
+        self, kept: list[Iteration], pending: list[Iteration], stages: StageBuilder
     ) -> dict[str, Any]:
         summary = self.epoch.summary()
+        summary.update(stages.summary())
         summary.update(
             producer=self.producer,
             reduced=True,
@@ -738,7 +840,7 @@ class _EpochReducer:
                 "memberships": self.counts.get("withheld_memberships", 0),
                 "foreign_only_steps": self.counts.get("foreign_only_withheld", 0),
             },
-            high_water_seq=self._high_water(pending),
+            high_water_seq=self._high_water(pending, stages.holds),
         )
         return summary
 
@@ -819,15 +921,44 @@ def _mark_incomplete(item: Iteration, reason: str) -> None:
     item.reason = reason
 
 
-def _superseded(item: Iteration, latest_completed: int | None) -> bool:
+class _Supersession:
     """vLLM processes outputs in schedule order, so a step whose output is
-    missing while a later step's arrived will never see its own."""
-    number = item.number
-    return (
-        number is not None
-        and latest_completed is not None
-        and number < latest_completed
-    )
+    missing while a later step's arrived will never see its own: it became
+    final at the first completion, in log order, of a later step."""
+
+    def __init__(self, records: list[RawRecord]) -> None:
+        self.seqs: list[int] = []
+        self.highest: list[int] = []  # the highest step completed by each seq
+        for record in records:
+            number = _digits(record.data.get("iteration"))
+            if record.kind != "completed" or number is None:
+                continue
+            self.seqs.append(record.seq)
+            self.highest.append(
+                max(number, self.highest[-1] if self.highest else number)
+            )
+
+    def at(self, number: int | None) -> int | None:
+        if number is None:
+            return None
+        index = bisect_right(self.highest, number)
+        return self.seqs[index] if index < len(self.seqs) else None
+
+
+def _clock_bracket(clock: Any) -> tuple[int, int, int] | None:
+    """The hello's (wall, mono, wall after) read; a hook from before
+    ``wall_after_ns`` gives the gap instead. None for a read without a
+    bracket, or one the wall clock stepped back across."""
+    if not isinstance(clock, dict):
+        return None
+    wall, mono = _integer(clock.get("wall_ns")), _integer(clock.get("mono_ns"))
+    after = _integer(clock.get("wall_after_ns"))
+    gap = _integer(clock.get("gap_ns"))
+    if after is None and wall is not None and gap is not None:
+        after = wall + gap
+    if wall is None or mono is None or after is None or after < wall:
+        return None
+    return wall, mono, after
 
 
 def _randomization(hello: dict[str, Any]) -> bool | None:
@@ -868,6 +999,7 @@ def _finish(terminal: dict[str, Any], *, in_step: bool) -> dict[str, Any]:
         "output_tokens": terminal.get("output_tokens"),
         "mono_ns": terminal.get("mono_ns"),
         "wall_ns": terminal.get("wall_ns"),
+        "wall_after_ns": terminal.get("wall_after_ns"),
         "in_step": in_step,
     }
 
@@ -884,10 +1016,14 @@ def _iteration_metadata(
         "state": item.state,
         "incomplete_reason": item.reason,
         "epoch": item.scheduled.epoch,
+        "source_seq_max": item.final_seq,
         "start_wall_ns": data.get("start_wall_ns"),
+        "start_wall_after_ns": data.get("start_wall_after_ns"),
         "schedule_end_wall_ns": data.get("end_wall_ns"),
+        "schedule_end_wall_after_ns": data.get("end_wall_after_ns"),
         "schedule_end_mono_ns": data.get("end_mono_ns"),
         "completed_wall_ns": done.get("wall_ns"),
+        "completed_wall_after_ns": done.get("wall_after_ns"),
         "update_failed": _update_failed(item),
         "scheduler_residence_ns": (
             end - start if start is not None and end is not None else None
@@ -906,7 +1042,12 @@ def _iteration_metadata(
 def _membership_metadata(member: Member) -> dict[str, Any]:
     data, outcome = member.data, member.outcome or {}
     kept = outcome.get("outcome") == "kept"
+    sources = [member.iteration.final_seq]
+    if member.finish is not None:
+        sources.append(member.execution.terminal_seq)
     metadata: dict[str, Any] = {
+        "epoch": member.iteration.scheduled.epoch,
+        "source_seq_max": _max_seq(sources),
         "ownership": member.execution.binding.ownership,
         "state": member.iteration.state,
         "sighting": data.get("sighting"),
@@ -952,11 +1093,23 @@ def _integer(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _max_seq(seqs: list[Any]) -> int | None:
+    """The latest raw record a canonical record was derived from: an import
+    whose read reached it could have written the record."""
+    known = [seq for seq in seqs if _integer(seq) is not None]
+    return max(known) if known else None
+
+
+def _flag(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 def _text(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
 __all__ = [
+    "ALIGNMENT_BASIS",
     "FOREIGN",
     "OWN",
     "SCHEME_PSEUDONYM",
