@@ -1,5 +1,6 @@
 """Compact transport preserves semantic events and fails closed on bad references."""
 
+import hashlib
 import json
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -12,6 +13,7 @@ from stormlog.infer.correlation_codec import (
     expand_inference_records,
 )
 from stormlog.infer.correlation_events import (
+    ArtifactIdentityEvent,
     CorrelationContext,
     EntityRef,
     IterationEvent,
@@ -62,6 +64,45 @@ def test_shared_context_roundtrip_and_schema(tmp_path):
     assert expand_inference_records(expanded) == expanded
     expanded[0]["context"]["run_id"] = "changed"
     assert expanded[1]["context"]["run_id"] == "run"
+
+
+def test_run_summary_expands_compact_artifact_identity():
+    from stormlog.infer.run_summary import summary_from_records
+
+    identity = ArtifactIdentityEvent(
+        context=_event().context,
+        event_id="artifact",
+        artifact_kind="inference_jsonl",
+        created_at_ns=1,
+    )
+    rows = CorrelationRecordEncoder().encode(identity.to_record())
+    summary = summary_from_records(rows, {})
+    assert summary.run_id == identity.context.run_id
+    assert summary.session_id == identity.context.session_id
+
+
+def test_diagnosis_expands_contexts_and_preserves_physical_evidence(tmp_path):
+    from stormlog.infer.diagnosis_inputs import read_input
+
+    event = _event()
+    rows = CorrelationRecordEncoder().encode(event.to_record())
+    chunks = [b"", *(json.dumps(row).encode() for row in rows)]
+    source = tmp_path / "compact.jsonl"
+    source.write_bytes(b"\n".join(chunks) + b"\n")
+    loaded = read_input(source)
+    assert loaded.problems == ()
+    assert loaded.lines[1].record is None
+    line = loaded.lines[2]
+    assert line.number == 2
+    assert line.raw == rows[1]
+    assert line.record == event
+    assert line.record_id == event.event_id
+    assert line.sha256 == hashlib.sha256(chunks[2]).hexdigest()
+
+    source.write_bytes(chunks[2] + b"\n")
+    missing_context = read_input(source)
+    assert missing_context.lines[0].record is None
+    assert "unknown context_id" in missing_context.problems[0]
 
 
 @pytest.mark.parametrize("request_link", ["missing", "null", "valid"])
