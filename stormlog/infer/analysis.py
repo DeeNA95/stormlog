@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -16,9 +16,14 @@ from .correlation_codec import read_inference_records
 from .errors import InferInputError
 from .host_clock import is_boot_qualified
 from .latency_report import latency_summary, streaming_summary
+from .manifest import manifest_lines, manifest_summary
+from .observers import observer_lines, observer_states
 from .populations import (
     CasePopulation,
     MeasuredInterval,
+    Membership,
+    Segment,
+    SegmentPopulation,
     case_populations,
     goodput,
     rate,
@@ -71,10 +76,14 @@ def analyze_inference_events(
     mlx_server_evidence_paths: Iterable[str | Path] = (),
     slo: SloSpec | None = None,
     slo_source: str = "flags",
+    segments: Sequence[Segment] = (),
+    segment_membership: Membership = "arrival",
 ) -> dict[str, Any]:
     """Analyze an inference profiling JSONL artifact.
 
     ``slo`` overrides the policy the artifact recorded, if it recorded one.
+    With ``segments``, each case also reports each segment of its measured
+    phase on its own (see ``populations.Segment``).
     """
     records = _load_jsonl(path)
     mlx_paths = tuple(mlx_server_evidence_paths)
@@ -104,15 +113,15 @@ def analyze_inference_events(
     )
     timelines = [(member, _member_timeline(member)) for member in members]
     ok_requests = [record for record in requests if record.get("status") == "ok"]
+    context = _CaseContext(
+        spans=spans,
+        policy=policy,
+        server_ids=_server_admitted_ids(records, spans, external_spans),
+        segments=tuple(segments),
+        membership=segment_membership,
+    )
     cases = _case_reports(
-        records,
-        requests,
-        samples,
-        timelines,
-        "group" in join,
-        spans,
-        policy,
-        _server_admitted_ids(records, spans, external_spans),
+        records, requests, samples, timelines, "group" in join, context
     )
     if timelines:
         join["case_coverage"] = _coverage_counts(cases)
@@ -123,6 +132,8 @@ def analyze_inference_events(
         # the span of its successful requests (the old duration_seconds).
         "analysis_version": ANALYSIS_VERSION,
         "slo": None if policy is None else policy.to_record(),
+        "manifest": manifest_summary(records),
+        "observers": observer_states(records, spans=spans, vllm=vllm),
         "summary": {
             "total_requests": len(requests),
             "successful_requests": len(ok_requests),
@@ -335,22 +346,37 @@ def _span_source(records: list[dict[str, Any]]) -> bool:
     return False
 
 
+@dataclass(frozen=True)
+class _CaseContext:
+    """What every case report shares: spans, the policy, server evidence, segments."""
+
+    spans: JoinedSpans
+    policy: _Policy | None
+    server_ids: set[str] | None
+    segments: tuple[Segment, ...] = ()
+    membership: Membership = "arrival"
+
+
 def _case_reports(
     records: list[dict[str, Any]],
     requests: list[dict[str, Any]],
     samples: list[dict[str, Any]],
     timelines: list[tuple[_Member, _ServerTimeline]],
     grouped: bool,
-    spans: JoinedSpans,
-    policy: _Policy | None,
-    server_ids: set[str] | None,
+    context: _CaseContext,
 ) -> dict[str, dict[str, Any]]:
     by_case: dict[str, list[dict[str, Any]]] = {}
     for record in requests:
         by_case.setdefault(str(record.get("case_id", "unknown")), []).append(record)
     windows = _measured_windows(records)
     cache_states = _case_records(records, "infer.cache_state")
-    populations = case_populations(records, server_admitted_ids=server_ids)
+    populations = case_populations(
+        records,
+        segments=context.segments,
+        membership=context.membership,
+        server_admitted_ids=context.server_ids,
+    )
+    spans, policy = context.spans, context.policy
     cases = {}
     for case_id, case_requests in sorted(by_case.items()):
         cases[case_id] = _case_report(
@@ -373,7 +399,53 @@ def _case_reports(
                 slo_source=policy.source,
                 cohort=populations[case_id].population,
             ).to_record()
+        if context.segments:
+            cases[case_id]["segments"] = {
+                name: _segment_report(case_requests, segment, context)
+                for name, segment in populations[case_id].segments.items()
+            }
     return cases
+
+
+def _segment_report(
+    case_requests: list[dict[str, Any]],
+    segment: SegmentPopulation,
+    context: _CaseContext,
+) -> dict[str, Any]:
+    """One segment of a case: its cohort, rates, latency and SLO, on its own.
+
+    Under ``overlap`` membership a segment has no rates: requests in flight
+    during it, per second of it, grow with their latency, so a slower
+    server would look faster. Its shares and latency stay.
+    """
+    ids = set(segment.request_ids)
+    members = [r for r in case_requests if str(r.get("request_id")) in ids]
+    ok = [r for r in members if r.get("status") == "ok"]
+    rate_interval = segment.interval if segment.membership == "arrival" else None
+    report: dict[str, Any] = {
+        "population": segment.population.to_record(),
+        "intervals": {
+            "rate": segment.interval.to_record(),
+            "membership": segment.membership,
+            "rate_reason": None if rate_interval else "overlapping_cohort",
+        },
+        "throughput": _throughput(
+            len(ok),
+            sum(_int_value(r.get("output_tokens")) for r in ok),
+            sum(_int_value(r.get("total_tokens")) for r in ok),
+            rate_interval,
+        ),
+        "latency": latency_summary(members, spans=context.spans),
+    }
+    if context.policy is not None:
+        report["slo"] = goodput(
+            members,
+            context.policy.spec,
+            rate_interval,
+            spans=context.spans,
+            slo_source=context.policy.source,
+        ).to_record()
+    return report
 
 
 def _case_report(
@@ -466,6 +538,8 @@ def format_analysis_text(report: dict[str, Any]) -> str:
     vllm_cases = vllm.get("cases", {}) if isinstance(vllm, dict) else {}
     lines.extend(workload_lines(report.get("workload")))
     lines.extend(_policy_lines(report))
+    lines.extend(manifest_lines(report.get("manifest")))
+    lines.extend(observer_lines(report.get("observers")))
     lines.append("Memory observations: client-local")
     lines.extend(mlx_lines(report))
     lines.extend(_server_status_lines(join))

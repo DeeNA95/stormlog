@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal
+from typing import Any, Callable, Iterator, Literal
 
 from .http_transport import (
     BoundedResponse,
@@ -95,6 +95,8 @@ class OpenAIChatCompletionsClient:
         stream_include_usage: bool,
         request_id: str | None = None,
         headers: dict[str, str] | None = None,
+        on_sent: Callable[[int], None] | None = None,
+        on_first_content: Callable[[int], None] | None = None,
     ) -> ChatCompletionResult:
         """Send one chat completion.
 
@@ -102,6 +104,10 @@ class OpenAIChatCompletionsClient:
         own request id and in the ``gen_ai.request.id`` of the request span.
         ``headers`` adds others, such as ``traceparent``; they cannot replace
         the ones the client sets.
+        ``on_sent`` is called with the send's wall stamp just before the
+        request goes out, and ``on_first_content`` with the first streamed
+        content piece's arrival on that clock (the send stamp plus the TTFT);
+        both run on the calling thread, so they must return quickly.
         """
         payload = {
             **self.extra_body,
@@ -113,27 +119,19 @@ class OpenAIChatCompletionsClient:
         if stream and stream_include_usage:
             payload["stream_options"] = {"include_usage": True}
         body = json.dumps(payload).encode("utf-8")
-        request_headers = {
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream" if stream else "application/json",
-        }
-        if self.api_key:
-            request_headers["Authorization"] = f"Bearer {self.api_key}"
-        if request_id:
-            request_headers["X-Request-Id"] = request_id
-        for name, value in (headers or {}).items():
-            request_headers.setdefault(name, value)
 
         _validate_http_endpoint(self.endpoint)
         request = urllib.request.Request(
             self.endpoint,
             data=body,
-            headers=request_headers,
+            headers=self._request_headers(stream, request_id, headers),
             method="POST",
         )
 
         started_at_ns = time.time_ns()
         started_perf = time.perf_counter()
+        if on_sent is not None:
+            on_sent(started_at_ns)
         try:
             with self._opener.open(
                 request,
@@ -145,7 +143,11 @@ class OpenAIChatCompletionsClient:
                     max_bytes=self.max_response_bytes,
                 ) as response:
                     return self._parse_response(
-                        response, stream, started_at_ns, started_perf
+                        response,
+                        stream,
+                        started_at_ns,
+                        started_perf,
+                        on_first_content=on_first_content,
                     )
         except urllib.error.HTTPError as exc:
             try:
@@ -170,19 +172,42 @@ class OpenAIChatCompletionsClient:
         )
 
     def _parse_response(
-        self, response: Any, stream: bool, started_at_ns: int, started_perf: float
+        self,
+        response: Any,
+        stream: bool,
+        started_at_ns: int,
+        started_perf: float,
+        *,
+        on_first_content: Callable[[int], None] | None = None,
     ) -> ChatCompletionResult:
         if stream:
             return self._read_streaming_response(
                 response=response,
                 started_at_ns=started_at_ns,
                 started_perf=started_perf,
+                on_first_content=on_first_content,
             )
         return self._read_json_response(
             response=response,
             started_at_ns=started_at_ns,
             started_perf=started_perf,
         )
+
+    def _request_headers(
+        self, stream: bool, request_id: str | None, headers: dict[str, str] | None
+    ) -> dict[str, str]:
+        """The client's own headers, then any of ``headers`` they leave."""
+        request_headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream" if stream else "application/json",
+        }
+        if self.api_key:
+            request_headers["Authorization"] = f"Bearer {self.api_key}"
+        if request_id:
+            request_headers["X-Request-Id"] = request_id
+        for name, value in (headers or {}).items():
+            request_headers.setdefault(name, value)
+        return request_headers
 
     def _read_json_response(
         self,
@@ -223,6 +248,7 @@ class OpenAIChatCompletionsClient:
         response: Any,
         started_at_ns: int,
         started_perf: float,
+        on_first_content: Callable[[int], None] | None = None,
     ) -> ChatCompletionResult:
         content_parts: list[str] = []
         first_chunk_perf: float | None = None
@@ -254,6 +280,10 @@ class OpenAIChatCompletionsClient:
             content_parts.append(piece)
             if first_content_perf is None:
                 first_content_perf = now_perf
+                if on_first_content is not None:
+                    on_first_content(
+                        started_at_ns + round((now_perf - started_perf) * 1e9)
+                    )
             if previous_content_perf is not None:
                 chunk_interarrival_ms.append(
                     (now_perf - previous_content_perf) * 1000.0
@@ -267,16 +297,8 @@ class OpenAIChatCompletionsClient:
             started_at_ns=started_at_ns,
             ended_at_ns=ended_at_ns,
             e2e_latency_ms=(ended_perf - started_perf) * 1000.0,
-            ttft_ms=(
-                (first_content_perf - started_perf) * 1000.0
-                if first_content_perf is not None
-                else None
-            ),
-            first_chunk_latency_ms=(
-                (first_chunk_perf - started_perf) * 1000.0
-                if first_chunk_perf is not None
-                else None
-            ),
+            ttft_ms=_elapsed_ms(started_perf, first_content_perf),
+            first_chunk_latency_ms=_elapsed_ms(started_perf, first_chunk_perf),
             chunk_interarrival_ms=chunk_interarrival_ms,
             usage=usage,
             finish_reason=finish_reason,
@@ -327,6 +349,10 @@ def _first_choice(payload: Any) -> dict[str, Any]:
 def _status(response: Any) -> int | None:
     status = getattr(response, "status", None)
     return status if isinstance(status, int) else None
+
+
+def _elapsed_ms(started_perf: float, perf: float | None) -> float | None:
+    return None if perf is None else (perf - started_perf) * 1000.0
 
 
 def _stream_data(response: Any) -> Iterator[str]:

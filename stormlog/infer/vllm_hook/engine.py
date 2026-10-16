@@ -9,11 +9,10 @@ next step has been scheduled before this one's output is processed.
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .writer import EpochWriter
+from .writer import EpochWriter, Reservation, stamp
 
 ITERATION_ATTRIBUTE = "_stormlog_iteration"
 # vLLM keeps at most a few steps in flight; more pending means outputs were
@@ -38,7 +37,9 @@ class _Pending:
 
 @dataclass
 class EngineRecorder:
-    """Records for one scheduler instance."""
+    """Records for one scheduler instance. Each record is reserved before
+    its last stamp is taken (``EpochWriter.reserve``), so a heartbeat stamped
+    after that stamp counts it as pending."""
 
     writer: EpochWriter
     producer: str
@@ -52,18 +53,38 @@ class EngineRecorder:
     # ------------------------------------------------------------ admission
 
     def on_admit(self, request: Any) -> None:
-        self.writer.emit(
-            "alias",
+        with self.writer.reserve() as reservation:
+            reservation.emit(
+                "alias",
+                {
+                    "internal": str(request.request_id),
+                    "external": _optional_str(
+                        getattr(request, "external_req_id", None)
+                    ),
+                    **stamp(),
+                },
+            )
+
+    def on_enqueue(
+        self, request: Any, at: dict[str, int], reservation: Reservation
+    ) -> None:
+        """A request entering the scheduler's waiting queue, stamped just
+        before ``add_request`` ran, under a reservation taken before that."""
+        reservation.emit(
+            "enqueued",
             {
                 "internal": str(request.request_id),
-                "external": _optional_str(getattr(request, "external_req_id", None)),
-                **_stamp(),
+                "structured_output": _optional_bool(
+                    getattr(request, "use_structured_output", None)
+                ),
+                "resumable": _optional_bool(getattr(request, "resumable", None)),
+                **at,
             },
         )
 
     # ------------------------------------------------------------ schedule
 
-    def on_schedule(self, scheduler: Any, output: Any, start: tuple[int, int]) -> None:
+    def on_schedule(self, scheduler: Any, output: Any, start: dict[str, int]) -> None:
         iteration = str(self.next_iteration)
         self.next_iteration += 1
         setattr(output, ITERATION_ATTRIBUTE, (self.producer, iteration))
@@ -76,21 +97,23 @@ class EngineRecorder:
         )
         while len(self.pending) > MAX_PENDING:
             self.pending.pop(next(iter(self.pending)))
-        end = _stamp()
-        self.writer.emit(
-            "scheduled",
-            {
-                "iteration": iteration,
-                "start_wall_ns": start[0],
-                "start_mono_ns": start[1],
-                "end_wall_ns": end["wall_ns"],
-                "end_mono_ns": end["mono_ns"],
-                "total_tokens": int(output.total_num_scheduled_tokens),
-                "zero_token": int(output.total_num_scheduled_tokens) == 0,
-                "preempted": sorted(getattr(output, "preempted_req_ids", None) or ()),
-                "members": [fields for _, fields in members],
-            },
-        )
+        with self.writer.reserve() as reservation:
+            end = stamp()
+            reservation.emit(
+                "scheduled",
+                {
+                    "iteration": iteration,
+                    **{f"start_{name}": value for name, value in start.items()},
+                    **{f"end_{name}": value for name, value in end.items()},
+                    "total_tokens": int(output.total_num_scheduled_tokens),
+                    "zero_token": int(output.total_num_scheduled_tokens) == 0,
+                    "preempted": sorted(
+                        getattr(output, "preempted_req_ids", None) or ()
+                    ),
+                    "pause_state": _state_name(getattr(scheduler, "pause_state", None)),
+                    "members": [fields for _, fields in members],
+                },
+            )
 
     def _new_members(
         self, scheduler: Any, output: Any
@@ -227,11 +250,12 @@ class EngineRecorder:
             )
             for name, member in (pending.members.items() if pending else ())
         ]
-        fields: dict[str, Any] = {"iteration": identity[1], **_stamp()}
-        if failed:
-            fields["update_failed"] = True
-        fields["members"] = members
-        self.writer.emit("completed", fields)
+        with self.writer.reserve() as reservation:
+            fields: dict[str, Any] = {"iteration": identity[1], **stamp()}
+            if failed:
+                fields["update_failed"] = True
+            fields["members"] = members
+            reservation.emit("completed", fields)
 
     def _completed_member(
         self,
@@ -270,6 +294,51 @@ class EngineRecorder:
             "computed_after": computed_after,
         }
 
+    # ------------------------------------------------------------ pauses
+
+    def on_pause(self, before: Any, after: Any) -> None:
+        """A call to ``set_pause_state``, stamped once it has returned. One
+        that left the state as it was (vLLM resumes on every ``wake_up``,
+        paused or not) changed nothing and is not recorded."""
+        was, now = _state_name(before), _state_name(after)
+        if was is not None and was == now:
+            return
+        with self.writer.reserve() as reservation:
+            reservation.emit("pause", {"from": was, "to": now, **stamp()})
+
+    # ------------------------------------------------------------ cache resets
+
+    def reset_call(
+        self, scheduler: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> dict[str, Any]:
+        """A ``reset_prefix_cache`` call's settings and running requests, and
+        its start, read before vLLM runs it."""
+        named = dict(zip(("reset_running_requests", "reset_connector"), args))
+        named.update(kwargs)
+        return {
+            "reset_running_requests": bool(named.get("reset_running_requests")),
+            "reset_connector": bool(named.get("reset_connector")),
+            "running": [str(request.request_id) for request in scheduler.running],
+            **{f"start_{name}": value for name, value in stamp().items()},
+        }
+
+    def on_cache_reset(
+        self, call: dict[str, Any] | None, succeeded: bool | None
+    ) -> None:
+        """The call's outcome: its return value, or null when it raised."""
+        if call is None:
+            return
+        with self.writer.reserve() as reservation:
+            reservation.emit(
+                "cache_reset",
+                {
+                    **call,
+                    "succeeded": succeeded,
+                    "raised": succeeded is None,
+                    **{f"end_{name}": value for name, value in stamp().items()},
+                },
+            )
+
     # ------------------------------------------------------------ exit
 
     def on_free(self, request: Any) -> None:
@@ -283,16 +352,17 @@ class EngineRecorder:
             if hasattr(request, "get_finished_reason")
             else None
         )
-        self.writer.emit(
-            "terminal",
-            {
-                "internal": internal,
-                "status": getattr(status, "name", None) or _optional_str(status),
-                "finish_reason": _optional_str(reason),
-                "output_tokens": output_tokens,
-                **_stamp(),
-            },
-        )
+        with self.writer.reserve() as reservation:
+            reservation.emit(
+                "terminal",
+                {
+                    "internal": internal,
+                    "status": getattr(status, "name", None) or _optional_str(status),
+                    "finish_reason": _optional_str(reason),
+                    "output_tokens": output_tokens,
+                    **stamp(),
+                },
+            )
 
 
 def _emitted(result: Any) -> dict[str, tuple[int, str | None]] | None:
@@ -339,8 +409,16 @@ def _outcome(before: dict[str, Any]) -> str:
     return "kept"
 
 
-def _stamp() -> dict[str, int]:
-    return {"wall_ns": time.time_ns(), "mono_ns": time.monotonic_ns()}
+def _state_name(state: Any) -> str | None:
+    """vLLM's PauseState by name: UNPAUSED, PAUSED_NEW or PAUSED_ALL."""
+    if state is None:
+        return None
+    name = getattr(state, "name", None)
+    return name if isinstance(name, str) else str(state)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    return None if value is None else bool(value)
 
 
 def _optional_str(value: Any) -> str | None:

@@ -40,9 +40,13 @@ def endpoint(*, failing=False, cookie_headers=None):
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            calls.append(("GET", self.path, self.headers.get("Authorization")))
+            if self.path != "/admin/api/stats":
+                self.send_response(404)
+                self.end_headers()
+                return
             if cookie_headers is not None:
                 cookie_headers.append(self.headers.get("Cookie"))
-            calls.append(("GET", self.path, self.headers.get("Authorization")))
             self.send_response(401 if failing else 200)
             self.end_headers()
             self.wfile.write(json.dumps(PINNED_RESPONSE).encode())
@@ -131,13 +135,18 @@ def test_stats_credentials_never_inherit_inference_key(tmp_path):
         report = InferenceProfiler(config).run()
     assert report["telemetry"]["mlx"]["omlx_stats"]["samples"] >= 2
     assert report["summary"]["successful_requests"] == 1
-    assert [key for method, _, key in calls if method == "GET"] == [
+    assert [key for method, path, key in calls if path == "/admin/api/stats"] == [
         "Bearer admin-key",
         "Bearer admin-key",
     ]
     assert [key for method, _, key in calls if method == "POST"] == [
         "Bearer inference-key"
     ]
+    assert all(
+        key == "Bearer inference-key"
+        for method, path, key in calls
+        if method == "GET" and path != "/admin/api/stats"
+    )
     artifact = Path(config.output_path).read_text()
     assert "admin-key" not in artifact and "inference-key" not in artifact
     assert (
@@ -163,7 +172,7 @@ def test_stats_auth_failure_does_not_fail_inference(tmp_path):
         )
         report = InferenceProfiler(config).run()
     assert report["summary"]["successful_requests"] == 1
-    assert all(key is None for method, _, key in calls if method == "GET")
+    assert all(key is None for _, path, key in calls if path == "/admin/api/stats")
     stats = [
         row
         for row in map(json.loads, Path(config.output_path).read_text().splitlines())
@@ -246,7 +255,7 @@ def test_admin_session_cookie_is_separate_and_never_retained(tmp_path):
     assert cookies and all(
         cookie == "omlx_admin_session=" + token for cookie in cookies
     )
-    assert all(auth is None for method, _, auth in calls if method == "GET")
+    assert all(auth is None for _, path, auth in calls if path == "/admin/api/stats")
     assert all(
         auth == "Bearer inference-key" for method, _, auth in calls if method == "POST"
     )

@@ -29,6 +29,7 @@ from stormlog.infer.vllm_scraper import (
     INTERRUPT_SCRAPE_TIMEOUT_SECONDS,
     MAX_SCRAPE_BYTES,
     MAX_SCRAPE_SERIES,
+    FetchResult,
     VllmMetricsScraper,
     fetch_metrics,
     metrics_api_key,
@@ -429,6 +430,8 @@ class TestProfileScrapes:
         assert all(s["status"] == "ok" for s in scrapes)
         assert all(s["observation_scope"] == "engine_aggregate" for s in scrapes)
         assert all(s["interval_ms"] == 100 for s in scrapes)
+        # The server was sampled between the stamp and the response's return.
+        assert all(s["observed_at_ns"] <= s["completed_at_ns"] for s in scrapes)
         # Scrapes sit on the client's clock, like the phase windows.
         windows = _of_type(records, "infer.phase_window")
         measured = [s for s in scrapes if s["phase"] == "measured"]
@@ -482,6 +485,7 @@ class TestProfileScrapes:
         assert scrapes and all(s["status"] == "error" for s in scrapes)
         assert all(s["error"] == "HTTP 503" for s in scrapes)
         assert all(s["scrape"] is None for s in scrapes)
+        assert all(s["observed_at_ns"] <= s["completed_at_ns"] for s in scrapes)
         for scrape in scrapes:
             VALIDATOR.validate(scrape)
         capability = _of_type(records, "infer.capabilities")[0]
@@ -624,6 +628,7 @@ class TestProfileScrapes:
         assert scrapes[-1]["marker"] == MARKER_PHASE_END
         assert scrapes[-1]["status"] == "error"
         assert "deadline" in scrapes[-1]["error"]
+        assert scrapes[-1]["completed_at_ns"] >= scrapes[-1]["observed_at_ns"]
 
     def test_a_real_sigint_during_a_hung_scrape_still_ends_the_artifact(
         self, tmp_path: Path
@@ -828,6 +833,38 @@ class TestScraperUnits:
         assert (scraper.ok_scrapes, scraper.failed_scrapes) == (0, 2)
         assert len(warnings) == 1
         VALIDATOR.validate(first.to_record())
+
+    def test_a_scrape_is_timed_on_the_monotonic_clock(self) -> None:
+        refused = (FetchResult(None, None, "refused", 1.0), None)
+        scraper = VllmMetricsScraper(
+            url="http://127.0.0.1:1/metrics",
+            interval_seconds=1.0,
+            timeout_seconds=0.5,
+            session_id="s",
+            run_id="r",
+            clock_domain="host/boot/unix_epoch_ns",
+        )
+        for scrape in (
+            lambda: scraper.scrape(marker=MARKER_PHASE_START),
+            lambda: asyncio.run(scraper.scrape_async(marker=MARKER_PHASE_START)),
+        ):
+            # An NTP step back of 1 s during the fetch, which took 3 ms.
+            walls = iter([2_000_000_000_000_000_000, 1_999_999_999_000_000_000])
+            monos = iter([5_000_000, 8_000_000])
+            with (
+                mock.patch.multiple(
+                    "stormlog.infer.vllm_scraper.time",
+                    time_ns=lambda: next(walls),
+                    monotonic_ns=lambda: next(monos),
+                ),
+                mock.patch(
+                    "stormlog.infer.vllm_scraper._fetch_and_parse",
+                    return_value=refused,
+                ),
+            ):
+                record = scrape()
+            assert record.observed_at_ns == 2_000_000_000_000_000_000
+            assert record.completed_at_ns == 2_000_000_000_003_000_000
 
     def test_metrics_api_key_stays_on_the_endpoints_origin(self) -> None:
         endpoint = "http://host:8000/v1/chat/completions"

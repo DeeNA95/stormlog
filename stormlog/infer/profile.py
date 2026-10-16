@@ -37,13 +37,23 @@ from .completions_client import OpenAICompletionsClient
 from .config import ProfileConfig, WorkloadCase
 from .correlation_events import ArtifactIdentityEvent, CorrelationContext
 from .engine_adapters import get_adapter
-from .events import InferenceRequestEvent, InferenceSummaryEvent, JsonlEventWriter
+from .errors import InferInputError
+from .events import (
+    InferenceDispatchEvent,
+    InferenceFirstContentEvent,
+    InferencePhaseStartEvent,
+    InferenceRequestEvent,
+    InferenceSummaryEvent,
+    JsonlEventWriter,
+)
 from .export import RECEIVER_HEALTH, ExportPipeline, ReceiverHealth
 from .export_config import sampler_warnings
 from .export_metrics import ProfileLabels
 from .export_spans import SpanIdentity
 from .host_clock import host_boot_id, wall_clock_domain
 from .http_transport import RequestDeadlineExceeded, safe_error
+from .manifest import BEFORE as MANIFEST_BEFORE
+from .manifest import before_refusals, declared_record, description_record
 from .omlx_stats import OmlxStatsSampler
 from .open_loop import Arrival
 from .openai_client import (
@@ -59,9 +69,20 @@ from .prompts import Prompt, PromptSource
 from .request_scheduler import AbandonedWait as _AbandonedWait
 from .request_scheduler import LateCalls, RequestScheduler
 from .samplers import SystemSampler, build_system_sampler
+from .server_probe import (
+    AFTER,
+    BEFORE,
+)
+from .server_probe import NONE as NONE_PROBE
+from .server_probe import (
+    SERVER_INFO,
+    SERVER_INFO_DEADLINE_SECONDS,
+    ServerProbe,
+    probe_server,
+)
 from .slo import slo_record
 from .tokens import TokenCount, TokenCounter, build_token_counter
-from .trace_capture import TraceWindows
+from .trace_capture import TraceCaptureConfig, TraceWindows
 from .trace_context import OFF, TRACEPARENT, TraceIds, new_trace_ids, traceparent
 from .vllm_execution_devices import WorkerIndex
 from .vllm_execution_import import (
@@ -79,8 +100,25 @@ from .vllm_telemetry import MARKER_PHASE_END, MARKER_PHASE_START
 from .workload import workload_record
 
 
+@dataclass(frozen=True)
+class PhaseEvent:
+    """A phase's arrivals are about to start (``started``), or the phase has
+    drained (``ended``, with its window's times as the artifact records them).
+    ``at_ns`` is the wall clock when the caller was told."""
+
+    case_id: str
+    phase: str
+    event: str
+    at_ns: int
+    window: dict[str, int] | None = None
+
+
 class InferenceProfiler:
-    """Profile an OpenAI-compatible chat completions endpoint."""
+    """Profile an OpenAI-compatible chat completions endpoint.
+
+    ``on_phase`` is told when each phase starts and ends, on the profiler's
+    event loop; an exception it raises stops the profile.
+    """
 
     def __init__(
         self,
@@ -89,13 +127,22 @@ class InferenceProfiler:
         run_id: str | None = None,
         on_warning: Callable[[str], None] | None = None,
         on_notice: Callable[[str], None] | None = None,
+        prober: Callable[[str], ServerProbe] | None = None,
+        on_phase: Callable[[PhaseEvent], None] | None = None,
     ) -> None:
         self.config = config
         self.on_warning = on_warning
         # What the run is doing when it would otherwise seem stuck.
         self.on_notice = on_notice
+        self.prober = prober or self._probe_server
+        self._before_probe: ServerProbe | None = None
+        self.on_phase = on_phase
+        # Set while the measured phase runs with a stop file, once it appears.
+        self._ending: asyncio.Event | None = None
+        self._ended_at_ns: int | None = None
         self.session = create_session_summary(source="stormlog.infer.profile")
         self.run_id = run_id or config.run_id or new_session_id()
+        self._check_before_description()
         self.token_counter = build_token_counter(
             tokenizer=config.tokenizer,
             model=config.model,
@@ -249,6 +296,26 @@ class InferenceProfiler:
         """The run-scoped ``X-Request-Id`` sent with a request and recorded on it."""
         return f"stormlog-{self.run_id}-{request_id}"
 
+    def _check_before_description(self) -> None:
+        """Refuse a before description of another run; warn when it is old."""
+        description = self.config.server_description
+        if description is None:
+            return
+        refusals = before_refusals(description, run_id=self.run_id)
+        if refusals:
+            raise InferInputError(
+                "--describe-server: " + "; ".join(refusals) + ". Pass the run's "
+                "--run-id, or describe the server for this run"
+            )
+        observed = description.get("observed_at_ns")
+        age = (time.time_ns() - observed) / 1e9 if isinstance(observed, int) else None
+        if age is not None and age > _STALE_DESCRIPTION_SECONDS and self.on_warning:
+            self.on_warning(
+                f"--describe-server was taken {age / 3600:.1f} h ago by the "
+                "server's clock; describe the server again so it shows the "
+                "server this run measures"
+            )
+
     def _check_schedules(self) -> None:
         """Refuse an open-loop schedule above the arrival cap up front."""
         config = self.config
@@ -317,6 +384,17 @@ class InferenceProfiler:
 
     async def _run_async(self) -> dict[str, Any]:
         output_path = Path(self.config.output_path)
+        # Before the artifact is opened: a server still collecting its
+        # environment is not measured, and no artifact says otherwise.
+        self._before_probe = await asyncio.to_thread(self.prober, BEFORE)
+        if self._before_probe.incomplete:
+            answer = self._before_probe.answers[SERVER_INFO]
+            raise InferInputError(
+                f"the server's /server_info gave no answer ({answer.status}, "
+                f"deadline {SERVER_INFO_DEADLINE_SECONDS:g} s), so vLLM's "
+                "environment collector (pip, nvidia-smi) may still be running in "
+                "it; restart the server before profiling, or pass --server-probe basic"
+            )
         try:
             await self._capture(output_path)
             await self._import_server_evidence(output_path)
@@ -403,92 +481,35 @@ class InferenceProfiler:
         if self.on_warning is not None:
             self.on_warning(message)
 
+    def _probe_server(self, phase: str) -> ServerProbe:
+        return probe_server(
+            self.config.endpoint,
+            mode=self.config.server_probe,
+            phase=phase,
+            api_key=self.config.api_key,
+            allow_remote=self.config.allow_remote_probe,
+        )
+
+    async def _probe_after(self, writer: JsonlEventWriter) -> None:
+        """Ask again after the last case, so drift shows in the artifact."""
+        if self.config.server_probe == NONE_PROBE:
+            return
+        probe = await asyncio.to_thread(self.prober, AFTER)
+        writer.append(probe.to_record(session_id=self.session.session_id))
+        if probe.incomplete:
+            self._warn(
+                "the server's /server_info gave no answer after the run; the "
+                "after-run probe is incomplete"
+            )
+
     async def _capture(self, output_path: Path) -> None:
         self._start_span_receiver()
         self._start_export()
         observer = self.export.observe if self.export is not None else None
         with JsonlEventWriter(output_path, observer=observer) as writer:
             self._opened_artifact = True
-            writer.append(
-                {
-                    "schema_version": 1,
-                    "event_type": "infer.session",
-                    "session_id": self.session.session_id,
-                    "timestamp_ns": self.session.started_at_ns,
-                    "status": "running",
-                    "config": {
-                        "endpoint": redact_url(self.config.endpoint),
-                        "model": self.config.model,
-                        "concurrency": list(self.config.concurrency),
-                        "input_tokens": list(self.config.input_tokens),
-                        "output_tokens": list(self.config.output_tokens),
-                        "duration_seconds": self.config.duration_seconds,
-                        "request_count": self.config.request_count,
-                        "engine_adapter": get_adapter(
-                            self.config.engine, self.config.task
-                        ).to_record(self.config.task, self.config.server_version),
-                        "stream": self.config.stream,
-                        "stream_include_usage": self.config.stream_include_usage,
-                        "tokenizer": self.config.tokenizer,
-                        "system_sampler": self.sampler.name,
-                        "arrivals": [
-                            spec.to_record() for spec in self.config.arrival_specs()
-                        ],
-                        "max_in_flight": self.config.max_in_flight,
-                        "overflow": self.config.overflow,
-                        "prompts": self.prompt_spec.to_record(),
-                        "cache_state": self.config.cache_state,
-                        "cache_reset_url": redact_url(self.config.cache_reset_url),
-                        "cache_reset_timeout_seconds": (
-                            self.config.cache_reset_timeout_seconds
-                        ),
-                        "vllm_metrics": (
-                            self.vllm_scraper.config_record()
-                            if self.vllm_scraper is not None
-                            else None
-                        ),
-                        "vllm_spans": (
-                            {
-                                **self.span_receiver.config_record(),
-                                "drain_seconds": self.config.vllm_spans_drain_seconds,
-                            }
-                            if self.span_receiver is not None
-                            else None
-                        ),
-                        "vllm_execution_dir": (
-                            str(self.execution_dir)
-                            if self.execution_dir is not None
-                            else None
-                        ),
-                        "environment_proxies": ignored_proxies(),
-                        "trace_context": {
-                            "policy": self.config.export.trace_context,
-                            "sample_ratio": self.config.export.sample_ratio,
-                            # As the operator declared it; never verified.
-                            "server_trace_sampler": (
-                                self.config.export.server_trace_sampler
-                            ),
-                        },
-                    },
-                }
-            )
-            writer.append(self._artifact_identity().to_record())
-            writer.append(
-                workload_record(
-                    self.config,
-                    session_id=self.session.session_id,
-                    counter=self.token_counter,
-                    prompt_spec=self.prompt_spec,
-                )
-            )
-            if self.config.slo is not None:
-                writer.append(
-                    slo_record(
-                        self.config.slo,
-                        session_id=self.session.session_id,
-                        source=self.config.slo_source or "flags",
-                    )
-                )
+            writer.append(self._session_record())
+            self._write_run_records(writer)
             stop_sampling = asyncio.Event()
             sample_task = asyncio.create_task(
                 self._sample_system_loop(
@@ -506,6 +527,7 @@ class InferenceProfiler:
             try:
                 for case in self.config.cases():
                     await self._run_case(case=case, writer=writer)
+                await self._probe_after(writer)
                 completed = True
             finally:
                 # Before any await: the shutdown below is not to be cut short
@@ -572,6 +594,111 @@ class InferenceProfiler:
             if not completed or self._ctrl_c.pressed:
                 deadline = min(deadline, EXPORT_INTERRUPT_CLOSE_SECONDS)
             self.export.close(deadline)
+
+    def _session_record(self) -> dict[str, Any]:
+        """The running session and its settings, observers included."""
+        return {
+            "schema_version": 1,
+            "event_type": "infer.session",
+            "session_id": self.session.session_id,
+            "timestamp_ns": self.session.started_at_ns,
+            "status": "running",
+            "config": {
+                "endpoint": redact_url(self.config.endpoint),
+                "model": self.config.model,
+                "concurrency": list(self.config.concurrency),
+                "input_tokens": list(self.config.input_tokens),
+                "output_tokens": list(self.config.output_tokens),
+                "duration_seconds": self.config.duration_seconds,
+                "request_count": self.config.request_count,
+                "engine_adapter": get_adapter(
+                    self.config.engine, self.config.task
+                ).to_record(self.config.task, self.config.server_version),
+                "stream": self.config.stream,
+                "stream_include_usage": self.config.stream_include_usage,
+                "tokenizer": self.config.tokenizer,
+                "system_sampler": self.sampler.name,
+                "sample_interval_seconds": self.config.sample_interval_seconds,
+                "labels": self.config.labels,
+                "trace": _trace_settings(self.config.trace),
+                "arrivals": [spec.to_record() for spec in self.config.arrival_specs()],
+                "max_in_flight": self.config.max_in_flight,
+                "overflow": self.config.overflow,
+                "prompts": self.prompt_spec.to_record(),
+                "cache_state": self.config.cache_state,
+                "cache_reset_url": redact_url(self.config.cache_reset_url),
+                "cache_reset_timeout_seconds": (
+                    self.config.cache_reset_timeout_seconds
+                ),
+                "vllm_metrics": (
+                    self.vllm_scraper.config_record()
+                    if self.vllm_scraper is not None
+                    else None
+                ),
+                "vllm_spans": (
+                    {
+                        **self.span_receiver.config_record(),
+                        "drain_seconds": self.config.vllm_spans_drain_seconds,
+                    }
+                    if self.span_receiver is not None
+                    else None
+                ),
+                "vllm_execution_dir": (
+                    str(self.execution_dir) if self.execution_dir is not None else None
+                ),
+                "environment_proxies": ignored_proxies(),
+                "trace_context": {
+                    "policy": self.config.export.trace_context,
+                    "sample_ratio": self.config.export.sample_ratio,
+                    # As the operator declared it; never verified.
+                    "server_trace_sampler": self.config.export.server_trace_sampler,
+                },
+            },
+        }
+
+    def _write_run_records(self, writer: JsonlEventWriter) -> None:
+        """What the run is: its identity, workload, SLO policy and server probe."""
+        writer.append(self._artifact_identity().to_record())
+        writer.append(
+            workload_record(
+                self.config,
+                session_id=self.session.session_id,
+                counter=self.token_counter,
+                prompt_spec=self.prompt_spec,
+            )
+        )
+        if self.config.slo is not None:
+            writer.append(
+                slo_record(
+                    self.config.slo,
+                    session_id=self.session.session_id,
+                    source=self.config.slo_source or "flags",
+                )
+            )
+        if self._before_probe is not None and self._before_probe.answers:
+            writer.append(
+                self._before_probe.to_record(session_id=self.session.session_id)
+            )
+        self._write_manifests(writer)
+
+    def _write_manifests(self, writer: JsonlEventWriter) -> None:
+        """The before description and the declarations the run was given."""
+        session_id = self.session.session_id
+        if self.config.server_description is not None:
+            writer.append(
+                description_record(
+                    self.config.server_description,
+                    role=MANIFEST_BEFORE,
+                    session_id=session_id,
+                    run_id=self.run_id,
+                )
+            )
+        if self.config.declarations is not None:
+            writer.append(
+                declared_record(
+                    self.config.declarations, session_id=session_id, run_id=self.run_id
+                )
+            )
 
     async def _wait_for_late_spans(self) -> None:
         """Keep the receiver up after the last phase for the exporter's last batch.
@@ -722,6 +849,8 @@ class InferenceProfiler:
         sampler: SystemSampler,
         stop_event: asyncio.Event,
     ) -> None:
+        interval = self.config.sample_interval_seconds
+        next_at = time.monotonic()
         while not stop_event.is_set():
             try:
                 sample = await asyncio.to_thread(
@@ -732,10 +861,11 @@ class InferenceProfiler:
                 sample = None
             if sample is not None:
                 writer.append(sample.to_record())
+            # A fixed grid: a slow sample delays the next one, not the rate.
+            next_at = max(next_at + interval, time.monotonic())
             try:
                 await asyncio.wait_for(
-                    stop_event.wait(),
-                    timeout=self.config.sample_interval_seconds,
+                    stop_event.wait(), timeout=next_at - time.monotonic()
                 )
             except asyncio.TimeoutError:
                 pass
@@ -816,12 +946,27 @@ class InferenceProfiler:
         prompts.warm()
         if abandoned is None:
             abandoned = await self._wait_for_abandoned()
+        # Append-only, so a reader of the growing artifact knows a phase is
+        # open before its infer.phase_window record is written at the end.
+        writer.append(
+            InferencePhaseStartEvent(
+                session_id=self.session.session_id,
+                case_id=case.case_id,
+                phase=phase,
+                arrival_mode=case.arrival.mode,
+                started_at_ns=time.time_ns(),
+            ).to_record()
+        )
+        watcher = self._watch_stop_file() if phase == "measured" else None
         try:
             async with self._trace_window(case.case_id, phase):
                 window = await self._run_scraped_phase(
                     request, total_requests, duration_seconds
                 )
         finally:
+            if watcher is not None:
+                watcher.cancel()
+            self._ending, self._ended_at_ns = None, None
             # Written on cancellation too, even one that lands while the
             # profiler start is in flight, so the artifact names the trace files.
             for record in self._trace_records():
@@ -834,6 +979,9 @@ class InferenceProfiler:
                 abandoned=abandoned,
             )
         )
+        # Told once the window is on record, so a caller that fails here
+        # loses no record, and its marker never precedes the record.
+        self._tell(case.case_id, phase, "ended", window.times())
 
     async def _run_scraped_phase(
         self,
@@ -949,9 +1097,16 @@ class InferenceProfiler:
         total_requests: int | None,
         duration_seconds: float | None,
     ) -> "_PhaseWindow":
+        self._tell(request.case.case_id, request.phase, "started")
         if request.case.arrival.open_loop:
             return await self._run_open_phase(request, total_requests, duration_seconds)
         return await self._run_closed_phase(request, total_requests, duration_seconds)
+
+    def _tell(
+        self, case_id: str, phase: str, event: str, window: dict[str, int] | None = None
+    ) -> None:
+        if self.on_phase is not None:
+            self.on_phase(PhaseEvent(case_id, phase, event, time.time_ns(), window))
 
     async def _scrape(
         self,
@@ -1013,7 +1168,24 @@ class InferenceProfiler:
             drain_timeout=self._drain_timeout(),
             send=send,
             drop=drop,
+            until=self._ending,
         )
+
+    def _watch_stop_file(self) -> asyncio.Task[None] | None:
+        """Watch for ``config.stop_file``; once it appears, ``_ending`` is set
+        and the measured window ends as if its duration had run out."""
+        if self.config.stop_file is None:
+            return None
+        path = Path(self.config.stop_file)
+        ending = self._ending = asyncio.Event()
+
+        async def watch() -> None:
+            while not path.exists():
+                await asyncio.sleep(STOP_FILE_POLL_SECONDS)
+            self._ended_at_ns = time.time_ns()
+            ending.set()
+
+        return asyncio.create_task(watch())
 
     async def _run_closed_phase(
         self,
@@ -1022,6 +1194,13 @@ class InferenceProfiler:
         duration_seconds: float | None,
     ) -> "_PhaseWindow":
         window = await self._scheduler(request).closed(total_requests, duration_seconds)
+        if self._ended_at_ns is not None:
+            return _PhaseWindow(
+                window.started_at_ns,
+                self._ended_at_ns,
+                window.drained_at_ns,
+                stopped_early=True,
+            )
         return _PhaseWindow(**asdict(window))
 
     async def _run_open_phase(
@@ -1031,7 +1210,9 @@ class InferenceProfiler:
         duration_seconds: float | None,
     ) -> "_PhaseWindow":
         window = await self._scheduler(request).open(total_requests, duration_seconds)
-        return _PhaseWindow(**asdict(window))
+        return _PhaseWindow(
+            **asdict(window), stopped_early=self._ended_at_ns is not None
+        )
 
     async def _send(
         self, request_id: str, request: "_PhaseRequest", arrival: Arrival
@@ -1133,6 +1314,7 @@ class InferenceProfiler:
             if ids is not None
             else None
         )
+        on_sent, on_first_content = self._progress_records(request_id, request, arrival)
         call = self.request_executor.submit(
             self._call_and_count,
             prompt,
@@ -1144,6 +1326,8 @@ class InferenceProfiler:
                 stream_include_usage=self.config.stream_include_usage,
                 request_id=self._x_request_id(request_id),
                 headers=headers,
+                on_sent=on_sent,
+                on_first_content=on_first_content,
             ),
         )
         self._track(call)
@@ -1156,6 +1340,52 @@ class InferenceProfiler:
                 outcome = replace(outcome, error=exc)
         event = self._failure_event(request_id, request, arrival, prompt, outcome)
         return event, outcome.extras
+
+    def _progress_records(
+        self, request_id: str, request: "_PhaseRequest", arrival: Arrival
+    ) -> tuple[Callable[[int], None], Callable[[int], None]]:
+        """Callbacks that record a request's send and its first content as
+        they happen. The call runs on a pool thread, which only hands the
+        stamp to the event loop; the loop builds and appends the record, so
+        it lands before the request's ``infer.request`` record."""
+        loop = asyncio.get_running_loop()
+        writer = request.writer
+        identity = {
+            "session_id": self.session.session_id,
+            "request_id": request_id,
+            "x_request_id": self._x_request_id(request_id),
+            "case_id": request.case.case_id,
+            "phase": request.phase,
+        }
+
+        def append(record: dict[str, Any]) -> None:
+            # A call a drain gave up on can outlive the capture's writer.
+            if writer.is_open:
+                writer.append(record)
+
+        def sent(at_ns: int) -> None:
+            event = InferenceDispatchEvent(
+                **identity, intended_at_ns=arrival.intended_at_ns, started_at_ns=at_ns
+            )
+            append(event.to_record())
+
+        def first_content(at_ns: int) -> None:
+            append(
+                InferenceFirstContentEvent(
+                    **identity, first_content_at_ns=at_ns
+                ).to_record()
+            )
+
+        def on_loop(callback: Callable[[int], None]) -> Callable[[int], None]:
+            def call(at_ns: int) -> None:
+                try:
+                    loop.call_soon_threadsafe(callback, at_ns)
+                except RuntimeError:  # the loop has closed: the run is over
+                    pass
+
+            return call
+
+        return on_loop(sent), on_loop(first_content)
 
     def _call_and_count(
         self, prompt: Prompt, call: Callable[[], ChatCompletionResult]
@@ -1397,6 +1627,15 @@ class _PhaseWindow:
     # Where the schedule's observation window ends, from the phase start: the
     # duration, or one whole slot after the last counted arrival.
     scheduled_endpoint_offset_ns: int | None = None
+    # The stop file ended the window before its duration ran out.
+    stopped_early: bool = False
+
+    def times(self) -> dict[str, int]:
+        return {
+            "started_at_ns": self.started_at_ns,
+            "window_ended_at_ns": self.window_ended_at_ns,
+            "drained_at_ns": self.drained_at_ns,
+        }
 
     def to_record(
         self,
@@ -1419,6 +1658,7 @@ class _PhaseWindow:
             "drain_timeout_seconds": drain_timeout_seconds,
             "scheduled_arrivals": self.scheduled_arrivals,
             "scheduled_endpoint_offset_ns": self.scheduled_endpoint_offset_ns,
+            "stopped_early": self.stopped_early,
             "prompts_digest": request.prompts.digest(),
             "abandoned_requests": abandoned.to_record(),
         }
@@ -1542,6 +1782,20 @@ async def _no_trace_window() -> AsyncIterator[None]:
     yield None
 
 
+def _trace_settings(trace: TraceCaptureConfig | None) -> dict[str, Any] | None:
+    """What the profiler-trace observer was asked to capture, or None."""
+    if trace is None:
+        return None
+    return {
+        "mode": trace.mode,
+        "phase": trace.phase,
+        "control_url": redact_url(trace.control_url),
+        "max_seconds": trace.max_seconds,
+        "max_bytes": trace.max_bytes,
+        "detail": trace.detail,
+    }
+
+
 def _stop_status(exc: BaseException) -> str:
     if isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
         return SESSION_STATUS_INTERRUPTED
@@ -1597,11 +1851,16 @@ def _same_path(a: Path, b: Path) -> bool:
 # How long closing the exporters may take after Ctrl+C, at most; otherwise
 # --otlp-flush-timeout (5 s). They finish what is queued, then freeze.
 EXPORT_INTERRUPT_CLOSE_SECONDS = 2.0
+
+
+# A before description older than this, by the server's clock, gets a warning.
+_STALE_DESCRIPTION_SECONDS = 3600.0
 # The server declined the request: rate limited or overloaded.
 REJECTED_HTTP_STATUSES = frozenset({429, 503})
 # How long the finished run waits for the vLLM execution hook to seal its open
 # segments (a heartbeat per second confirms it) before importing the log.
 EXECUTION_FLUSH_TIMEOUT_SECONDS = 10.0
+STOP_FILE_POLL_SECONDS = 0.1
 
 
 def classify_failure(exc: BaseException) -> tuple[str, int | None]:

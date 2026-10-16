@@ -108,6 +108,259 @@ the flaky benchmark memory gates
     quantiles leave it out.
   - There is no client inter-token latency; `docs/inference_slo.md` explains
     why. (#213)
+- `stormlog infer compare --baseline ... --candidate ...`: compares two arms
+  of runs case by case (goodput, attainment, throughput, failure fraction and
+  latency quantiles), paired by block when runs are labelled (a block whose
+  runs sent different workload realizations is set aside). A run that did
+  not finish, or a case a run lacks, is an outcome, compared rather than
+  set aside, and a value it lost fails the candidate's gate
+  (`outcome_unrecoverable`), as does an outcome a runner records in
+  `infer.run_state`; only a protocol failure, such as an external cause a
+  runner records there (listed with its evidence), sets aside a block, both
+  arms, and a gate's pre-registered `min_complete_blocks` says how many may
+  go. `--allow` names what may differ between the arms; a field that may
+  differ between one arm's runs takes `--allow-within-arm`, and each such
+  field is named with each run's value (`diagnostics.allowed_within_arm`). A baseline outcome
+  failure leaves the case's contrasts
+  `not_evaluable: control_failed`, so a broken baseline never passes the
+  candidate. A retried block keeps its last attempt, but a retry never
+  replaces an outcome failure. An SLO gate over runs judged by
+  different policies is refused unless `--slo` judges them all. Gates are
+  `--gate METRIC=RULE:BUDGET` with `non-inferiority`, `significant` or
+  `demonstrated`, and a budget that can never fail is a usage error;
+  `--min-attainment` judges the share of runs that meet a target, a run
+  whose SLO was not judged counting as not meeting it;
+  `--family any_regression` applies Holm. Modes `config`, `overhead`
+  and `incremental` check what may differ and the observers' contract. Exit
+  0, 4 (a gate failed or could not be evaluated, unless
+  `--allow-not-evaluable`) or 5 (not comparable); `--format json` and
+  `--report` give a `stormlog.report` v1 envelope (`inference_comparison`)
+  whose findings point into the `stormlog.infer.comparison` v1 payload, also
+  when the comparison exits 5. `docs/report_contract.md` now says how an
+  evidence pointer resolves in a JSON file, a JSONL file, or the report
+  itself. (#213)
+- `stormlog infer profile --experiment ID --arm NAME --block LABEL`
+  (with `--position` and `--attempt`) records the run's labels, and
+  `stormlog.infer.run_summary.summarize_run` reads a run back for
+  comparison: its report, labels, comparable fields, and protocol failures
+  (unfinished session, identity change, incomplete probe, invalid cohort,
+  unacknowledged cold-cache reset). (#213)
+- `python -m examples.cli.infer_repeated_baseline --plan PLAN --output DIR`
+  runs an experiment plan from the command line, with `--resume` and
+  `--retry-incomplete`; it exits 3 while any planned run has not finished,
+  whichever invocation ran it (`unfinished_runs`). (#213)
+- Launch-bound model identity for the runner (`server.model`): a
+  `pinned_hub` snapshot is resolved to a commit and every file checked
+  against the name of the blob it links to, then served with
+  `--revision <commit>` and `HF_HUB_OFFLINE=1`; a `staged` directory, a hub
+  snapshot included, is hashed into a read-only, content-addressed copy of
+  its files. Files are hashed again after each run
+  (`model_changed`), and the runner's server descriptions carry
+  `pinned_commit_verified` (or `pinned_snapshot_verified`, when the pin
+  gives no file list of the commit) or `staged_snapshot_verified`, the only
+  evidence
+  that verifies a model's identity in a comparison. (#213)
+- `stormlog.infer.experiment.run_plan`: the experiment runner. Each run
+  starts the arm's server in a process group of its own, checks it holds
+  only vLLM's processes, describes it before and after, runs the treatments
+  and workload steps, stops the whole group and verifies nothing is left
+  (through `/proc` on Linux, so a process that left with `setsid` is found,
+  and by a mark in every launch's environment, so is one forked later; a
+  process that may be the launch's whose environment cannot be read, or was
+  emptied, leaves the cleanup unverified),
+  then checks artifacts and labels and writes `SHA256SUMS`. It probes each
+  server before measuring, and a `/server_info` that does not answer
+  (`probe_incomplete`) is retried once on a fresh server. Each run ends
+  `completed`, `outcome_failure` (kept as data) or `protocol_failure` (set
+  aside, retryable), recorded in `index.jsonl`; a server that never became
+  healthy is its arm's outcome when the arm's own launch differs from the
+  plan's `control_arm` and the control's server came up in the block
+  (`decided_by`). A cleanup that left
+  processes, a run's or a prelude's, stops the experiment, and the runs it
+  left are indexed `not_run` for a resume, which refuses while a survivor
+  still runs, and stops what a killed runner left (each launch is journaled
+  as it starts, with the host's boot, and ends there once its cleanup
+  verified): a group only while its leader is still that process, and
+  otherwise only a process whose readable environment holds the launch's
+  mark exactly, in the same boot. The runner holds `<output>/.lock` for its
+  whole run, so a second runner on the same experiment refuses (exit 2);
+  a server port already taken stops it too, and `/health`
+  counts only from the launched server; resumes refuse a changed
+  plan or pre-registration, and secrets reach commands without being
+  written down. `sanitize_bundle` scans the finished bundle for the plan's
+  secret values and for bearer, `hf_` and `sk-` token shapes
+  (`sanitizer.json`). The runner appends an `infer.treatments` record to
+  each artifact, and observers and comparisons see each treatment as an
+  observer, `treatment:<name>`. It gives each artifact its before and after
+  descriptions, the `/server_info` probe it took before measuring (so a
+  workload need probe only the basic routes), and with a verified model an `infer.model_identity` record
+  bound to the server it launched, which is what lets a comparison verify
+  the weights. Each artifact also gets the run's state (`infer.run_state`),
+  so `infer compare` counts a run whose server crashed against its arm
+  rather than trusting a session that finished, and sets aside a block only
+  for a protocol failure the runner recorded. A resume refuses to go on
+  while an attempt the runner itself was killed in is unexplained: either
+  `external_causes` gives its cause (`spot_preemption`, `operator_abort` or
+  `infra_fault`) with evidence, which makes it a protocol failure that may
+  be retried, or `interrupted_as_outcome` makes it an outcome failure
+  (`runner_interrupted`), kept. Either way it is finished and indexed. (#213)
+- `stormlog.infer.experiment_plan`: experiment plans
+  (`stormlog.infer.experiment_plan` v1) with arms, workload steps (shared with
+  `same_as:<arm>`), treatments, block preludes, a seeded `random`, `williams`
+  or `explicit` order, one seed per block shared by every arm, and command
+  templates, with the server's base URL filled once per block, whose
+  placeholders are checked when the plan loads against what fills them
+  where each is used. (#213)
+- Segments: `infer compare --segment NAME=START:END` (and
+  `analyze_inference_events(segments=...)`) compare a slice of each case's
+  measured phase as a case of its own, `<case>/<segment>`, with its own
+  population, rates, latency and SLO. A segment by overlap is
+  length-biased in rates and quantiles alike, so it is compared as
+  diagnostics and never gated, and has no rates. (#213)
+- `examples/analysis/simulation_study.py` validates the comparison's rules
+  with 20,000 replications per cell (results in
+  `examples/analysis/simulation_results.json`, tables in
+  `docs/inference_comparison.md`): non-inferiority's false-safe rate at a true
+  change equal to the budget stays at or below 2.83% for normal and t3 noise,
+  with the effect varying by block, for a higher-is-better metric and for the
+  independent design; missing outcomes only make it more careful, the
+  independent design covers at least 0.958, the run-level attainment gate
+  holds at the supremum of a false claim and under correlated failures where
+  pooled requests do not, and the skew screen flags 5% of normal noise. A
+  run-gate cell the gate cannot pass at all is reported as one, with the
+  fewest runs that could, never as a pass rate of 0. A fraction's floored
+  paired t stays within 2.83% when failures are independent (1.3–1.9% at
+  6–10 blocks of 300 requests). Strong right skew (8–12%), pooled requests,
+  and a fraction's intervals under failures correlated within a run
+  (beta-binomial: 14–25% for the floored t, 25–49% for pooled requests) are
+  published as limits. (#213)
+- `tests/fixtures/infer/comparison_contract_v1.json`: the comparison's
+  units contract, 27 cases whose expected effects, intervals and gate
+  outcomes are computed from the formulas and the gate rules by
+  `examples/analysis/comparison_contract.py`, including the run-level claim
+  on fractions (the attainment budget boundary, 6 of 6, 8 of 8, 7 of 8 and
+  9 of 10, an all-zero failure fraction, too few requests a run), a
+  baseline outcome failure (`control_failed`) and the independent design's
+  gate. (#213)
+- `stormlog.infer.comparison_stats`: one metric compared between a
+  baseline and a candidate arm of runs. Paired t on block log ratios (or
+  differences) when runs carry block labels, Welch t with df = min(nA, nB) − 1
+  otherwise, and a one-sample t for `absolute` metrics; Fieller and a
+  bootstrap (from 10 pairs) as unguarded cross-checks. Effects carry their
+  scale and unit (`relative` for log ratios). Per-run values may be
+  `(lower, upper)` bounds: non-inferiority gates use the worst case,
+  `significant` and `demonstrated` the best. A fraction (failure fraction,
+  attainment) is gated on a claim about runs, exact however failures
+  cluster within a run: k of n candidate runs within the budget of their
+  block's baseline, passing iff the one-sided 97.5% Clopper–Pearson lower
+  bound of k/n is at least 0.5 (6 of 6, 8 of 8, 9 of 10), with `3 / b`
+  requests a run, and only with blocks (`fraction_needs_blocks`) and a measured baseline
+  (`baseline_unmeasured`), the mean
+  change beside it (`mean_exceeds_budget`, and a warning in the text
+  verdict, when that is beyond the budget); its paired t, with the standard error floored at the
+  pooled binomial one, and the pooled requests' bounds are reported,
+  labelled, never gated. Zero rules (`candidate_zero`, `undefined_in_arm`,
+  pre-registered fallback budgets), degenerate constant metrics (never
+  passed on a run-level bound alone), a skew screen against a pinned normal
+  table, leave-one-out decision flips, at least 3 pairs per gate and
+  pre-registered `min_complete_blocks`. Also `clopper_pearson` with its
+  model, `run_pass_gate`, `blocks_for_precision` and `holm`. (#213)
+- `stormlog infer analyze` gains an `observers` block: for the system
+  sampler, metrics scraper, span receiver, profiler traces and execution
+  hook, whether each was requested, configured, active and healthy, judged
+  in every measured phase (enough samples, ok start and end scrapes without
+  long gaps and a resolved window, spans for 99% of accepted requests,
+  traces stopped and imported, no dropped hook records, and the hook's
+  heartbeat covering the phase where the import records it). The hook
+  counts as requested when the server's environment enables it. What the artifact
+  cannot show is `null` with a reason. The `infer.session` config now
+  records `sample_interval_seconds` and `trace`, and the system sampler
+  keeps a fixed grid, so slow samples no longer lower its rate. (#213)
+- `stormlog.infer.compatibility`: whether two runs measured the same
+  thing. Each run's fields (from its descriptions, probe, workload,
+  observers and declarations) keep their value, source and provenance;
+  every field is `identity`, `launch`, `observation` or `label`, with vLLM
+  0.30.0's configuration classified by JSON pointer (`config_classes_v1`)
+  and an unclassified difference blocking. `compatible(a, b)` gives
+  `incompatible`, `unverified` (a required field unknown on either side, or
+  an identity field unknown on one; redacted, inferred and declared values
+  never verify one) or `compatible`. A `null` setting is a value, and a
+  field only one run has, where both read its source, is a difference. The
+  weights are verified only by the experiment runner's
+  `infer.model_identity` record, bound to the server it launched, never by
+  a description alone. The `infer.workload` record gains `spec_digest`,
+  its digest without the seed. (#213)
+- The run manifest: `infer profile --describe-server FILE` records a
+  description taken before the run, refusing (exit 5) one that names another
+  run, and `--declare FILE` the operator's declarations, as append-only
+  `infer.manifest` records. `stormlog infer attach-manifest ARTIFACT FILE`
+  appends the description taken after the run and refuses (exit 5) one from
+  another run, host or boot, a restarted server, the before description
+  itself, or one taken before the last measured phase ended or sooner after
+  the before one than the run lasted. The report gains a `manifest` block:
+  identity changes between before and after are a `protocol_failure:
+  identity_changed`, a before description that disagrees with the probed
+  server's model, vLLM version, driver or listening port is a
+  `description_mismatch`, settings
+  only one side could read are `identity_unverified`, and GPU clock and
+  temperature changes are drift. `describe-server --run-id` ties a description
+  to a run. (#213)
+- `stormlog infer profile --server-probe {auto,basic,none}` (default
+  `auto`) asks the server about itself before the first case and after the
+  last: `/version`, `/v1/models` and, on a loopback or private host (or
+  with `--allow-remote-probe`), vLLM's dev-mode `/server_info`, kept
+  redacted as `infer.server_probe` records. Answers are capped at 4 MiB with
+  no redirects, and each deadline bounds the whole exchange.
+  `/server_info` gets one 120 s deadline and no retry; if it does not
+  answer, or the server drops the request unanswered, the profile exits 5
+  before measuring, since vLLM's environment collector may still be
+  running. (#213)
+- `stormlog infer describe-server --pid PID --output FILE`: one
+  description of a running vLLM server from the host that serves it
+  (`stormlog.infer.server_description` v1): its process tree from `/proc`,
+  its GPUs from NVML, its model files, its start-up log (`--server-log`),
+  its Python and package versions (`--python`, by default the server's own
+  interpreter, found on the server's `PATH`), and the kept environment
+  (vLLM's, NCCL's, CUDA's and PyTorch's settings, and those that change
+  performance from outside them, such as `LD_PRELOAD`, `OMP_NUM_THREADS`
+  and `TORCHINDUCTOR_`, `TRITON_` and `CUBLAS_`), with no credentials and a
+  SHA-256 of its own content. (#213)
+- `stormlog.infer.server_log`: the choices a vLLM 0.30.0 server logs at
+  start-up (attention backend, KV cache size, CUDA graph captures), from the
+  last start-up in its log, with disagreements between workers kept as
+  issues. (#213)
+- `stormlog.infer.server_model`: the model files a vLLM server was started
+  with, from its command line and its Hugging Face cache (each file's
+  algorithm, digest and size: SHA-256 for LFS blobs, git SHA-1 for the
+  rest, named by the blob the snapshot links to even when that blob links
+  on into a shared store, and none for a copied file a blob name does not
+  vouch for) or, for
+  a local directory, cached SHA-256 digests. It names its
+  evidence (`pinned_commit`, `inferred`, `post_launch_digest`, `size_only`)
+  and never claims the weights were the ones loaded. (#213)
+- `stormlog.infer.server_gpu`: the GPUs a vLLM server uses, found by NVML's
+  compute processes rather than an index, with each device's settings
+  (power limits, application clocks, persistence, ECC, MIG, compute mode)
+  and a reading of what drifts (SM clock, temperature, clock event
+  reasons). An unreadable field records NVML's code. (#213)
+- `stormlog.infer.server_process`: a vLLM server's processes from Linux
+  `/proc`, each identified by PID and start time and given a role from vLLM
+  0.30.0's process titles (`api_server`, `engine_core`, `worker`, helpers,
+  `other`), with group, session and CPU affinity. It lists what is left of
+  a group or session, and which remembered processes still run, including
+  one that left its session. (#213)
+- `stormlog.infer.server_privacy`: schema-aware redaction for server
+  descriptions. Credential fields of vLLM 0.30.0's configuration
+  (`credential_paths_v1`) and environment names with a secret word are
+  replaced by a `{"redacted": true, "path": ...}` marker, URLs keep only
+  their scheme, host and port and a short digest of their path (a token can
+  sit in a path), and `system_env` keeps only allowlisted scalars and four
+  runtime package versions. The credential fields include the free-form
+  plugin configs, the model's `hf_overrides` and
+  `override_generation_config`, and Ray's runtime environment, and
+  free-form `OTEL_` settings such as resource attributes are removed.
+  `max_num_batched_tokens`, `long_prefill_token_threshold` and vLLM's
+  `*_TOKEN_THRESHOLD` knobs survive. (#213)
 - `--slo KEY:MS` (repeatable) and `--slo-file FILE` on `stormlog infer
   profile` and `stormlog infer analyze`. `profile` records the policy in the
   artifact as `infer.slo`; `analyze` judges by the flags, or else by the
@@ -142,6 +395,36 @@ the flaky benchmark memory gates
   600 s history a `tick_seconds` over 10 s exits 2 until `history.seconds`
   is raised. Deep capture and SLO triggers come later.
   ([#219](https://github.com/Silas-Asamoah/stormlog/issues/219))
+- Evidence for #218's incident explanations. `stormlog infer profile`
+  writes `infer.phase_start`, `infer.dispatch` and `infer.first_content` as
+  they happen, so a growing artifact shows what is under way, and each
+  `infer.vllm_scrape` gains `completed_at_ns`. The vLLM execution hook's
+  hello gains the engine's capacity and profiler settings, five process
+  fields and `observes`; every stamp brackets its monotonic read between
+  two wall reads; and three record kinds are new: `pause`, `enqueued` and
+  `cache_reset`, with `pending` and `reserved` counts on each heartbeat.
+  `infer import-execution` binds requests in flight from their dispatches,
+  aligns the engine clock at the hello bracket's midpoint, names on every
+  record the last raw record it came from (`source_seq_max`), says per
+  epoch where the log is whole (`coverage`) and when its writer was heard
+  from (`liveness`), and writes preemptions, cache resets and pause changes
+  as `infer.stage` records. (#218)
+- `stormlog infer diagnose ARTIFACT` explains why an inference run got
+  slow, from the evidence its artifact holds (`docs/inference_diagnosis.md`).
+  It selects incident windows itself, judged causally against the earlier
+  windows of each case, or explains declared windows, requests or cases.
+  Each finding names a mechanism at a component, the observations behind
+  it, the competing mechanisms and what became of each, its confidence per
+  claim, an experiment that would confirm it, and every artifact line it
+  used. It assesses queue saturation, KV preemption pressure, prefix-cache
+  loss, client admission, host stalls at the API server, capture pauses and
+  the workload's own changes, and gives a memory ledger that never sums.
+  vLLM's metrics witness a finding only with `--metrics-from-engine`. The
+  command writes a validated `stormlog.report` with `report_kind:
+  inference_diagnosis` (payload `stormlog.inference_diagnosis` v1, schema
+  `docs/schemas/inference_diagnosis_v1.schema.json`) and exits 3 when any
+  finding is a `warning`; `--inspect REPORT FINDING_ID` prints a finding's
+  records again without diagnosing. Its thresholds are provisional. (#218)
 - `stormlog infer import-execution ARTIFACT DIR` reduces the vLLM execution
   hook's raw log (`docs/vllm_execution.md`) into `infer.iteration`,
   `infer.membership`, `infer.request` and `infer.clock_alignment` records:

@@ -50,6 +50,29 @@ def test_the_digest_names_the_traffic_not_the_target(tmp_path: Path) -> None:
     }
 
 
+def test_task_digests_recompute_without_equating_chat_and_completion(
+    tmp_path: Path,
+) -> None:
+    from stormlog.infer.workload import workload_digests
+
+    chat = _workload(tmp_path / "chat", request_count=1)
+    completion = _workload(
+        tmp_path / "completion", request_count=1, engine="mlx-lm", task="completion"
+    )
+    other_engine = _workload(
+        tmp_path / "omlx", request_count=1, engine="omlx", task="completion"
+    )
+    assert workload_digests(completion) == {
+        "spec_digest": completion["spec_digest"],
+        "realization_digest": completion["workload_digest"],
+    }
+    for key in ("spec_digest", "workload_digest"):
+        assert chat[key] != completion[key]
+        assert completion[key] == other_engine[key]
+    old_chat = {key: value for key, value in chat.items() if key != "task"}
+    assert workload_digests(old_chat) == workload_digests(chat)
+
+
 @pytest.mark.parametrize(
     "changes",
     [
@@ -339,3 +362,22 @@ def test_tokenizer_identity_names_the_library_and_revision(
     assert tokenizer_identity(hf)["library_version"] == "4.51.0"
     digest = hf.chat_template_digest()
     assert digest is not None and len(digest) == 16
+
+
+def test_the_spec_digest_leaves_the_seed_out(tmp_path: Path) -> None:
+    from stormlog.infer.workload import workload_digests
+
+    first = _workload(tmp_path / "a", request_count=2, seed=1)
+    second = _workload(tmp_path / "b", request_count=2, seed=2)
+    assert first["spec_digest"] == second["spec_digest"]
+    assert first["workload_digest"] != second["workload_digest"]
+    # Recomputed from the record, as for an artifact written before spec_digest.
+    old = {key: value for key, value in first.items() if key != "spec_digest"}
+    assert workload_digests(old) == {
+        "spec_digest": first["spec_digest"],
+        "realization_digest": first["workload_digest"],
+    }
+    assert workload_digests({"workload_digest": "x"}) == {
+        "spec_digest": None,
+        "realization_digest": "x",
+    }

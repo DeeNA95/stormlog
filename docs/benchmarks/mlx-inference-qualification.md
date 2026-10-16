@@ -222,3 +222,21 @@ passed all 232 source files, and the complexity gate passed. The targeted MLX
 text/audio, HTTP transport, CLI portability, profiler and export integration
 suite passed **176 tests**. The live model artifacts above identify their
 pre-merge source digests; these post-merge checks cover portable integration.
+
+## Upstream integration verification (2026-10-16)
+
+Merged `release/dev` revision `330f7fe` into `mlx-integration4`. The merged
+CLI retains upstream comparison/manifest/diagnosis commands and MLX audio/server
+commands. Bounded text transport forwards send/first-content callbacks; the
+shared scheduler honors stop files; workload spec and realization digests retain
+the text task while preserving legacy chat digests. Server probes use the shared
+HTTP transport. Comparison, manifest and diagnosis readers expand compact
+contexts while diagnosis retains physical evidence hashes and line numbers.
+
+The focused serving selection passed 158 tests, all 140 framework-independent
+MLX contracts passed, and the CLI/TUI/telemetry/query/session/docs/hook selection
+passed 330 tests with one optional skip. The compact-reader and diagnosis
+fixture regressions passed; CI-pinned repository formatting, lint, mypy across
+282 source files and the complexity gate passed. These checks cover portable
+integration; the native live measurements above keep their original source
+digests and authenticated statistics remain unqualified.

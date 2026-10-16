@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from .arrivals import CLOSED, ArrivalSpec, arrival_offsets, scheduled_endpoint
-from .open_loop import Arrival, InFlightLimiter, cancel_all, dispatch_schedule
+from .open_loop import Arrival, Dispatch, InFlightLimiter, cancel_all, dispatch_schedule
 
 
 @dataclass(frozen=True)
@@ -89,10 +89,12 @@ class RequestScheduler:
         drain_timeout: float,
         send: Callable[[str, Arrival], Awaitable[None]],
         drop: Callable[[str, Arrival, str], None],
+        until: asyncio.Event | None = None,
     ) -> None:
         self.case_id, self.phase, self.arrival = case_id, phase, arrival
         self.concurrency, self.seed, self.overflow = concurrency, seed, overflow
         self.drain_timeout, self.send, self.drop = drain_timeout, send, drop
+        self.until = until
 
     async def closed(
         self,
@@ -139,6 +141,8 @@ class RequestScheduler:
     ) -> None:
         while True:
             if end_time is not None and time.monotonic() >= end_time:
+                return
+            if self.until is not None and self.until.is_set():
                 return
             request_index = await counter.next()
             if request_index is None:
@@ -190,7 +194,10 @@ class RequestScheduler:
                 if duration_seconds is not None
                 else None
             ),
+            until=self.until,
         )
+        if dispatch.ended_at_ns is not None:
+            return await self._stopped_early(dispatch, drain_timeout)
         if duration_seconds is None:
             # Counted arrivals are all sent, held ones included, so the
             # window closes with the last send and the whole drain follows.
@@ -215,6 +222,20 @@ class RequestScheduler:
             scheduled_endpoint_offset_ns=(
                 None if endpoint is None else round(endpoint * 1e9)
             ),
+        )
+
+    async def _stopped_early(
+        self, dispatch: Dispatch, drain_timeout: float
+    ) -> PhaseWindow:
+        """Close an interrupted open-loop schedule before its normal endpoint."""
+        assert dispatch.ended_at_ns is not None
+        await drain(dispatch.tasks, timeout=drain_timeout)
+        return PhaseWindow(
+            dispatch.started_at_ns,
+            dispatch.ended_at_ns,
+            time.time_ns(),
+            scheduled_arrivals=dispatch.scheduled,
+            scheduled_endpoint_offset_ns=dispatch.ended_at_ns - dispatch.started_at_ns,
         )
 
 

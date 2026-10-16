@@ -16,15 +16,29 @@ import json
 import re
 import socket
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .host_clock import host_boot_id
 
 FORMAT = "stormlog.vllm_hook/1"
+# Every kind the hook writes. The reader keeps a record of any other kind, as
+# a later hook may write one, and only the kinds it knows have meaning.
 RECORD_KINDS = frozenset(
-    {"hello", "alias", "scheduled", "completed", "terminal", "heartbeat", "goodbye"}
+    {
+        "hello",
+        "alias",
+        "enqueued",
+        "scheduled",
+        "completed",
+        "terminal",
+        "pause",
+        "cache_reset",
+        "heartbeat",
+        "goodbye",
+    }
 )
 # A process with no heartbeat for this long is taken as gone: its epoch has
 # ended without a goodbye, and its pending iterations will never complete.
@@ -37,6 +51,12 @@ STATE_ALIVE = "alive"
 # Not judged: the reader runs elsewhere, so an epoch without goodbye may be
 # alive or gone, and its pending steps are left for a later import.
 STATE_UNKNOWN = "unknown"
+COVERAGE_BASIS = "heartbeat_counters/1"
+LIVENESS_BASIS = "heartbeat_gaps/1"
+# The hook's writer beats once a second, but under load its thread slips: on
+# the real vLLM 0.30.0 runs from #217 the longest interval was 2.3 s, with
+# nothing lost. A stretch over five beats is a gap it was not heard from in.
+HEARTBEAT_GAP_NS = 5_000_000_000
 
 
 @dataclass(frozen=True)
@@ -86,6 +106,8 @@ class EpochRead:
     pid: int
     start_ns: int
     records: list[RawRecord] = field(default_factory=list)
+    # Every heartbeat read, including those an earlier import consumed.
+    heartbeats: list[RawRecord] = field(default_factory=list)
     hello: dict[str, Any] | None = None
     goodbye: dict[str, Any] | None = None
     status: dict[str, Any] | None = None
@@ -155,7 +177,100 @@ class EpochRead:
             "startup_unranged": status.get("startup_unranged"),
             "pending_samples": status.get("pending_samples"),
             "errors": list(self.errors),
+            "coverage": self.coverage(),
+            "liveness": self.liveness(),
         }
+
+    def liveness(self) -> dict[str, Any]:
+        """When the hook's writer was heard from: its first and last
+        heartbeat, the longest interval between two, and every stretch
+        between consecutive heartbeats longer than ``HEARTBEAT_GAP_NS``, on
+        the server's monotonic and wall clocks.
+        An interval between the first and the last that no gap overlaps had
+        a writer beating throughout; it says nothing of what was lost."""
+        beats = [
+            beat
+            for beat in self.heartbeats
+            if _integer(beat.data.get("mono_ns")) is not None
+        ]
+        pairs = list(zip(beats, beats[1:]))
+        intervals = [b.data["mono_ns"] - a.data["mono_ns"] for a, b in pairs]
+        gaps = [
+            {**_span_start(before), **_span_end(after)}
+            for (before, after), interval in zip(pairs, intervals)
+            if interval > HEARTBEAT_GAP_NS
+        ]
+        return {
+            "basis": LIVENESS_BASIS,
+            "gap_ns": HEARTBEAT_GAP_NS,
+            "heartbeats": len(beats),
+            "max_interval_ns": max(intervals) if intervals else None,
+            "first": _heard(beats[0]) if beats else None,
+            "last": _heard(beats[-1]) if beats else None,
+            "gaps": gaps,
+        }
+
+    def coverage(self) -> dict[str, Any]:
+        """Where the log is known to be whole: spans between two heartbeats
+        whose drop counts and errors are unchanged, the writer not capped,
+        with every record read that was accepted by the later one's stamp.
+        A heartbeat says how many accepted records it was written ahead of
+        (``pending``); they take the next sequences, so the span reaches
+        past them, and the first heartbeat after them must show nothing lost
+        while they were written. Some may still be reserved (``reserved``),
+        not yet queued, and another thread's later record can overtake them:
+        such a heartbeat closes its span only where the first later one with
+        nothing reserved does. A heartbeat that does not say (a hook from
+        before the count) closes no span: its pending records may have been
+        overtaken, or lost after it, unseen. ``held`` counts the heartbeats
+        whose reservations closed no span, by reason. Only in a span does a
+        kind the hello ``observes``
+        prove absent by having no record, matched by the record's last
+        stamp, taken just before it is emitted."""
+        observes = (self.hello or {}).get("observes")
+        spans: list[dict[str, int]] = []
+        held: Counter[str] = Counter()
+        beats = self.heartbeats
+        joined: int | None = None
+        for index, (before, after) in enumerate(zip(beats, beats[1:])):
+            close, why = _close(after, beats[index + 2 :])
+            if why is not None:
+                held[why] += 1
+            if close is None or not self._whole_between(
+                before, after, close, beats[index + 1 :]
+            ):
+                continue
+            if spans and joined == before.seq:
+                spans[-1].update(_span_end(after), end_seq=close)
+            else:
+                spans.append(
+                    {**_span_start(before), **_span_end(after), "end_seq": close}
+                )
+            joined = after.seq
+        return {
+            "basis": COVERAGE_BASIS,
+            "observes": sorted(observes) if isinstance(observes, list) else None,
+            "heartbeats": len(self.heartbeats),
+            "spans": spans,
+            "held": dict(sorted(held.items())),
+        }
+
+    def _whole_between(
+        self,
+        before: RawRecord,
+        after: RawRecord,
+        close: int,
+        later: Sequence[RawRecord],
+    ) -> bool:
+        if self.contiguous_seq is None or close > self.contiguous_seq:
+            return False
+        lost = _losses(before.data)
+        if lost is None or lost != _losses(after.data):
+            return False
+        # A record lost while the pending ones were written counts in the
+        # first heartbeat written after them, which may be the one at close.
+        witness = next((beat for beat in later if beat.seq >= close), None)
+        return witness is not None and _losses(witness.data) == lost
 
 
 @dataclass
@@ -382,6 +497,9 @@ def _settle(
     epoch.records = [
         record for seq, record in sorted(seen.items()) if mark is None or seq > mark
     ]
+    epoch.heartbeats = [
+        record for _seq, record in sorted(seen.items()) if record.kind == "heartbeat"
+    ]
     for record in seen.values():
         if record.kind == "hello":
             epoch.hello = record.data
@@ -428,6 +546,93 @@ def _stamp(record: RawRecord, clock: str) -> int | None:
     return None
 
 
+def _losses(heartbeat: dict[str, Any]) -> tuple[Any, ...] | None:
+    """What a heartbeat says was lost so far; None when it cannot say, or the
+    writer is capped and stops writing records."""
+    dropped, errors = heartbeat.get("dropped"), _integer(heartbeat.get("errors"))
+    if not isinstance(dropped, dict) or errors is None or heartbeat.get("capped"):
+        return None
+    counts = {str(kind): count for kind, count in dropped.items() if count}
+    return tuple(sorted(counts.items())), errors
+
+
+def _close(
+    heartbeat: RawRecord, later: Sequence[RawRecord]
+) -> tuple[int | None, str | None]:
+    """The sequence by which the records a heartbeat was written ahead of
+    are all written, or None and why while that is not known. Queued ones
+    take the next sequences but the writer thread's own heartbeats, which it
+    may write before them. A reserved one (``reserved``) is not queued yet,
+    and a record another thread reserves later may be queued first, so it
+    is bounded only by the first later heartbeat with nothing reserved: by
+    then it was queued or dropped. A heartbeat that does not say how many
+    are reserved bounds nothing, whatever the read holds: a record it
+    counted, or did not, may have been overtaken and then lost at write."""
+    reserved = _reserved(heartbeat.data)
+    if reserved is None:
+        return None, "reserved_unknown"
+    if reserved:
+        settled = next((beat for beat in later if _reserved(beat.data) == 0), None)
+        if settled is None:
+            return None, "reserved_open"
+        rest = [beat for beat in later if beat.seq > settled.seq]
+        return _close(settled, rest)
+    return _through(heartbeat, later), None
+
+
+def _through(heartbeat: RawRecord, later: Sequence[RawRecord]) -> int:
+    """The sequence of the last record a heartbeat was written ahead of,
+    with the queue in order: they take the next sequences but the writer's
+    own later heartbeats."""
+    close = heartbeat.seq + _pending(heartbeat.data)
+    for beat in later:
+        if beat.seq > close:
+            break
+        close += 1
+    return close
+
+
+def _reserved(heartbeat: dict[str, Any]) -> int | None:
+    """Records reserved before a heartbeat's stamp and not yet queued, or
+    None from a hook that does not say: unknown, never none."""
+    return _integer(heartbeat.get("reserved"))
+
+
+def _pending(heartbeat: dict[str, Any]) -> int:
+    """Records accepted before a heartbeat's stamp and written after it. A
+    hook from before the count gives only its queue, which leaves out the
+    batch being written: no more than a lower bound."""
+    for key in ("pending", "queued"):
+        value = _integer(heartbeat.get(key))
+        if value is not None:
+            return value
+    return 0
+
+
+def _heard(record: RawRecord) -> dict[str, int]:
+    return {
+        "seq": record.seq,
+        "mono_ns": _integer(record.data.get("mono_ns")) or 0,
+        "wall_ns": _integer(record.data.get("wall_ns")) or 0,
+    }
+
+
+def _span_start(record: RawRecord) -> dict[str, int]:
+    return {
+        "start_seq": record.seq,
+        "start_mono_ns": _integer(record.data.get("mono_ns")) or 0,
+        "start_wall_ns": _integer(record.data.get("wall_ns")) or 0,
+    }
+
+
+def _span_end(record: RawRecord) -> dict[str, int]:
+    return {
+        "end_seq": record.seq,
+        "end_mono_ns": _integer(record.data.get("mono_ns")) or 0,
+        "end_wall_ns": _integer(record.data.get("wall_ns")) or 0,
+    }
+
+
 def _integer(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
@@ -460,6 +665,9 @@ def _state(
 
 
 __all__ = [
+    "COVERAGE_BASIS",
+    "HEARTBEAT_GAP_NS",
+    "LIVENESS_BASIS",
     "FORMAT",
     "RECORD_KINDS",
     "SILENCE_NS",

@@ -33,6 +33,10 @@ consumers can use `expand_inference_records(records)`. Expansion is idempotent.
 with busy intervals. Wire v4 changes storage only: interval union, attribution,
 request totals, deduplication, and clock alignment retain their meanings.
 
+Comparison summaries and manifest attachment expand contexts before reading
+run identity or clocks. Diagnosis keeps a decoder for each file while retaining
+the original physical line numbers, record IDs and hashes used to cite evidence.
+
 | Representation | Current readers | Older readers |
 | --- | --- | --- |
 | Legacy v1 and embedded v2/v3 | Supported unchanged | Supported as before |
@@ -101,7 +105,11 @@ durations merely because they are numbers in nanoseconds.
 Clock domains must identify comparable timestamps, for example a monotonic
 clock on one host and boot. Cross-host ordering requires a clock alignment
 event: add its `offset_ns` to a timestamp in `from_clock_domain` to express it
-in `to_clock_domain`, carrying `uncertainty_ns` with the result. An alignment
+in `to_clock_domain`, carrying `uncertainty_ns` with the result. The one
+exception is an alignment an earlier `infer import-execution` wrote without
+`metadata.alignment_basis`: its offset is the lower end of the measured
+interval, which is `metadata.gap_ns` wide, and `align_timestamp` places a
+timestamp at that interval's middle. An alignment
 may have a validity range. Without a valid alignment, cross-domain subtraction
 is undefined.
 
