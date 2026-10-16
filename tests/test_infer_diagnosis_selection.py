@@ -1,0 +1,311 @@
+"""Choosing what a diagnosis explains: windows, references and incidents."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from stormlog.infer.diagnosis import DiagnoseOptions, diagnose_artifact
+from stormlog.infer.diagnosis_context import Context
+from stormlog.infer.diagnosis_inputs import Line, read_input
+from stormlog.infer.diagnosis_join import ClientRequest, RunView, join
+from stormlog.infer.diagnosis_selection import (
+    E2E,
+    FAILED,
+    INSUFFICIENT_REFERENCE,
+    LEGACY_NO_DISPATCH,
+    TTFT,
+    SelectionOptions,
+    _Censoring,
+    fisher_one_sided,
+    nearest_rank,
+    reference_threshold,
+    select,
+)
+from tests.diagnosis_scenarios import MS, Engine, build_run, poisson_free
+from tests.vllm_execution_helpers import SECOND, WALL_OFFSET
+
+
+def _burst_artifact(tmp_path: Path, *, burst: int = 600) -> Path:
+    """Two minutes at 2 requests/s, then 3 s at 200 requests/s."""
+    calm = poisson_free(240, 10 * SECOND, 500 * MS, prefix="a")
+    heavy = poisson_free(burst, 130 * SECOND, 5 * MS, prefix="b")
+    return build_run(tmp_path, calm + heavy, Engine(max_num_seqs=4))
+
+
+def _burst_run(tmp_path: Path, *, burst: int = 600) -> RunView:
+    return join(read_input(_burst_artifact(tmp_path, burst=burst)))
+
+
+@pytest.fixture(scope="module")
+def burst_artifact(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    return _burst_artifact(tmp_path_factory.mktemp("burst"))
+
+
+@pytest.fixture(scope="module")
+def burst_view(burst_artifact: Path) -> RunView:
+    return join(read_input(burst_artifact))
+
+
+def test_fisher_s_exact_test_matches_known_tables() -> None:
+    # Fable's cases: 7 of 20 against 5 of 50 is not enough at 0.01; 8 is.
+    assert fisher_one_sided(7, 13, 5, 45) == pytest.approx(0.0184967, rel=1e-4)
+    assert fisher_one_sided(8, 12, 5, 45) == pytest.approx(0.0065187, rel=1e-4)
+    assert fisher_one_sided(3, 17, 0, 114) == pytest.approx(0.0029075, rel=1e-4)
+    assert fisher_one_sided(0, 20, 5, 45) == 1.0
+
+
+def test_the_p90_is_a_nearest_rank_order_statistic() -> None:
+    assert nearest_rank(list(range(1, 11)), 0.9) == 9
+    assert nearest_rank(list(range(1, 115)), 0.9) == 103
+    assert nearest_rank([], 0.9) == 0
+
+
+def test_a_sustained_burst_is_one_incident_detected_on_its_second_window(
+    burst_view: RunView,
+) -> None:
+    selection = select(burst_view)
+
+    calm = [
+        w
+        for w in selection.windows
+        if w.start_ns < 130 * SECOND + 1_790_000_000_000_000_000
+    ]
+    assert all(len(w.requests) == 20 for w in calm)
+    assert {w.status for w in calm[:5]} == {INSUFFICIENT_REFERENCE}  # under 114
+    assert not any(w.flagged for w in calm)
+    (incident,) = selection.subjects
+    assert incident.kind == "window" and incident.declared_by is None
+    assert len(incident.requests) == 600 and len(incident.reference) == 240
+    # 3 s at 200 requests/s: windows of 20, each ending at the next arrival.
+    assert len(incident.windows) == 30 and all(w.flagged for w in incident.windows)
+    assert incident.first_detectable_ns == incident.windows[1].evaluated_at_ns
+    test = incident.windows[0].tests[TTFT]
+    assert test.p_value < 0.01 and test.window_above >= 3
+    # Alpha is per window under independence, not the false-incident rate.
+    assert selection.as_dict()["error_rate"] == {
+        "test": "fisher_exact_one_sided",
+        "alpha_per_window": 0.01,
+        "assumes": "independent_requests",
+        "calibrated_false_incident_rate": None,
+    }
+
+
+def test_an_incident_is_placed_where_it_was_first_seen(tmp_path: Path) -> None:
+    """Calm requests 500 ms apart, then a burst 10 s after the last: the
+    burst's first window was joined forward from the calm, so it begins 10 s
+    before the burst. The finding's window starts at the onset instead, the
+    first moment a flagged request had run past the reference's p90, with
+    that window's span as its resolution."""
+    calm = poisson_free(140, 10 * SECOND, 500 * MS, prefix="a")
+    burst = poisson_free(300, 90 * SECOND, 5 * MS, prefix="b")
+    view = join(read_input(build_run(tmp_path, calm + burst, Engine(max_num_seqs=4))))
+    selection = select(view)
+    (incident,) = selection.subjects
+    onset = 90 * SECOND + WALL_OFFSET
+
+    assert incident.start_ns == onset - 10 * SECOND
+    assert incident.onset_ns is not None
+    assert onset <= incident.onset_ns < onset + 100 * MS
+    window = Context(view, selection).window(incident)
+    assert window is not None and window["start_ns"] == incident.onset_ns
+    first = incident.windows[0]
+    assert window["resolution_ns"] == first.end_ns - first.start_ns
+    # #221's match: start >= effect onset - (resolution + uncertainty).
+    assert window["start_ns"] >= onset - window["resolution_ns"]
+
+
+def test_one_bad_window_alone_is_not_an_incident(tmp_path: Path) -> None:
+    # 30 requests: a window of 20, then 10, too few to be tested.
+    view = _burst_run(tmp_path, burst=30)
+
+    selection = select(view)
+
+    assert sum(w.flagged for w in selection.windows) == 1
+    assert selection.subjects == []
+
+
+def test_a_burst_inside_one_base_window_is_still_an_incident(tmp_path: Path) -> None:
+    """300 requests 1 ms apart, as a batch job submits them: they arrive in
+    one base window, but every 20 make a window ending at the next arrival,
+    so the sustain rule sees the burst."""
+    calm = poisson_free(240, 10 * SECOND, 500 * MS, prefix="a")
+    burst = poisson_free(300, 130 * SECOND, MS, prefix="b")
+    view = join(read_input(build_run(tmp_path, calm + burst, Engine(max_num_seqs=4))))
+
+    (incident,) = select(view).subjects
+
+    assert len(incident.requests) == 300 and len(incident.windows) == 15
+    assert incident.first_detectable_ns == incident.windows[1].evaluated_at_ns
+
+
+def test_declared_requests_are_compared_with_earlier_ones_of_their_case(
+    burst_view: RunView,
+) -> None:
+    declared = tuple(f"b{i}" for i in range(100, 130))
+
+    (subject,) = select(burst_view, SelectionOptions(request_ids=declared)).subjects
+
+    assert subject.kind == "requests" and subject.requests == list(declared)
+    # The calm requests, not the burst's first hundred, which were flagged.
+    assert len(subject.reference) == 240
+    assert all(rid.startswith("a") for rid in subject.reference)
+
+
+def test_a_repeated_declared_request_counts_once(burst_view: RunView) -> None:
+    declared = ("b101",) * 20 + ("b100", "b101")
+
+    (subject,) = select(burst_view, SelectionOptions(request_ids=declared)).subjects
+
+    assert subject.requests == ["b101", "b100"]
+    assert subject.key == "requests:b101,b100"
+
+
+def test_one_request_declared_twenty_times_is_too_few_to_measure(
+    burst_artifact: Path,
+) -> None:
+    # Twenty copies of one request would pass MIN_PER_ARM as twenty samples.
+    report = diagnose_artifact(
+        burst_artifact, options=DiagnoseOptions(request_ids=("b500",) * 20)
+    )
+
+    (subject,) = report["payload"]["selection"]["subjects"]
+    assert subject["requests"] == 1 and report["findings"] == []
+    for kind in ("host_stall", "queue_saturation"):
+        assert "insufficient_samples" in report["payload"]["coverage"][kind]["reasons"]
+    for kind in ("longer_inputs", "longer_outputs"):
+        assert report["payload"]["coverage"][kind]["status"] != "assessed"
+
+
+def test_a_declared_case_keeps_selection_to_its_incidents(tmp_path: Path) -> None:
+    calm = poisson_free(240, 10 * SECOND, 500 * MS, prefix="a")
+    burst = poisson_free(600, 130 * SECOND, 5 * MS, prefix="b")
+    other = poisson_free(240, 10 * SECOND, 500 * MS, prefix="o", case_id="c2")
+    requests = calm + burst + other
+    view = join(read_input(build_run(tmp_path, requests, Engine(max_num_seqs=64))))
+
+    assert [s.case_id for s in select(view).subjects] == ["c1"]
+    only = select(view, SelectionOptions(case_ids=("c2",)))
+    assert only.subjects == [] and {w.case_id for w in only.windows} == {"c2"}
+
+
+def test_without_dispatch_records_no_detection_time_is_given(tmp_path: Path) -> None:
+    path = build_run(
+        tmp_path,
+        poisson_free(240, 10 * SECOND, 500 * MS, prefix="a")
+        + poisson_free(600, 130 * SECOND, 5 * MS, prefix="b"),
+        Engine(max_num_seqs=4),
+    )
+    lines = path.read_text().splitlines()
+    kept = [
+        line
+        for line in lines
+        if '"infer.dispatch"' not in line and '"infer.first_content"' not in line
+    ]
+    path.write_text("\n".join(kept) + "\n")
+
+    (incident,) = select(join(read_input(path))).subjects
+
+    assert incident.first_detectable_ns is None
+    assert incident.detection_unavailable == LEGACY_NO_DISPATCH
+
+
+def test_a_declared_window_is_compared_with_earlier_unflagged_requests(
+    burst_view: RunView,
+) -> None:
+    start = 130 * SECOND + 1_790_000_000_000_000_000
+
+    selection = select(burst_view, SelectionOptions(windows=((start, start + SECOND),)))
+
+    (subject,) = selection.subjects
+    assert subject.declared_by == "caller" and subject.incident
+    assert len(subject.requests) == 200 and len(subject.reference) == 240
+
+
+def test_a_window_declared_twice_is_one_subject(burst_view: RunView) -> None:
+    start = 130 * SECOND + 1_790_000_000_000_000_000
+    window, other = (start, start + SECOND), (start, start + 2 * SECOND)
+
+    declared = SelectionOptions(windows=(window, other, window))
+
+    keys = [s.key for s in select(burst_view, declared).subjects]
+    assert len(keys) == 2 and len(set(keys)) == 2
+
+
+# ------------------------------------------------------------ censoring
+
+
+def _line(number: int, **raw: Any) -> Line:
+    return Line(number, "0" * 64, {"schema_version": 1, **raw}, None, None)
+
+
+def _request(*, first_content: bool, ended: bool = True) -> ClientRequest:
+    """Astra's case: sent at 0 s, first content at 0.05 s, done at 10 s."""
+    common = {"request_id": "r", "case_id": "c", "phase": "measured"}
+    request = ClientRequest(
+        "r", dispatch=_line(0, event_type="infer.dispatch", started_at_ns=0, **common)
+    )
+    if first_content:
+        request.first_content = _line(
+            1, event_type="infer.first_content", first_content_at_ns=50 * MS, **common
+        )
+    if ended:
+        request.terminal = _line(
+            2,
+            event_type="infer.request",
+            started_at_ns=0,
+            ended_at_ns=10 * SECOND,
+            status="ok",
+            ttft_ms=50.0,
+            **common,
+        )
+    return request
+
+
+def _censoring(*requests: ClientRequest) -> _Censoring:
+    view = RunView(source=None)  # type: ignore[arg-type]
+    view.client = {f"r{i}": r for i, r in enumerate(requests)}
+    return _Censoring(view)
+
+
+def test_ttft_is_known_from_its_first_content_record_before_the_end() -> None:
+    request = _request(first_content=True)
+
+    assert _censoring(request).value(request, TTFT, 2 * SECOND) == (50 * MS, True)
+    # The end-to-end is still running at 2 s: censored at its elapsed time.
+    assert _censoring(request).value(request, E2E, 2 * SECOND) == (2 * SECOND, False)
+
+
+def test_without_first_content_records_ttft_waits_for_the_end() -> None:
+    request = _request(first_content=False)
+
+    assert _censoring(request).value(request, TTFT, 2 * SECOND) is None
+    assert _censoring(request).value(request, TTFT, 11 * SECOND) == (50 * MS, True)
+
+
+def test_a_failed_request_is_beyond_every_threshold() -> None:
+    request = _request(first_content=True)
+    assert request.terminal is not None and request.terminal.raw is not None
+    request.terminal.raw["status"] = "timeout"
+
+    assert _censoring(request).value(request, E2E, 11 * SECOND) == (FAILED, True)
+    assert json.dumps(FAILED)  # an integer: reports can carry it
+
+
+def test_a_failing_reference_still_has_a_latency_threshold() -> None:
+    """100 requests succeeded and 14 failed: the p90 is the successes', so
+    a window of 20 failures is still above it, and flagged."""
+    known = [100 * MS + index * MS for index in range(100)] + [FAILED] * 14
+
+    threshold = reference_threshold(known)
+    reference_above = sum(1 for value in known if value > threshold)
+
+    # Over the failures too, the p90 would be the failure itself.
+    assert nearest_rank(known, 0.9) == FAILED
+
+    assert threshold == 189 * MS
+    assert reference_above == 10 + 14
+    assert fisher_one_sided(20, 0, reference_above, 114 - reference_above) < 0.01

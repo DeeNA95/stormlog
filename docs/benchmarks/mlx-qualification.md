@@ -187,3 +187,14 @@ scoped server evidence; it is not implemented by this qualification. Owned
 Metal trace capture, array-buffer inspection, Linux MLX CPU/CUDA and distributed
 qualification remain optional follow-ups. Endpoint client profiling does not
 read an external server's process allocator.
+
+## Base-branch merge verification (2026-10-16)
+
+Merged `release/dev` at `330f7fe` into `mlx-integration2`. The execution-import
+test keeps the upstream newer-hook evidence cases and exercises repeat imports
+with both embedded and compact context seeds. The affected execution, codec,
+MLX, CLI/TUI, telemetry, query, session and documentation selection passed
+417 tests; the separate framework-independent MLX suite passed 140 tests.
+Repository-wide CI-pinned formatting, lint and mypy (264 source files), plus
+the complexity gate, passed. These are portable regression checks; native
+measurements above retain their recorded source revisions.

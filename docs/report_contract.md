@@ -19,7 +19,7 @@ uploaded with `if: always()`). This page is the contract for both.
 | 0 | `OK` | The command completed, no findings reached failure severity, and every configured gate passed. | `pass` |
 | 1 | `ERROR` | An unexpected failure. Any output written may be incomplete. This is Python's own value for an uncaught exception. | `error` |
 | 2 | `USAGE` | The command line is invalid, or this installation cannot serve the request (a missing framework runtime or optional extra, an output path that is not a directory). `argparse` owns this value. | `usage` |
-| 3 | `FINDINGS` | The command completed and the measurement is sound, but it detected memory risk, OOM events, or leak findings. | `findings` |
+| 3 | `FINDINGS` | The command completed and the measurement is sound, but it detected findings at failure severity: memory risk, OOM events or leaks, or a `warning` diagnosis of an inference incident. | `findings` |
 | 4 | `GATE_FAILED` | The command completed, but a configured budget, tolerance, or threshold was exceeded. | `gate_failed` |
 | 5 | `INVALID_INPUT` | An input artifact or asset is missing, unreadable, or has an unsupported schema or version. | `invalid_input` |
 | 130 | `INTERRUPTED` | The command was stopped by SIGINT before it completed (the shell convention of 128 + 2). | `interrupted` |
@@ -68,10 +68,14 @@ heuristic detection by the tool. CI policy usually differs between the two.
 | `tfmemprof`/`jaxmemprof monitor`/`track` | done, or Ctrl+C inside the capture loop | TensorFlow/JAX not installed; missing extra | - | - | - | unexpected error | Ctrl+C outside the capture loop |
 | `stormlog query ...` | done | argparse error; `--csv` on a query that cannot emit CSV | - | - | - | unexpected error | Ctrl+C |
 | `examples.cli.benchmark_harness` | gates passed, or no `--check` | argparse error; regression defaults outside the `pr` profile | - | a budget or regression gate failed under `--check` | budget, baseline, or tolerance asset missing, unparsable, not an object, wrong version, non-numeric, or missing a metric; baseline config mismatch (file problems are checked before any scenario runs; a missing metric after) | unexpected error; `--artifact-root` or `--output` not writable | Ctrl+C |
-| `stormlog infer profile` | done, with at least one measured request succeeding | argparse error; a setting it cannot use, checked before anything is sent; a requested tokenizer that is not installed, or `--strict-token-counts` with no tokenizer backend installed; an `--arrival-trace` case the trace does not have, or no `--arrival-trace-case` when it has several; a malformed `--slo`, or `--slo` with `--slo-file` | no measured request succeeded | - | `--arrival-trace` or `--slo-file` missing, unparsable, or invalid (offsets, policy, or a policy with a sliding interval) | unexpected error | Ctrl+C (the artifact ends with an `interrupted` session record) |
+| `stormlog infer profile` | done, with at least one measured request succeeding | argparse error; a setting it cannot use, checked before anything is sent; a requested tokenizer that is not installed, or `--strict-token-counts` with no tokenizer backend installed; an `--arrival-trace` case the trace does not have, or no `--arrival-trace-case` when it has several; a malformed `--slo`, or `--slo` with `--slo-file`; Prometheus export settings it cannot use, metrics over `--prometheus-max-series` or `--prometheus-max-bytes`, or a `--prometheus-slot` another live run holds in that directory; span export or trace-context settings it cannot use (an OTLP URL that is not http(s) or holds credentials, both `--otlp-endpoint` and `--otlp-file`, a malformed header, an unknown `--export-content` item, a forbidden `--otlp-resource-attribute-allow`) | no measured request succeeded | - | `--arrival-trace` or `--slo-file` missing, unparsable, or invalid (offsets, policy, or a policy with a sliding interval); `--describe-server` or `--declare` missing or invalid, or a `--describe-server` description that names another run; the server's `/server_info` gave no answer within 120 s, or took the request and dropped it unanswered, checked before measuring | unexpected error | Ctrl+C (the artifact ends with an `interrupted` session record) |
 | `stormlog infer analyze` | done, including an artifact in which every request failed | argparse error; a malformed `--slo`, or `--slo` with `--slo-file` | - | - | artifact, `--server-telemetry`, `--vllm-spans` or `--slo-file` file missing, unparsable, or invalid, including an artifact with no `infer.session` or `infer.request` records, or, without `--slo` or `--slo-file`, with an invalid `infer.slo` record or one with a sliding interval | unexpected error; `--output` not writable | Ctrl+C |
-| `stormlog infer collect-server` | duration elapsed, Ctrl+C or SIGTERM, or the server process ended | argparse error; options it cannot use; a `--pid` with no running process; a `--device-index` or `--device-uuid` the host does not have; no NVML library without `--no-gpu` | the GPU identity changed mid-run | - | - | unexpected error | - |
+| `stormlog infer compare` | done: no gate, or every gate passed | argparse error; a `--gate` or `--fallback` it cannot read, a budget that can never fail, or a `--fallback` no gated metric matches; a `--case` no run has; a rate gate with `--segment-membership overlap`; a share (`--min-attainment`, `--min-run-pass`, `--evidence-floor`) outside its range; `--family any_regression` with a rule other than `significant`; a malformed `--slo` | - | a gate failed, or could not be evaluated (including a gate that matches no metric of a case) without `--allow-not-evaluable` | an artifact missing or unreadable; one run (by path, SHA-256 or profile session) given twice, in one arm or once in each; a case no run offered a request; an SLO gate over runs judged by different policies; an invalid `--slo-file`; a block with two usable runs of one arm; incompatible arms; an arm with no usable run; an overhead baseline that ran observers; an added observer not declared | unexpected error; `--report` not writable | Ctrl+C |
+| `stormlog infer collect-server` | duration elapsed, Ctrl+C or SIGTERM, or the server process ended | argparse error; options it cannot use; a `--pid` with no running process; a `--device-index` or `--device-uuid` the host does not have; no NVML library without `--no-gpu`; Prometheus settings it cannot use, a budget overrun or a held `--prometheus-slot` (all before anything is collected) | the GPU identity changed mid-run | - | - | unexpected error | - |
+| `stormlog infer describe-server` | description written | argparse error; a `--pid` this host cannot read in `/proc`; no NVML library without `--no-gpu` | - | - | `--server-log` missing or unreadable | unexpected error; `--output` not writable | Ctrl+C |
+| `stormlog infer attach-manifest` | description attached | argparse error | - | - | artifact or description missing, unparsable, or invalid; a profile that has not finished (no terminal `infer.session` record); the description cannot be compared with the run's before description (another run, host or boot, a restarted server, the before description itself or one already attached, taken before the last measured phase ended (by one boot's clock) or sooner after the before than the run lasted, or no before description) | unexpected error | Ctrl+C |
 | `stormlog infer import-trace` | traces imported, including GPU activity left unresolved or unmeasured (the summary says how much) | argparse error; a `--device-uuid` that is not `INDEX=UUID` or names one device twice | - | - | artifact without an `infer.artifact` record, or from another run or session; a trace file missing, unparsable, or not a Kineto trace | unexpected error; artifact or envelope not writable | Ctrl+C |
+| `stormlog infer diagnose` | no `warning` finding, including an `inconclusive` outcome; `--inspect` printed the records | no artifact and no `--inspect`; a malformed `--window`; an unknown threshold key, or a value that is not a finite number or lies outside its key's range; a `--thresholds` file that is not an object of numbers | a `warning` finding | - | artifact, `--server-telemetry`, `--thresholds` or report missing or unreadable; an artifact with no `infer.session`, `infer.request` or `infer.artifact` record; a `--server-telemetry` file with another run's samples; with `--inspect`, an unknown finding, a source not found, or support that cannot be resolved in a changed source | unexpected error; `--output` not writable | Ctrl+C |
 | `stormlog infer import-execution` | the log's final steps imported, including none new since the last import (the summary says what still waits) | argparse error | - | - | artifact without an `infer.artifact` record, or from another run or session; the directory missing, unreadable, or holding no hook epoch; an epoch already imported with the other of pseudonyms and `--raw-foreign-ids` | unexpected error; artifact or envelope not writable | Ctrl+C |
 | `stormlog infer watch` | duration elapsed, or Ctrl+C or SIGTERM, with no incident from a counting trigger | argparse error; a config setting it cannot use; no `--base-url`; an `--api-key-env` that is not set; a bad `--test-trigger` or `--duration`; a root or its `incidents/` another process holds | an incident from a counting trigger was detected | - | a `--config` file missing, unparsable, or not a version-1 watch config | no scrape succeeded; a trigger needed an engine named, on a server running several; the ledger lost records; every incident write failed; the store or ledger did not finish within the shutdown deadline; `report.json` not writable; unexpected error | - |
 
@@ -132,7 +136,7 @@ strict (`additionalProperties: false` at the top level).
 | --- | --- | --- |
 | `schema_version` | yes | `1` |
 | `format` | yes | `stormlog.report` |
-| `report_kind` | yes | Payload family, documented per command. Today: `diagnose` and `inference_watch`. |
+| `report_kind` | yes | Payload family, documented per command. Today: `diagnose`, `inference_watch`, `inference_diagnosis` ([its payload](inference_diagnosis.md#diagnose-an-artifact)) and `inference_comparison`. |
 | `generated_at_utc` | yes | ISO 8601 timestamp in UTC. |
 | `tool` | yes | `name` (console script), `command` (subcommand), optional `version` and `argv`. |
 | `verdict` | yes | `status`, `exit_code`, and a one-line `summary`. `status` and `exit_code` must pair as in the table above; the schema enforces it. |
@@ -145,8 +149,28 @@ strict (`additionalProperties: false` at the top level).
 
 Evidence pointers reuse the vocabulary of `stormlog query correlate` rows:
 `kind`, optional `path` (relative to the directory that holds the report),
-optional `pointer` (a JSON pointer inside that file), `session_id`,
-`record_id`, `start_ns`, `end_ns`, and a `description`.
+optional `pointer`, `session_id`, `record_id`, `start_ns`, `end_ns`, and a
+`description`. What `pointer` addresses depends on its target:
+
+- **A JSON file named by `path`:** `pointer` is a JSON pointer (RFC 6901)
+  into that document.
+- **A JSONL file named by `path`** (one record per line): `pointer` is
+  `/<line>` or `/<line>/<field>/…`, where `<line>` is the zero-based
+  physical line number, counting every raw line including blank ones, and
+  the remainder is a JSON pointer into that line's record. Such evidence
+  must carry `record_id`. Each report kind that uses JSONL pointers
+  documents how it derives `record_id` for every record type it cites, and
+  a reader confirms the line holds that record before using it. Line
+  numbers stay valid only while the file is append-only, so a producer that
+  writes JSONL pointers records each input's SHA-256, size and physical line
+  count in its payload. When a hash differs, a reader re-resolves the
+  evidence by `record_id`, or reports it unresolved.
+- **The report itself:** a `pointer` with no `path` is a JSON pointer into
+  the report that contains the evidence. A producer that writes its report
+  to a file may set `path` to that file's name instead.
+
+`inference_diagnosis` derives its record IDs as listed in
+[Citing records](inference_diagnosis.md#citing-records).
 
 `tool.argv` is optional and must not carry secrets: a producer that records
 it redacts credentials (for example a tracking URI with a token) or omits

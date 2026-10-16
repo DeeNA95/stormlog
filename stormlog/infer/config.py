@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .arrivals import BURST, CLOSED, RATE_MODES, REPLAY, ArrivalSpec, ArrivalTrace
 from .cache_state import RESET_RETRY_SECONDS, UNSPECIFIED
+from .export_config import ExportConfig
 from .prompts import REPEAT, PromptSpec
 
 if TYPE_CHECKING:
@@ -118,6 +119,9 @@ class ProfileConfig:
     # After the measured window, how long in-flight requests may finish.
     # None means the request timeout.
     drain_timeout_seconds: float | None = None
+    # When this file appears, the measured window ends as if its duration
+    # had run out: no more arrivals, then the drain, and the run completes.
+    stop_file: str | None = None
     prompt_mode: str = REPEAT
     shared_prefix_ratio: float | None = None
     prefix_groups: int | None = None
@@ -147,6 +151,20 @@ class ProfileConfig:
     # came from a file or from --slo flags. None records none.
     slo: SloSpec | None = None
     slo_source: str | None = None
+    # What to export, and where; nothing by default (docs/inference_export.md).
+    export: ExportConfig = field(default_factory=ExportConfig)
+    # What to ask the server about itself before and after the run: auto,
+    # basic or none (see server_probe). /server_info is asked of a public
+    # host only when allow_remote_probe is set.
+    server_probe: str = "auto"
+    allow_remote_probe: bool = False
+    # A server description (describe-server) taken before the run, and the
+    # operator's declarations; each is recorded as an infer.manifest record.
+    server_description: dict[str, Any] | None = None
+    declarations: dict[str, Any] | None = None
+    # Which experiment, arm and block this run is: infer compare pairs runs
+    # of one block. None leaves the run unlabelled.
+    labels: dict[str, Any] | None = None
 
     def prompt_spec(self) -> PromptSpec:
         return PromptSpec(

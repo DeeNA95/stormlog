@@ -38,7 +38,10 @@ Every request goes out with an `X-Request-Id: stormlog-<run_id>-<request_id>`
 header, recorded on its event as `x_request_id`. OpenAI-compatible servers
 ignore headers they do not know; vLLM embeds it in its own request id and in
 the span it emits per request, which is how
-[vLLM native telemetry](vllm_telemetry.md) joins spans to requests.
+[vLLM native telemetry](vllm_telemetry.md) joins spans to requests. With
+`--trace-context preserve-engine`, a `traceparent` header goes out too, and
+the request's `trace_id` and `span_id` are recorded; see
+[Trace context](inference_export.md#trace-context).
 
 The profiler sends controlled traffic for each workload case in the matrix:
 
@@ -149,10 +152,29 @@ when requests were actually sent.
 | --- | --- |
 | Limited by `--duration` | The duration |
 | Counted with `--requests` | One whole slot after the last scheduled arrival: the next offset the schedule would have produced |
+| Ended early by `--stop-file` | When the file was seen; its scheduled arrivals are those due by then |
 
 With a count, two requests at 10/s span 0.2 s, not the 0.1 s between their
 arrivals, and a Poisson count gives the usual N/T_N rate. A replay without
 `--duration`, and a closed loop, have no scheduled endpoint (`null`).
+
+`--stop-file PATH` ends the measured window early, cleanly, when `PATH`
+appears: no later arrival is sent (one that `--overflow wait` is holding for
+a slot then is dropped, with any others already due), the drain runs from
+that moment as it would at the end of `--duration`, and the run completes
+with its post-run imports. The phase's record says `stopped_early: true`, and its window ends
+when the file was seen. It is for a caller that only knows at run time how
+long it needs the load, such as #221's qualification victim; a run stopped
+with Ctrl+C is instead recorded as interrupted.
+
+A Python caller can follow the phases as they run:
+`InferenceProfiler(config, on_phase=callback)` calls `callback` with a
+`PhaseEvent`. The event is `started` just before a phase's first arrival is
+dispatched, and `ended` once the phase has drained and its
+`infer.phase_window` record is written, carrying the times that record holds. The callback runs on the profiler's event
+loop, so it should be quick, and an exception it raises stops the profile.
+#221's qualification harness uses it to time its episodes against the victim's
+measured window.
 
 `cancelled` means Stormlog stopped waiting, not that the request stopped. The
 HTTP call keeps running, on the server and on a client thread, until it
@@ -190,7 +212,7 @@ Request outcomes:
 | `unreachable` | The connection failed before any byte of the request was sent: refused, DNS, a connect timeout or a TLS handshake. The server never saw the request |
 | `delivery_unknown` | The connection completed, but sending the request failed, or the server reset or closed the connection before the response's status line. A small request is handed to the operating system before the server reads it, so the server may or may not have received it |
 | `error` | Any other failure, with `http_status` when there was one. Redirects are not followed, so a 3xx is an `error` with its status. A reset after the status line is the answer the server gave: an `error` (or `rejected`) with that status |
-| `dropped` | Never sent: `--overflow drop` turned the arrival away, or the drain deadline passed while `--overflow wait` held it; `error_message` says which |
+| `dropped` | Never sent: `--overflow drop` turned the arrival away, or the drain deadline passed or the stop file appeared while `--overflow wait` held it; `error_message` says which |
 | `cancelled` | Still running when the drain deadline passed; the call itself runs on until it finishes or times out |
 
 Inference requests, and cache resets, ignore proxies set in the environment
@@ -199,6 +221,42 @@ proxy, and a server that cannot be reached reads as the proxy's HTTP 502, an
 `error`, rather than as `unreachable`. The session record says so
 (`config.environment_proxies`: `ignored`, and the schemes the environment
 set, never their URLs). To go through a proxy, point the endpoint at it.
+
+### Progress records
+
+A request's `infer.request` record is written when it ends, and a phase's
+`infer.phase_window` once it has drained. Three more records are written as
+things happen, so a reader of an artifact that is still growing can see
+what is under way. They stay in the artifact: neither the metrics nor the
+spans of [Exporting inference metrics and spans](inference_export.md) are
+made from them.
+
+| Record | Written | Fields |
+| --- | --- | --- |
+| `infer.phase_start` | when a phase begins, before its first send | `case_id`, `phase`, `arrival_mode`, `started_at_ns` |
+| `infer.dispatch` | when a request is sent | `request_id`, `x_request_id`, `case_id`, `phase`, `intended_at_ns`, `started_at_ns` |
+| `infer.first_content` | when a streamed request's first content piece arrives | `request_id`, `x_request_id`, `case_id`, `phase`, `first_content_at_ns` |
+
+Each also carries `session_id` and a `timestamp_ns` equal to its own time.
+A dispatch's `started_at_ns` is the client's send stamp, the one a
+successful request's `infer.request` carries; a failed request's record
+times the call from when a client thread picked it up, slightly earlier.
+`first_content_at_ns` is the send stamp plus the time to that first piece,
+which a successful request's `infer.request` gives as `ttft_ms`. A request
+that fails or times out after its first content keeps its
+`infer.first_content`, but its `infer.request`, like every failed one, has
+no TTFT, so the summary's TTFT percentiles stay over successful requests;
+the progress record is then the only sign that content arrived. Both
+progress records of a request come before its `infer.request` record. A
+dropped request was never sent and has neither; a request without streamed
+content has no `infer.first_content`. A call the drain gave up on can still
+report its first content after its `cancelled` record, while the profile is
+writing the artifact. `infer import-execution` binds requests from their
+dispatches as well (see [the vLLM execution hook](vllm_execution.md#import)),
+so `infer analyze` reads dispatches in one place only: the execution
+coverage block counts a dispatched request among the run's requests, and
+gives the steps it ran in to its case, even when it never ended (see
+[Coverage](vllm_execution.md#coverage)). It reads no other progress record.
 
 ### Prompts and prefix sharing
 
@@ -313,7 +371,9 @@ requested cache state. For open-loop arrivals it also covers
 `--max-in-flight` and `--overflow`. It leaves out the endpoint, model,
 timeouts and reset URL, so the same workload sent to two engine
 configurations has the same digest. `--extra-body` numbers are compared by
-value, so `0` and `0.0` count as the same.
+value, so `0` and `0.0` count as the same. `spec_digest` covers the same
+but the seed: runs of one workload with different seeds share it, while
+their `workload_digest`s differ.
 
 The API key is never recorded, and the reset URL is recorded without its
 credentials or query string. The server applies the chat template, and the
@@ -331,6 +391,36 @@ stormlog infer profile ... --extra-body '{"temperature": 0, "ignore_eos": true}'
 `messages`, `stream`, `stream_options` and the output cap. Any setting that
 isn't passed is recorded as a server default. For each case, the report gives
 the prompt and output token distributions of the completed requests.
+
+### Experiment labels
+
+`--experiment ID --arm NAME --block LABEL` record which experiment, arm and
+block a run belongs to, in the session record's `labels`, with
+`--position` and `--attempt` when the run is one of several in a block.
+`infer compare` pairs the baseline and candidate runs of each block. A
+block needs an experiment and an arm.
+
+### Server probe
+
+Before the first case and after the last, `infer profile` asks the server
+about itself and records the answers as `infer.server_probe` records:
+
+| `--server-probe` | Asks |
+| --- | --- |
+| `auto` (default) | `/version`, `/v1/models`, and vLLM's `/server_info`, which vLLM serves only with `VLLM_SERVER_DEV_MODE=1` |
+| `basic` | `/version` and `/v1/models` |
+| `none` | Nothing |
+
+vLLM's dev routes skip its API key check, so `auto` asks `/server_info` only
+of a loopback or private-network host; `--allow-remote-probe` asks a public
+one too. A dev-mode server must never face the public.
+
+`/server_info` runs vLLM's environment collector (`pip`, `nvidia-smi`) the
+first time it is asked, so it gets one 120-second deadline and is never
+asked twice. If it gives no answer in time, the collector may still be
+running in the server, and `infer profile` exits `5` before measuring and
+asks you to restart the server. See
+[Inference server descriptions](inference_server.md) for what is kept.
 
 ## Analyze an artifact
 
@@ -368,6 +458,13 @@ The report includes:
   `infer profile` wrote), a top-level `slo` block naming the policy and, per
   case, SLO attainment and goodput as lower and upper bounds (see
   [Inference SLOs and goodput](inference_slo.md))
+- with a server description (`--describe-server`, `attach-manifest`), a
+  `manifest` block: the descriptions, declared fields, and what changed or
+  drifted between before and after (see
+  [Inference server descriptions](inference_server.md))
+- an `observers` block: whether each observer the run asked for was active
+  and healthy in every measured phase (see
+  [Inference server descriptions](inference_server.md))
 - failure rate
 - highest recorded client-local device memory when system telemetry is available
 - scoped server memory observations when a matching on-host collector artifact is supplied
@@ -410,6 +507,17 @@ reading any rate:
 artifact with no `infer.session` or `infer.request` records. Otherwise it exits `0`, even when
 every request in the artifact failed: analysis reports findings without
 failing.
+
+## Diagnose an artifact
+
+```bash
+stormlog infer diagnose artifacts/infer_qwen.jsonl --output diagnosis.json
+stormlog infer diagnose --inspect diagnosis.json diagnosis.queue_saturation.3f9a1c07d2be
+```
+
+`infer diagnose` explains the artifact's slow windows from the evidence it
+holds, and exits `3` when a finding is a `warning`. See
+[Inference diagnosis](inference_diagnosis.md).
 
 ## Token accounting
 
@@ -565,6 +673,13 @@ stormlog infer analyze artifacts/client.jsonl --direct-server \
 Read process titles with `ps -o args`; `/proc/<pid>/comm` cuts them at 15
 characters. The same flags describe one process that spreads a model over
 several GPUs: run one collector per GPU with the same `--pid`.
+
+Each collector can report its own health to Prometheus with
+`--prometheus-listen` or `--prometheus-textfile-dir` (give concurrent
+collectors different `--prometheus-slot` names). The health is labelled with
+the identity the collector observed, and whether NVML showed the server on its
+GPU; the memory values stay in its output.
+See [Collector health](inference_export.md#collector-health).
 
 The analyzer joins a group only when every rank from 0 to N-1 appears exactly
 once. Otherwise the report stays unjoined with one of these reasons:
@@ -752,6 +867,26 @@ flags, the metric map and the capability matrix.
 It scrapes `/metrics` once per tick into a bounded history, and when a
 trigger's condition has been bad for long enough it seals the scrapes around
 it into an incident bundle. See [Inference incident capture](incident_capture.md).
+
+## Exporting to Prometheus and OpenTelemetry
+
+`--prometheus-listen HOST:PORT` serves Stormlog's own measurements at
+`/metrics` while a profile runs, and `--prometheus-textfile-dir DIR` writes
+them to a node_exporter textfile. The measurements include client latencies,
+request outcomes, token counts by source, scrape health and the exporter's
+health. Engine series that Stormlog scraped are never re-exposed. Every label
+value comes from the run's configuration, so a matrix too large for the
+metric budget is refused before anything is sent.
+
+`--otlp-endpoint URL` sends Stormlog's own spans (the capture, its phases
+and every request sent) to an OpenTelemetry collector, and `--otlp-file PATH`
+writes them as OTLP JSON lines. Every span offered is accounted for, as
+exported, rejected, refused, dropped or unknown, and the run never waits
+more than `--otlp-flush-timeout` for a collector. Prompts, outputs and
+server error text leave only with `--export-content`.
+
+See [Exporting inference metrics and spans](inference_export.md) for the
+metrics, spans, labels, budget, accounting and failure behaviour.
 
 ## Profiler traces
 
