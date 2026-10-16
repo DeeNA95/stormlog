@@ -36,6 +36,10 @@ request totals, deduplication, and clock alignment retain their meanings.
 Comparison summaries and manifest attachment expand contexts before reading
 run identity or clocks. Diagnosis keeps a decoder for each file while retaining
 the original physical line numbers, record IDs and hashes used to cite evidence.
+The qualification victim's append probe likewise records every physical line,
+including context definitions, with the flush time of the append that emitted
+it. Qualification checks read expanded artifact identities; incremental client
+request signals continue to use the unchanged v1 request records.
 
 | Representation | Current readers | Older readers |
 | --- | --- | --- |
