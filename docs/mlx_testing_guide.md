@@ -181,7 +181,12 @@ python3 -m pytest tests/test_mlx_hardware.py -m mlx_hardware -v
 
 Ordinary tests use an injectable runtime and need no framework installation.
 Hardware tests are opt-in; selecting them requires usable Metal and fails if
-it is unavailable. Linux CI runs fake contracts with all four frameworks absent.
+it is unavailable. The required Linux `mlx-contracts` CI job covers Python
+3.10 through 3.15 with all four frameworks absent. Each interpreter runs the
+fake-runtime contracts, packaging checks and synthetic qualification scenario;
+matrix failures do not cancel the other interpreters. These checks establish
+portable contracts, while native Metal qualification remains a separate opt-in
+check.
 See [hardware qualification](benchmarks/mlx-qualification.md) for the tested
 environment and limits of the evidence. CLI round-trips and comparative timing evidence are recorded there as well.
 
