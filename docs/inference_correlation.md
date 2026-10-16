@@ -55,6 +55,12 @@ paired measurements from a real vLLM trace. A context
 used only once may increase file size. Smaller files do not guarantee lower
 peak reader memory.
 
+Merge verification on 2026-10-16 against `release/dev` revision `330f7fe`
+passed 269 codec, capture, accounting, execution-import/reporting and docs
+regressions. Repeat imports cover both embedded and compact seed artifacts;
+the upstream newer-hook evidence cases remain covered. Repository-wide
+CI-pinned formatting, lint, mypy (245 source files) and complexity checks passed.
+
 ## Identity and relationships
 
 Every v2 event has a `run_id`, `session_id`, `producer_id`, and `event_id`. An
@@ -101,7 +107,11 @@ durations merely because they are numbers in nanoseconds.
 Clock domains must identify comparable timestamps, for example a monotonic
 clock on one host and boot. Cross-host ordering requires a clock alignment
 event: add its `offset_ns` to a timestamp in `from_clock_domain` to express it
-in `to_clock_domain`, carrying `uncertainty_ns` with the result. An alignment
+in `to_clock_domain`, carrying `uncertainty_ns` with the result. The one
+exception is an alignment an earlier `infer import-execution` wrote without
+`metadata.alignment_basis`: its offset is the lower end of the measured
+interval, which is `metadata.gap_ns` wide, and `align_timestamp` places a
+timestamp at that interval's middle. An alignment
 may have a validity range. Without a valid alignment, cross-domain subtraction
 is undefined.
 
