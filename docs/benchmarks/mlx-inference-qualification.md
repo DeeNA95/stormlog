@@ -240,3 +240,9 @@ fixture regressions passed; CI-pinned repository formatting, lint, mypy across
 282 source files and the complexity gate passed. These checks cover portable
 integration; the native live measurements above keep their original source
 digests and authenticated statistics remain unqualified.
+
+The final complete inference regression suite on Python 3.11 passed
+**3,152 tests, with 8 skipped**, using four workers. Diagnosis fixtures remove
+engine evidence from decoded records so the same checks apply to embedded and
+compact artifacts. No native framework or server package was needed for this
+portable suite.
