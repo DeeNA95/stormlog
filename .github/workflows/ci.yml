@@ -95,7 +95,7 @@ jobs:
                   if [ "${{ matrix.framework }}" = "pytorch" ]; then
                       pip install "torch==$FRAMEWORK_VERSION" --index-url https://download.pytorch.org/whl/cpu
                   elif [ "${{ matrix.framework }}" = "tensorflow" ]; then
-                      pip install "tensorflow-cpu==$FRAMEWORK_VERSION" "$NUMPY_REQUIREMENT"
+                      pip install -r requirements-ci-base.txt "tensorflow-cpu==$FRAMEWORK_VERSION" "$NUMPY_REQUIREMENT"
                   elif [ "${{ matrix.framework }}" = "jax" ]; then
                       pip install "jax==$FRAMEWORK_VERSION" "jaxlib==$FRAMEWORK_VERSION" "$NUMPY_REQUIREMENT" 'protobuf>=6.31.1'
                   fi

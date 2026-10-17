@@ -320,7 +320,9 @@ The base dependencies resolve with each leg's NumPy constraint, so older
 frameworks also receive a compatible SciPy. Constraining NumPy only after
 installing the base packages can leave a SciPy release that requires NumPy 2
 beside NumPy 1.26. The framework install ends with `pip check` to catch
-incompatible dependencies before tests run.
+incompatible dependencies before tests run. TensorFlow also resolves the shared
+requirements alongside its framework pin: 2.15 needs protobuf below 5 and a
+compatible older OpenTelemetry proto release.
 
 The qualification signal tests recognize Python 3.15's constant-load opcode
 when checking that exception entry cannot run a signal handler before signals
