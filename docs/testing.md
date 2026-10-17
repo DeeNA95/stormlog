@@ -322,6 +322,12 @@ installing the base packages can leave a SciPy release that requires NumPy 2
 beside NumPy 1.26. The framework install ends with `pip check` to catch
 incompatible dependencies before tests run.
 
+The qualification signal tests recognize Python 3.15's constant-load opcode
+when checking that exception entry cannot run a signal handler before signals
+are held. Their pending-signal fixture blocks and queues both signals before
+one C call restores the mask and raises a failure, avoiding partial injection
+if the interpreter checks for signals between nested ctypes calls.
+
 As checked on 2026-10-17, stable [TensorFlow CPU 2.21.0](https://pypi.org/project/tensorflow-cpu/2.21.0/)
 has Linux x86-64 wheels through Python 3.13. Python 3.14 wheels are available
 in [2.22.0rc0](https://pypi.org/project/tensorflow-cpu/2.22.0rc0/), and that
