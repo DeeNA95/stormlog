@@ -2296,11 +2296,12 @@ def test_a_signal_at_the_last_check_before_the_runs_except_still_publishes(
 
 # Instructions that run no Python code and don't check for pending signals
 # (POP_TOP drops the caught exception, which the handler still holds;
-# NOT_TAKEN, from 3.14, only marks a branch not taken, for sys.monitoring).
+# NOT_TAKEN, from 3.14, only marks a branch not taken, for sys.monitoring;
+# LOAD_COMMON_CONSTANT, from 3.15, only loads an interpreter constant).
 _NO_HANDLER_RUNS = {
     "PUSH_EXC_INFO", "LOAD_GLOBAL", "CHECK_EXC_MATCH", "POP_JUMP_IF_FALSE",
     "POP_JUMP_FORWARD_IF_FALSE", "POP_TOP", "STORE_FAST", "LOAD_CONST",
-    "LOAD_FAST", "STORE_ATTR", "NOP", "CACHE", "NOT_TAKEN",
+    "LOAD_FAST", "STORE_ATTR", "NOP", "CACHE", "NOT_TAKEN", "LOAD_COMMON_CONSTANT",
 }  # fmt: skip
 
 
