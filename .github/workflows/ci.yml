@@ -79,10 +79,12 @@ jobs:
                   python-version: ${{ matrix.python-version }}
 
             - name: Install base dependencies
+              env:
+                  NUMPY_REQUIREMENT: ${{ matrix.numpy-requirement }}
               run: |
                   python3 -m pip install --upgrade pip
                   pip install -e . --no-deps
-                  pip install -r requirements-ci-base.txt
+                  pip install -r requirements-ci-base.txt "$NUMPY_REQUIREMENT"
 
             - name: Install framework dependencies
               env:
@@ -97,6 +99,7 @@ jobs:
                   elif [ "${{ matrix.framework }}" = "jax" ]; then
                       pip install "jax==$FRAMEWORK_VERSION" "jaxlib==$FRAMEWORK_VERSION" "$NUMPY_REQUIREMENT" 'protobuf>=6.31.1'
                   fi
+                  pip check
 
             - name: Verify PyTorch runtime
               if: matrix.framework == 'pytorch'

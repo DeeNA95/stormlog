@@ -316,6 +316,12 @@ Each leg imports its real framework and executes a CPU tensor operation before
 tests, so missing or unusable runtimes fail the job. MLX's separate contracts
 cover 3.10–3.15 with injectable runtimes and no framework installed.
 
+The base dependencies resolve with each leg's NumPy constraint, so older
+frameworks also receive a compatible SciPy. Constraining NumPy only after
+installing the base packages can leave a SciPy release that requires NumPy 2
+beside NumPy 1.26. The framework install ends with `pip check` to catch
+incompatible dependencies before tests run.
+
 As checked on 2026-10-17, stable [TensorFlow CPU 2.21.0](https://pypi.org/project/tensorflow-cpu/2.21.0/)
 has Linux x86-64 wheels through Python 3.13. Python 3.14 wheels are available
 in [2.22.0rc0](https://pypi.org/project/tensorflow-cpu/2.22.0rc0/), and that
