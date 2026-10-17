@@ -249,6 +249,10 @@ What it serves, as vLLM 0.30.0 does:
   `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`); a 429 or other client error is final,
   as is a read timeout once the body has been sent.
 
+The profiler's `trace_write_delay_seconds` starts after synchronous stop work
+(including the kernel table) and the stop's timing marker. A slow table write
+therefore holds the stop without consuming the later trace's configured delay.
+
 **Fault controls,** over `/_fault/` routes that answer even while the front end
 is held:
 
@@ -281,8 +285,8 @@ before reading such a failure as a defect.
 
 The current CI workflow at `.github/workflows/ci.yml` runs:
 
-- `push` on `main` and `develop`
-- `pull_request` on `main` and `release/v0.2-readiness`
+- `push` on `main`, `develop`, and `release/dev`
+- `pull_request` on `main`, `release/v0.2-readiness`, and `release/dev`
 - a nightly scheduled run
 
 ### Current CI lanes
@@ -293,6 +297,38 @@ The current CI workflow at `.github/workflows/ci.yml` runs:
 - TUI pilot and snapshot tests on pull requests and `develop`
 - TUI PTY smoke on `main` pushes and scheduled runs
 - lint, docs, and package build checks in separate jobs
+
+### Framework interpreter coverage
+
+The framework matrix retains the older runtime baselines and selects newer
+stable releases for the interpreters those baselines cannot install on:
+
+| Framework | Python versions | Pinned release |
+| --- | --- | --- |
+| PyTorch | 3.10–3.12 | 2.2.2, CPU index, NumPy below 2 |
+| PyTorch | 3.13–3.15 | 2.14.1, CPU index |
+| TensorFlow | 3.10–3.11 | tensorflow-cpu 2.15.0, NumPy below 2 |
+| TensorFlow | 3.12–3.13 | tensorflow-cpu 2.21.0 |
+| JAX and jaxlib | 3.10–3.12 | 0.4.20, NumPy below 2 |
+| JAX and jaxlib | 3.13–3.15 | 0.11.2 |
+
+Each leg imports its real framework and executes a CPU tensor operation before
+tests, so missing or unusable runtimes fail the job. MLX's separate contracts
+cover 3.10–3.15 with injectable runtimes and no framework installed.
+
+As checked on 2026-10-17, stable [TensorFlow CPU 2.21.0](https://pypi.org/project/tensorflow-cpu/2.21.0/)
+has Linux x86-64 wheels through Python 3.13. Python 3.14 wheels are available
+in [2.22.0rc0](https://pypi.org/project/tensorflow-cpu/2.22.0rc0/), and that
+release candidate has no Python 3.15 wheel. TensorFlow 3.14/3.15 legs therefore
+remain outside this stable-runtime matrix. [PyTorch's CPU index](https://download.pytorch.org/whl/cpu/torch/)
+and [jaxlib 0.11.2](https://pypi.org/project/jaxlib/0.11.2/) provide the 3.15
+wheels used by their new legs. Wheel availability is the installation
+prerequisite; passing GitHub Actions results establish tested compatibility.
+
+Server-probe responses enforce a 100-container JSON nesting limit across
+interpreters. The iterative JSON decoder in Python 3.14 can accept structures
+that older decoders reject with `RecursionError`, so the probe enforces this
+limit explicitly before retaining a response.
 
 ## Documentation checks
 
