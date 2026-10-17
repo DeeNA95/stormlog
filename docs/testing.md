@@ -330,6 +330,17 @@ are held. Their pending-signal fixture blocks and queues both signals before
 one C call restores the mask and raises a failure, avoiding partial injection
 if the interpreter checks for signals between nested ctypes calls.
 
+The hook writer's invalid-JSON tests use an unsupported object at the bottom of
+the deeply nested fixture. Nested lists alone are valid JSON: whether encoding
+them raises `RecursionError` depends on the interpreter and available C stack.
+The test therefore checks error accounting and sequence continuity with an
+actually unserializable value, while retaining its assertions for circular
+values and changing dictionaries.
+
+Framework jobs have a 60-minute limit. PyTorch's broad test selection dumps all
+thread stacks if a test runs for 120 seconds, so stalled interruption or cleanup
+tests leave diagnostics before the job limit stops the runner.
+
 As checked on 2026-10-17, stable [TensorFlow CPU 2.21.0](https://pypi.org/project/tensorflow-cpu/2.21.0/)
 has Linux x86-64 wheels through Python 3.13. Python 3.14 wheels are available
 in [2.22.0rc0](https://pypi.org/project/tensorflow-cpu/2.22.0rc0/), and that
