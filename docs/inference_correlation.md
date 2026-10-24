@@ -66,12 +66,6 @@ context IDs; with 16-digit IDs every line of a compact file is 48 bytes shorter
 than measured there. A context used only once may increase file size. Smaller
 files do not guarantee lower peak reader memory.
 
-Merge verification on 2026-10-16 against `release/dev` revision `330f7fe`
-passed 269 codec, capture, accounting, execution-import/reporting and docs
-regressions. Repeat imports cover both embedded and compact seed artifacts;
-the upstream newer-hook evidence cases remain covered. Repository-wide
-CI-pinned formatting, lint, mypy (245 source files) and complexity checks passed.
-
 ## Identity and relationships
 
 Every v2 event has a `run_id`, `session_id`, `producer_id`, and `event_id`. An
