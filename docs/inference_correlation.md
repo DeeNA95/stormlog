@@ -60,11 +60,13 @@ to an embedded-only artifact emits new definitions and retains the old bytes
 unchanged. Serialization completes before capture files are mutated; this does
 not create a transaction spanning the artifact and its run envelope.
 
-The [compaction results](benchmarks/issue-259-modal-results.json) record
-paired measurements from a real vLLM trace. They were taken with 64-digit
-context IDs; with 16-digit IDs every line of a compact file is 48 bytes shorter
-than measured there. A context used only once may increase file size. Smaller
-files do not guarantee lower peak reader memory.
+On the #216 audit workload, compact files are 32.6% smaller at launch detail
+and 32.2% smaller at kernel detail, with the same records and the same GPU busy
+time ([audit results](benchmarks/issue-259-audit-results.json)). An earlier
+Qwen3-0.6B measurement ([results](benchmarks/issue-259-modal-results.json)) used
+64-digit context IDs, which made every compact line 48 bytes longer. A context
+used only once may increase file size. Smaller files do not guarantee lower
+peak reader memory.
 
 ## Identity and relationships
 
@@ -334,14 +336,15 @@ time is the same at both details.
 
 The last column is what a consumer that ignored `metadata.intervals` and used
 the spans would overcount. The import summary reports `busy_ns` and
-`launch_span_ns` per device. The historical embedded encoding used about 1.3 KB per record, largely
-repeated context (roughly 280 MB at kernel detail and 45 MB at launch detail
-for the audit trace). New wire v4 artifacts share contexts; the paired
-[results](benchmarks/issue-259-modal-results.json) record a fresh,
-maintainer-authorized Qwen3-0.6B Modal capture with 28.68%/28.88% savings at
-launch/kernel detail, measured with 64-digit context IDs, and unchanged GPU
-accounting. It is a separate workload
-from the historical audit above. Capture short windows.
+`launch_span_ns` per device. Embedded records repeat their full context: on the
+audit trace above, about 1.3 KB per record, roughly 280 MB at kernel detail and
+45 MB at launch detail. Compact (wire v4) artifacts store each context once.
+The same workload re-run on one NVIDIA L4, profiled for 61 seconds, gave 48,494
+launch records (80.3 MB embedded, 54.1 MB compact) and 342,610 kernel records
+(574.7 MB embedded, 389.7 MB compact), with identical GPU busy time in both
+encodings and about the same load time
+([audit results](benchmarks/issue-259-audit-results.json),
+`examples/scenarios/modal_audit_compaction.py`). Capture short windows.
 
 `examples/scenarios/trace_import_scenario.py` checks the import on a CUDA
 device. On an NVIDIA A30 it linked every GPU event launched inside an

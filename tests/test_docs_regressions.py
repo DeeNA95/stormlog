@@ -297,7 +297,7 @@ def test_docs_conf_uses_stormlog_canonical_baseurl() -> None:
     assert "https://gpu-memory-profiler.readthedocs.io/" not in content
 
 
-def test_compact_correlation_schema_and_examples_match():
+def test_compact_correlation_schema_and_examples_match() -> None:
     import json
 
     from jsonschema import Draft202012Validator
@@ -316,3 +316,20 @@ def test_compact_correlation_schema_and_examples_match():
     assert len(expand_inference_records(rows)) == 1
     assert "schemas/inference_correlation_v4.schema.json" in prose
     assert (DOC_ROOT / "benchmarks/issue-259-modal-results.json").exists()
+
+
+def test_compaction_figures_match_the_audit_results() -> None:
+    import json
+
+    results = json.loads(
+        (DOC_ROOT / "benchmarks/issue-259-audit-results.json").read_text()
+    )
+    prose = " ".join((DOC_ROOT / "inference_correlation.md").read_text().split())
+    assert "benchmarks/issue-259-audit-results.json" in prose
+    for detail in ("launch", "kernel"):
+        measured = results["comparisons"][detail]["revision"]
+        assert all(measured["invariants"].values())
+        assert f"{measured['saved_percent']:.1f}% smaller at {detail} detail" in prose
+        assert f"{measured['activity_count']:,} {detail} records" in prose
+        for encoding in ("embedded", "compact"):
+            assert f"{measured[encoding]['bytes'] / 1e6:.1f} MB {encoding}" in prose
