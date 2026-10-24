@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import asdict, replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -15,6 +16,7 @@ from stormlog.infer.correlation_codec import (
 from stormlog.infer.correlation_events import (
     ArtifactIdentityEvent,
     CorrelationContext,
+    CorrelationEvent,
     EntityRef,
     IterationEvent,
     StageEvent,
@@ -23,7 +25,7 @@ from stormlog.infer.correlation_events import (
 from stormlog.infer.events import JsonlEventWriter
 
 
-def _event():
+def _event() -> IterationEvent:
     return IterationEvent(
         context=CorrelationContext(
             run_id="run",
@@ -42,7 +44,7 @@ def _event():
     )
 
 
-def test_shared_context_roundtrip_and_schema(tmp_path):
+def test_shared_context_roundtrip_and_schema(tmp_path: Path) -> None:
     event = _event()
     other = replace(event, event_id="second")
     path = tmp_path / "events.jsonl"
@@ -66,7 +68,7 @@ def test_shared_context_roundtrip_and_schema(tmp_path):
     assert expanded[1]["context"]["run_id"] == "run"
 
 
-def test_run_summary_expands_compact_artifact_identity():
+def test_run_summary_expands_compact_artifact_identity() -> None:
     from stormlog.infer.run_summary import summary_from_records
 
     identity = ArtifactIdentityEvent(
@@ -81,7 +83,9 @@ def test_run_summary_expands_compact_artifact_identity():
     assert summary.session_id == identity.context.session_id
 
 
-def test_diagnosis_expands_contexts_and_preserves_physical_evidence(tmp_path):
+def test_diagnosis_expands_contexts_and_preserves_physical_evidence(
+    tmp_path: Path,
+) -> None:
     from stormlog.infer.diagnosis_inputs import read_input
 
     event = _event()
@@ -107,7 +111,9 @@ def test_diagnosis_expands_contexts_and_preserves_physical_evidence(tmp_path):
 
 @pytest.mark.parametrize("request_link", ["missing", "null", "valid"])
 @pytest.mark.parametrize("iteration_link", ["missing", "null", "valid"])
-def test_stage_schema_requires_a_valid_link(request_link, iteration_link):
+def test_stage_schema_requires_a_valid_link(
+    request_link: str, iteration_link: str
+) -> None:
     ref = EntityRef("engine", "1")
     event = StageEvent(
         context=_event().context,
@@ -137,7 +143,7 @@ def test_stage_schema_requires_a_valid_link(request_link, iteration_link):
             expand_inference_records(rows)
 
 
-def test_failed_serialization_does_not_emit_or_register(tmp_path):
+def test_failed_serialization_does_not_emit_or_register(tmp_path: Path) -> None:
     event = _event()
     path = tmp_path / "events.jsonl"
     with JsonlEventWriter(path) as writer:
@@ -149,7 +155,7 @@ def test_failed_serialization_does_not_emit_or_register(tmp_path):
     assert len(path.read_text().splitlines()) == 2
 
 
-def test_unknown_context_physical_line(tmp_path):
+def test_unknown_context_physical_line(tmp_path: Path) -> None:
     rows = CorrelationRecordEncoder().encode(_event().to_record())
     path = tmp_path / "events.jsonl"
     path.write_text("\n\n" + json.dumps(rows[1]) + "\n")
@@ -157,7 +163,7 @@ def test_unknown_context_physical_line(tmp_path):
         load_inference_artifact(path)
 
 
-def test_aliases_and_conflicts():
+def test_aliases_and_conflicts() -> None:
     rows = CorrelationRecordEncoder().encode(_event().to_record())
     alias = dict(rows[0], context_id="alias")
     event_alias = dict(rows[1], context_id="alias")
@@ -168,7 +174,7 @@ def test_aliases_and_conflicts():
         expand_inference_records([*rows, conflicting])
 
 
-def test_hash_collision(monkeypatch):
+def test_hash_collision(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "stormlog.infer.correlation_codec._generated_id", lambda _: "same"
     )
@@ -196,7 +202,7 @@ def test_hash_collision(monkeypatch):
         ("session_id", "other"),
     ],
 )
-def test_full_context_identity(field, value):
+def test_full_context_identity(field: str, value: Any) -> None:
     event = _event()
     encoder = CorrelationRecordEncoder()
     encoder.encode(event.to_record())
@@ -217,14 +223,14 @@ def test_full_context_identity(field, value):
         {"context": {}},
     ],
 )
-def test_invalid_transport(changes):
+def test_invalid_transport(changes: dict[str, object]) -> None:
     rows = CorrelationRecordEncoder().encode(_event().to_record())
     rows[1].update(changes)
     with pytest.raises((ValueError, TypeError)):
         expand_inference_records(rows)
 
 
-def test_missing_id_and_definition_fields():
+def test_missing_id_and_definition_fields() -> None:
     rows = CorrelationRecordEncoder().encode(_event().to_record())
     del rows[1]["context_id"]
     with pytest.raises(ValueError, match="context_id"):
@@ -234,7 +240,7 @@ def test_missing_id_and_definition_fields():
         expand_inference_records(rows[:1])
 
 
-def test_optional_nulls_and_append_alias():
+def test_optional_nulls_and_append_alias() -> None:
     from stormlog.infer.correlation_codec import CorrelationRecordDecoder
 
     event = _event()
@@ -252,7 +258,7 @@ def test_optional_nulls_and_append_alias():
     assert encoded["context_id"] == "first"
 
 
-def test_mixed_order_and_registry_lifetime(tmp_path):
+def test_mixed_order_and_registry_lifetime(tmp_path: Path) -> None:
     event = _event()
     embedded = event.to_record()
     legacy = {"schema_version": 1, "event_type": "infer.request", "custom": 42}
@@ -267,7 +273,7 @@ def test_mixed_order_and_registry_lifetime(tmp_path):
         load_inference_artifact(b)
 
 
-def test_writer_reentry_and_closed(tmp_path):
+def test_writer_reentry_and_closed(tmp_path: Path) -> None:
     event = _event()
     writer = JsonlEventWriter(tmp_path / "events")
     for _ in range(2):
@@ -279,7 +285,7 @@ def test_writer_reentry_and_closed(tmp_path):
         writer.append(event.to_record())
 
 
-def test_input_immutability_and_old_parser():
+def test_input_immutability_and_old_parser() -> None:
     import copy
 
     from stormlog.infer.correlation_events import parse_inference_record
@@ -299,7 +305,7 @@ def test_input_immutability_and_old_parser():
 @pytest.mark.parametrize(
     "intervals", [None, [], [[-1, 1]], [[0, 8], [3, 2]], [[0, 11]]]
 )
-def test_invalid_busy_intervals(intervals):
+def test_invalid_busy_intervals(intervals: object) -> None:
     from stormlog.infer.correlation_events import ActivityReferenceEvent
 
     event = ActivityReferenceEvent(
@@ -319,7 +325,7 @@ def test_invalid_busy_intervals(intervals):
         expand_inference_records(rows)
 
 
-def _all_events():
+def _all_events() -> list[CorrelationEvent]:
     from stormlog.infer.correlation_events import (
         ActivityReferenceEvent,
         ArtifactIdentityEvent,
@@ -330,7 +336,7 @@ def _all_events():
         StageEvent,
     )
 
-    base = {"context": _event().context, "event_id": "event"}
+    base: dict[str, Any] = {"context": _event().context, "event_id": "event"}
     ref = EntityRef("engine", "1")
     activity = ActivityReferenceEvent(
         **base,
@@ -363,7 +369,9 @@ def _all_events():
 @pytest.mark.parametrize(
     "event", _all_events(), ids=lambda e: e.EVENT_TYPE + str(e.schema_version)
 )
-def test_all_event_types_schema_and_typed_roundtrip(event, tmp_path):
+def test_all_event_types_schema_and_typed_roundtrip(
+    event: CorrelationEvent, tmp_path: Path
+) -> None:
     rows = CorrelationRecordEncoder().encode(event.to_record())
     schema = json.loads(
         Path("docs/schemas/inference_correlation_v4.schema.json").read_text()
@@ -382,14 +390,20 @@ def test_all_event_types_schema_and_typed_roundtrip(event, tmp_path):
         assert not validator.is_valid(invalid)
 
 
-def test_compact_mixed_and_alias_accounting():
+def test_compact_mixed_and_alias_accounting() -> None:
     from stormlog.infer.correlation_accounting import (
         account_gpu_time,
         resolve_inference_events,
     )
-    from stormlog.infer.correlation_events import parse_inference_record
+    from stormlog.infer.correlation_events import (
+        ActivityReferenceEvent,
+        parse_inference_record,
+    )
 
-    activities = _all_events()[-2:]
+    activities = [
+        a for a in _all_events()[-2:] if isinstance(a, ActivityReferenceEvent)
+    ]
+    assert len(activities) == 2
     activities = [
         replace(
             a,
@@ -412,7 +426,7 @@ def test_compact_mixed_and_alias_accounting():
     assert next(iter(accounting.device_totals.values())).busy_ns == 10
 
 
-def test_embedded_null_intervals_stays_legacy_but_compact_rejects_it():
+def test_embedded_null_intervals_stays_legacy_but_compact_rejects_it() -> None:
     from stormlog.infer.correlation_events import parse_inference_record
 
     embedded = _all_events()[-1].to_record()
@@ -423,8 +437,8 @@ def test_embedded_null_intervals_stays_legacy_but_compact_rejects_it():
     assert original.to_record() == embedded
 
 
-def test_writer_retains_unrelated_rows_and_v1_fields(tmp_path):
-    rows = [
+def test_writer_retains_unrelated_rows_and_v1_fields(tmp_path: Path) -> None:
+    rows: list[dict[str, Any]] = [
         {"schema_version": 1, "event_type": "infer.request", "extra": {"value": 42}},
         {"event_type": "custom", "payload": [1, 2]},
     ]
@@ -434,7 +448,9 @@ def test_writer_retains_unrelated_rows_and_v1_fields(tmp_path):
     assert [json.loads(line) for line in writer.path.read_text().splitlines()] == rows
 
 
-def test_typed_legacy_failure_keeps_physical_lines_after_definitions(tmp_path):
+def test_typed_legacy_failure_keeps_physical_lines_after_definitions(
+    tmp_path: Path,
+) -> None:
     definition = CorrelationRecordEncoder().encode(_event().to_record())[0]
     path = tmp_path / "events"
     path.write_text(
@@ -447,7 +463,7 @@ def test_typed_legacy_failure_keeps_physical_lines_after_definitions(tmp_path):
 
 
 @pytest.mark.parametrize("first", ["correlation_codec", "correlation_events"])
-def test_modules_import_independently(first):
+def test_modules_import_independently(first: str) -> None:
     import subprocess
     import sys
 
@@ -465,7 +481,9 @@ def test_modules_import_independently(first):
 
 
 @pytest.mark.parametrize("detail", ["launch", "kernel"])
-def test_offline_comparison_scenario_uses_production_import(tmp_path, detail):
+def test_offline_comparison_scenario_uses_production_import(
+    tmp_path: Path, detail: str
+) -> None:
     import argparse
 
     from examples.scenarios.context_compaction_scenario import compare
@@ -494,7 +512,7 @@ def test_offline_comparison_scenario_uses_production_import(tmp_path, detail):
         )
 
 
-def test_forward_context_reference_is_not_buffered(tmp_path):
+def test_forward_context_reference_is_not_buffered(tmp_path: Path) -> None:
     rows = CorrelationRecordEncoder().encode(_event().to_record())
     path = tmp_path / "events"
     path.write_text(json.dumps(rows[1]) + "\n" + json.dumps(rows[0]) + "\n")
@@ -505,7 +523,9 @@ def test_forward_context_reference_is_not_buffered(tmp_path):
 
 
 @pytest.mark.parametrize("context", [{}, {"run_id": None}, {"unexpected": "value"}])
-def test_invalid_definition_context_agrees_with_schema(context):
+def test_invalid_definition_context_agrees_with_schema(
+    context: dict[str, object]
+) -> None:
     rows = CorrelationRecordEncoder().encode(_event().to_record())
     rows[0]["context"] = context
     schema = json.loads(
