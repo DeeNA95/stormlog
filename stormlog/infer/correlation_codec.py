@@ -294,3 +294,14 @@ def iter_inference_events(
 
 def read_inference_records(path: str | Path) -> list[dict[str, Any]]:
     return [record for _, record in iter_inference_records(path)]
+
+
+__all__ = [
+    "ContextRegistry",
+    "CorrelationRecordDecoder",
+    "CorrelationRecordEncoder",
+    "expand_inference_records",
+    "iter_inference_events",
+    "iter_inference_records",
+    "read_inference_records",
+]
