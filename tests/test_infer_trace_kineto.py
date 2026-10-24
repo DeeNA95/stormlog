@@ -30,6 +30,7 @@ from stormlog.infer.correlation_events import (
     load_inference_artifact,
 )
 from stormlog.infer.trace_kineto import (
+    Detail,
     import_kineto_trace,
     link_gpu_event,
     load_kineto_trace,
@@ -378,7 +379,7 @@ def test_merge_intervals_joins_overlapping_and_touching_spans() -> None:
 @pytest.mark.parametrize("detail", ["launch", "kernel"])
 def test_capture_records_the_import_summary_and_registers_the_trace(
     tmp_path: Path,
-    detail,
+    detail: Detail,
 ) -> None:
     trace_path = _write(tmp_path, _trace_document(), compress=True)
     artifact = tmp_path / "infer.jsonl"

@@ -231,10 +231,12 @@ class JsonlEventWriter:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle: TextIO | None = None
+        self._encoder = CorrelationRecordEncoder()
         self._observer = observer
         self.observer_errors = 0
 
     def __enter__(self) -> "JsonlEventWriter":
+        # Entering rewrites the file, so its context definitions start over.
         self._encoder = CorrelationRecordEncoder()
         self._handle = self.path.open("w", encoding="utf-8")
         return self
