@@ -279,6 +279,12 @@ def test_invalid_transport(changes: dict[str, object]) -> None:
         expand_inference_records(rows)
 
 
+def test_a_record_that_is_not_an_object_is_a_value_error() -> None:
+    records: list[Any] = [{"event_type": "custom"}, 42]
+    with pytest.raises(ValueError, match="record 2: record must be an object"):
+        expand_inference_records(records)
+
+
 def test_missing_id_and_definition_fields() -> None:
     rows = CorrelationRecordEncoder().encode(_event().to_record())
     del rows[1]["context_id"]

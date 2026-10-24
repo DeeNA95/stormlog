@@ -110,6 +110,8 @@ class CorrelationRecordDecoder:
 
     def _expand(self, record: Mapping[str, Any]) -> tuple[dict[str, Any] | None, bool]:
         """The record with its context restored, and whether it was compact."""
+        if not isinstance(record, Mapping):
+            raise ValueError("record must be an object")
         version = record.get("schema_version", 1)
         definition = record.get("event_type") == "infer.context"
         transport = definition or "context_id" in record or version == 4
@@ -267,10 +269,7 @@ def _decoded_lines(
             if not line.strip():
                 continue
             try:
-                record = json.loads(line)
-                if not isinstance(record, dict):
-                    raise ValueError("record must be an object")
-                value = decode(record)
+                value = decode(json.loads(line))
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"line {line_number}: {exc}") from exc
             if value is not None:
