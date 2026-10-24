@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .correlation_codec import CorrelationRecordDecoder
-from .correlation_events import InferenceRecord, parse_inference_record
+from .correlation_events import InferenceRecord
 
 INPUT_KIND = "inference_jsonl"
 
@@ -149,10 +149,7 @@ def _line(
     if not isinstance(raw, dict):
         return Line(number, digest, None, None, None), "not a JSON object"
     try:
-        expanded = decoder.decode(raw)
-        record: InferenceRecord | None = (
-            None if expanded is None else parse_inference_record(expanded)
-        )
+        record: InferenceRecord | None = decoder.decode_event(raw)
         problem = None
     except (TypeError, ValueError) as exc:
         record, problem = None, str(exc)

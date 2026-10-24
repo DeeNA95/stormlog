@@ -19,9 +19,15 @@ import pytest
 
 from examples.qualification.__main__ import main
 from examples.qualification.fake_engine.process import FakeEngineProcess, _environment
-from examples.qualification.inject import _harness_clock
+from examples.qualification.inject import (
+    _complete_records,
+    _harness_clock,
+    _victim_clock,
+)
 from examples.qualification.run_dir import new_label, verify
 from stormlog.infer.correlation_codec import read_inference_records
+from stormlog.infer.correlation_events import ArtifactIdentityEvent, CorrelationContext
+from stormlog.infer.events import JsonlEventWriter
 from stormlog.infer.qualify.ground_truth import load_injections, load_run
 from tests.qualification_fake_engine_helpers import post, wait_until
 
@@ -2479,3 +2485,29 @@ def test_pulses_delivered_before_a_failing_one_are_on_record(
     assert "did not stop" in stall.injected["error"]
     assert len(stall.injected["pulses"]) == 2
     assert all("landed" in pulse for pulse in stall.injected["pulses"])
+
+
+def test_the_victim_clock_comes_from_its_artifact_identity(tmp_path: Path) -> None:
+    # A domain from before boot IDs were part of it keeps the boot in the
+    # artifact's metadata. A compact file's context definition, the first row
+    # with a context, has no metadata, so the records must be expanded first.
+    context = CorrelationContext(
+        run_id="run", session_id="session", producer_id="client", source="test",
+        clock_domain="host-a/unix_epoch_ns", clock_kind="wall",
+        collection_mode="active", provenance="observed", host="host-a",
+    )  # fmt: skip
+    identity = ArtifactIdentityEvent(
+        context=context,
+        event_id="artifact",
+        artifact_kind="inference_jsonl",
+        created_at_ns=1,
+        metadata={"boot_id": "boot-1"},
+    )
+    path = tmp_path / "victim.jsonl"
+    with JsonlEventWriter(path) as writer:
+        writer.append(identity.to_record())
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"event_type": "infer.req')  # a line still being written
+    records = _complete_records(path)
+    assert [r["event_type"] for r in records] == ["infer.artifact"]
+    assert _victim_clock(records) == "host-a/boot-1/unix_epoch_ns"
