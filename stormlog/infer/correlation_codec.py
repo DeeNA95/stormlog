@@ -30,11 +30,18 @@ def _context_id(value: object) -> str:
     return value
 
 
+# Every reference repeats the ID, so keep it short. A file holds a handful of
+# contexts, which makes a clash in 16 hex digits vanishingly rare, and a clash
+# fails as a conflicting definition instead of merging two contexts.
+_ID_HEX_DIGITS = 16
+
+
 def _generated_id(context: CorrelationContext) -> str:
     canonical = json.dumps(
         asdict(context), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     )
-    return "ctx-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return "ctx-" + digest[:_ID_HEX_DIGITS]
 
 
 class ContextRegistry:

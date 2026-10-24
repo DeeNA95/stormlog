@@ -19,9 +19,11 @@ validates individual physical records. For example:
 {"schema_version":4,"event_type":"infer.iteration","context_id":"example","event_id":"iteration-1","metadata":{},"iteration_ref":{"producer_id":"engine-0","id":"1"},"batch_ref":null,"start_ns":100,"end_ns":200}
 ```
 
-Writers include optional context fields with their null defaults and generate
-artifact-local IDs from canonical context JSON using full SHA-256 digests.
-Readers accept any nonempty ID. Every context field participates in sharing;
+Writers include optional context fields with their null defaults and name each
+context `ctx-` followed by the first 16 hexadecimal digits of the SHA-256 digest
+of its canonical JSON. If two different contexts ever received the same name,
+writing or reading would fail with a conflicting definition; the contexts are
+never merged. Readers accept any nonempty ID. Every context field participates in sharing;
 per-event metadata stays on its event. Different producers, devices, clocks,
 processes, ranks, or provenance therefore retain their separate identities.
 
@@ -59,9 +61,10 @@ unchanged. Serialization completes before capture files are mutated; this does
 not create a transaction spanning the artifact and its run envelope.
 
 The [compaction results](benchmarks/issue-259-modal-results.json) record
-paired measurements from a real vLLM trace. A context
-used only once may increase file size. Smaller files do not guarantee lower
-peak reader memory.
+paired measurements from a real vLLM trace. They were taken with 64-digit
+context IDs; with 16-digit IDs every line of a compact file is 48 bytes shorter
+than measured there. A context used only once may increase file size. Smaller
+files do not guarantee lower peak reader memory.
 
 Merge verification on 2026-10-16 against `release/dev` revision `330f7fe`
 passed 269 codec, capture, accounting, execution-import/reporting and docs
@@ -342,7 +345,8 @@ repeated context (roughly 280 MB at kernel detail and 45 MB at launch detail
 for the audit trace). New wire v4 artifacts share contexts; the paired
 [results](benchmarks/issue-259-modal-results.json) record a fresh,
 maintainer-authorized Qwen3-0.6B Modal capture with 28.68%/28.88% savings at
-launch/kernel detail and unchanged GPU accounting. It is a separate workload
+launch/kernel detail, measured with 64-digit context IDs, and unchanged GPU
+accounting. It is a separate workload
 from the historical audit above. Capture short windows.
 
 `examples/scenarios/trace_import_scenario.py` checks the import on a CUDA

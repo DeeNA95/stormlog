@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
@@ -172,6 +173,19 @@ def test_aliases_and_conflicts() -> None:
     conflicting = dict(rows[0], context=dict(rows[0]["context"], host="different"))
     with pytest.raises(ValueError, match="conflicting context"):
         expand_inference_records([*rows, conflicting])
+
+
+def test_generated_ids_are_short_content_fingerprints() -> None:
+    event = _event()
+    other = replace(event, context=replace(event.context, host="other"))
+
+    def first_id(record: dict[str, Any]) -> str:
+        return str(CorrelationRecordEncoder().encode(record)[0]["context_id"])
+
+    identity = first_id(event.to_record())
+    assert re.fullmatch(r"ctx-[0-9a-f]{16}", identity)
+    assert first_id(event.to_record()) == identity
+    assert first_id(other.to_record()) != identity
 
 
 def test_hash_collision(monkeypatch: pytest.MonkeyPatch) -> None:
