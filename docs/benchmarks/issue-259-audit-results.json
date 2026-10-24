@@ -1,0 +1,282 @@
+{
+  "baseline": "330f7feab1a55675b970af88129949ea71657e9f",
+  "capture": {
+    "device_uuid": "GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f",
+    "engine_args": {
+      "dtype": "bfloat16",
+      "enable_prefix_caching": false,
+      "gpu_memory_utilization": 0.9,
+      "max_model_len": 1024,
+      "max_num_seqs": 64,
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+      "seed": 259,
+      "tokenizer_revision": "a09a35458c702b33eeacc393d103063234e8bc28"
+    },
+    "engine_load_s": 215.9,
+    "finished_at_utc": "2026-10-24T13:49:44.462845+00:00",
+    "generated_tokens": 40816,
+    "gpu_csv": "0, GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f, NVIDIA L4, 610.57.04, 23034 MiB",
+    "max_num_seqs": 64,
+    "max_tokens_range": [
+      192,
+      319
+    ],
+    "model": "Qwen/Qwen2.5-7B-Instruct",
+    "model_revision": "a09a35458c702b33eeacc393d103063234e8bc28",
+    "profiled_wall_s": 61.1,
+    "prompt_tokens": 21650,
+    "requests": 160,
+    "run_id": "20261024T134153Z-f61030",
+    "torch": "2.13.0+cu130",
+    "traces": [
+      {
+        "bytes": 19202248,
+        "path": "traces/rank0.1792849684968577725.pt.trace.json.gz",
+        "sha256": "2cf2bcd77c14cbcb99caeca1a6240d0a083760ac825d29454fb232568e685540"
+      }
+    ],
+    "vllm": "0.30.0"
+  },
+  "comparisons": {
+    "kernel": {
+      "baseline": {
+        "bytes": 574670820,
+        "device_clock_totals": [
+          {
+            "activity_count": 342610,
+            "busy_ns": 60996570846,
+            "clock_domain": "kineto:modal:kineto:rank0.1792849684968577725.pt.trace.json.gz:cce1a804d48f",
+            "clock_kind": "device",
+            "device_uuid": "GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f",
+            "summed_activity_ns": 61007254459
+          }
+        ],
+        "event_types": {
+          "infer.activity_ref": 342610,
+          "infer.artifact": 1,
+          "infer.capabilities": 2
+        },
+        "import_s": 37.7,
+        "load_s": 15.54,
+        "physical_lines": 342613,
+        "semantic_events": 342613
+      },
+      "revision": {
+        "activity_count": 342610,
+        "capture_summary": {
+          "already_imported": [],
+          "traces": [
+            {
+              "activity_records": 342610,
+              "cupti_version": "130001",
+              "detail": "kernel",
+              "devices": {
+                "0": {
+                  "busy_ns": 60996570846,
+                  "device_uuid": "GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f",
+                  "device_uuid_source": "option",
+                  "launch_span_ns": 60996570846,
+                  "name": "NVIDIA L4",
+                  "summed_ns": 61007254459
+                }
+              },
+              "engine_version": "0.30.0",
+              "event_loss": null,
+              "event_loss_note": "the trace does not report dropped CUPTI records",
+              "format": "kineto",
+              "gpu_events": 342610,
+              "graph_gpu_events": 296074,
+              "host": "modal",
+              "linked_gpu_events": 0,
+              "not_imported": {},
+              "notes": [],
+              "path": "/__modal/volumes/vo-JQupOkikZfTnlJoSA5DoOP/runs/20261024T134153Z-f61030/traces/rank0.1792849684968577725.pt.trace.json.gz",
+              "processes": [
+                51
+              ],
+              "rank": 0,
+              "trace_id": "BBEDC42BC2F840DEB7C11F32F9396DFB",
+              "unresolved_gpu_events": {
+                "launch_outside_iteration_range": 342610
+              }
+            }
+          ]
+        },
+        "command": "/usr/local/bin/python -m examples.scenarios.context_compaction_scenario --trace /data/runs/20261024T134153Z-f61030/traces/rank0.1792849684968577725.pt.trace.json.gz --detail kernel --device-uuid 0=GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f --output-dir /tmp/kernel/revision",
+        "compact": {
+          "bytes": 389661868,
+          "physical_lines": 342616
+        },
+        "compact_load_s": 15.33,
+        "comparison": "paired encodings of the same production import",
+        "context_definitions": 3,
+        "detail": "kernel",
+        "device_clock_totals": [
+          {
+            "activity_count": 342610,
+            "busy_ns": 60996570846,
+            "clock_domain": "kineto:modal:kineto:rank0.1792849684968577725.pt.trace.json.gz:cce1a804d48f",
+            "clock_kind": "device",
+            "device_uuid": "GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f",
+            "summed_activity_ns": 61007254459
+          }
+        ],
+        "device_uuid_overrides": [
+          "0=GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f"
+        ],
+        "embedded": {
+          "bytes": 574670820,
+          "physical_lines": 342613
+        },
+        "embedded_load_s": 21.11,
+        "event_types": {
+          "infer.activity_ref": 342610,
+          "infer.artifact": 1,
+          "infer.capabilities": 2
+        },
+        "invariants": {
+          "accounting_equal": true,
+          "events_equal": true,
+          "graphs_equal": true
+        },
+        "linked": 0,
+        "python": "3.12.15",
+        "revision": "078458cdbf9ca28984b88f8d1b5a361836fbea13",
+        "saved_bytes": 185008952,
+        "saved_percent": 32.19390050115995,
+        "scenario_s": 109.4,
+        "semantic_events": 342613,
+        "trace": "/__modal/volumes/vo-JQupOkikZfTnlJoSA5DoOP/runs/20261024T134153Z-f61030/traces/rank0.1792849684968577725.pt.trace.json.gz",
+        "trace_bytes": 19202248,
+        "trace_sha256": "2cf2bcd77c14cbcb99caeca1a6240d0a083760ac825d29454fb232568e685540",
+        "unmeasured": 0,
+        "unresolved": 342610,
+        "working_tree_dirty": false
+      }
+    },
+    "launch": {
+      "baseline": {
+        "bytes": 80324969,
+        "device_clock_totals": [
+          {
+            "activity_count": 48494,
+            "busy_ns": 60996570846,
+            "clock_domain": "kineto:modal:kineto:rank0.1792849684968577725.pt.trace.json.gz:cce1a804d48f",
+            "clock_kind": "device",
+            "device_uuid": "GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f",
+            "summed_activity_ns": 60998377928
+          }
+        ],
+        "event_types": {
+          "infer.activity_ref": 48494,
+          "infer.artifact": 1,
+          "infer.capabilities": 2
+        },
+        "import_s": 17.21,
+        "load_s": 2.5,
+        "physical_lines": 48497,
+        "semantic_events": 48497
+      },
+      "revision": {
+        "activity_count": 48494,
+        "capture_summary": {
+          "already_imported": [],
+          "traces": [
+            {
+              "activity_records": 48494,
+              "cupti_version": "130001",
+              "detail": "launch",
+              "devices": {
+                "0": {
+                  "busy_ns": 60996570846,
+                  "device_uuid": "GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f",
+                  "device_uuid_source": "option",
+                  "launch_span_ns": 61018448816,
+                  "name": "NVIDIA L4",
+                  "summed_ns": 61007254459
+                }
+              },
+              "engine_version": "0.30.0",
+              "event_loss": null,
+              "event_loss_note": "the trace does not report dropped CUPTI records",
+              "format": "kineto",
+              "gpu_events": 342610,
+              "graph_gpu_events": 296074,
+              "host": "modal",
+              "linked_gpu_events": 0,
+              "not_imported": {},
+              "notes": [],
+              "path": "/__modal/volumes/vo-JQupOkikZfTnlJoSA5DoOP/runs/20261024T134153Z-f61030/traces/rank0.1792849684968577725.pt.trace.json.gz",
+              "processes": [
+                51
+              ],
+              "rank": 0,
+              "trace_id": "BBEDC42BC2F840DEB7C11F32F9396DFB",
+              "unresolved_gpu_events": {
+                "launch_outside_iteration_range": 342610
+              }
+            }
+          ]
+        },
+        "command": "/usr/local/bin/python -m examples.scenarios.context_compaction_scenario --trace /data/runs/20261024T134153Z-f61030/traces/rank0.1792849684968577725.pt.trace.json.gz --detail launch --device-uuid 0=GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f --output-dir /tmp/launch/revision",
+        "compact": {
+          "bytes": 54138657,
+          "physical_lines": 48500
+        },
+        "compact_load_s": 2.24,
+        "comparison": "paired encodings of the same production import",
+        "context_definitions": 3,
+        "detail": "launch",
+        "device_clock_totals": [
+          {
+            "activity_count": 48494,
+            "busy_ns": 60996570846,
+            "clock_domain": "kineto:modal:kineto:rank0.1792849684968577725.pt.trace.json.gz:cce1a804d48f",
+            "clock_kind": "device",
+            "device_uuid": "GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f",
+            "summed_activity_ns": 60998377928
+          }
+        ],
+        "device_uuid_overrides": [
+          "0=GPU-9846d012-7110-c9d8-bb7f-698bbc6d6d7f"
+        ],
+        "embedded": {
+          "bytes": 80324969,
+          "physical_lines": 48497
+        },
+        "embedded_load_s": 2.85,
+        "event_types": {
+          "infer.activity_ref": 48494,
+          "infer.artifact": 1,
+          "infer.capabilities": 2
+        },
+        "invariants": {
+          "accounting_equal": true,
+          "events_equal": true,
+          "graphs_equal": true
+        },
+        "linked": 0,
+        "python": "3.12.15",
+        "revision": "078458cdbf9ca28984b88f8d1b5a361836fbea13",
+        "saved_bytes": 26186312,
+        "saved_percent": 32.60046325072344,
+        "scenario_s": 30.9,
+        "semantic_events": 48497,
+        "trace": "/__modal/volumes/vo-JQupOkikZfTnlJoSA5DoOP/runs/20261024T134153Z-f61030/traces/rank0.1792849684968577725.pt.trace.json.gz",
+        "trace_bytes": 19202248,
+        "trace_sha256": "2cf2bcd77c14cbcb99caeca1a6240d0a083760ac825d29454fb232568e685540",
+        "unmeasured": 0,
+        "unresolved": 48494,
+        "working_tree_dirty": false
+      }
+    }
+  },
+  "harness": {
+    "path": "examples/scenarios/modal_audit_compaction.py",
+    "sha256": "76012a28ee621e4b2c3159ca93cf50c19c692a00874cccebeb8d1517296e57ee"
+  },
+  "repository": "https://github.com/Silas-Asamoah/stormlog.git",
+  "revision": "078458cdbf9ca28984b88f8d1b5a361836fbea13",
+  "workload": "the #216 audit workload: Qwen2.5-7B-Instruct, 64 requests in flight"
+}

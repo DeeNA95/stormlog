@@ -24,7 +24,7 @@ from .correlation_codec import (
     ContextRegistry,
     CorrelationRecordDecoder,
     CorrelationRecordEncoder,
-    iter_inference_records,
+    iter_inference_events,
 )
 from .correlation_events import (
     ActivityReferenceEvent,
@@ -33,7 +33,6 @@ from .correlation_events import (
     CorrelationEvent,
     EntityRef,
     InferenceRecord,
-    parse_inference_record,
 )
 from .host_clock import host_boot_id, wall_clock_domain
 
@@ -169,13 +168,7 @@ def _validate_existing_artifact(
     artifact: Path, run_id: str, session_id: str
 ) -> tuple[tuple[InferenceRecord, ...], ContextRegistry]:
     decoder = CorrelationRecordDecoder()
-    records_list: list[InferenceRecord] = []
-    for line, raw in iter_inference_records(artifact, decoder):
-        try:
-            records_list.append(parse_inference_record(raw))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"line {line}: {exc}") from exc
-    records = tuple(records_list)
+    records = tuple(event for _, event in iter_inference_events(artifact, decoder))
     for record in records:
         original = record.to_record()
         context = original.get("context")
