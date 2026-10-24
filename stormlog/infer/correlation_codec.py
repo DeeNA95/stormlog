@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from .correlation_events import (
     CONTEXT_REFERENCE_SCHEMA_VERSION,
     CorrelationContext,
     CorrelationEvent,
+    InferenceRecord,
     is_correlation_event_type,
     parse_inference_record,
 )
+
+_T = TypeVar("_T")
 
 
 def _context(payload: object) -> CorrelationContext:
@@ -85,27 +88,55 @@ class CorrelationRecordDecoder:
 
     def __init__(self) -> None:
         self.registry = ContextRegistry()
+        # Each context as a dict, built once per ID: asdict on every reference
+        # cost about a third of reading a compact artifact.
+        self._context_dicts: dict[str, dict[str, Any]] = {}
 
     def decode(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The record with its context restored; None for a definition."""
+        expanded, compact = self._expand(record)
+        if expanded is not None and compact:
+            _validate_expanded(expanded)
+        return expanded
+
+    def decode_event(self, record: Mapping[str, Any]) -> InferenceRecord | None:
+        """The record as a typed event, parsed once; None for a definition."""
+        expanded, compact = self._expand(record)
+        if expanded is None:
+            return None
+        if compact:
+            _reject_null_intervals(expanded)
+        return parse_inference_record(expanded)
+
+    def _expand(self, record: Mapping[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+        """The record with its context restored, and whether it was compact."""
         version = record.get("schema_version", 1)
         definition = record.get("event_type") == "infer.context"
         transport = definition or "context_id" in record or version == 4
         if not transport:
-            return dict(record)
+            return dict(record), False
         if type(version) is not int or version != CONTEXT_REFERENCE_SCHEMA_VERSION:
             raise ValueError("context transport requires schema_version 4")
         identity = _context_id(record.get("context_id"))
         if definition:
             self._define(record, identity)
-            return None
+            return None, False
         if "context" in record:
             raise ValueError("v4 event must have context_id and no context")
         expanded = dict(record)
         del expanded["context_id"]
-        expanded["context"] = asdict(self.registry.lookup(identity))
+        expanded["context"] = self._context_dict(identity)
         expanded["schema_version"] = _embedded_version(record)
-        _validate_expanded(expanded)
-        return expanded
+        return expanded, True
+
+    def _context_dict(self, identity: str) -> dict[str, Any]:
+        cached = self._context_dicts.get(identity)
+        if cached is None:
+            cached = asdict(self.registry.lookup(identity))
+            self._context_dicts[identity] = cached
+        # Context values are strings, integers or None, so a shallow copy
+        # leaves the cache untouched when a caller edits the result.
+        return dict(cached)
 
     def _define(self, record: Mapping[str, Any], identity: str) -> None:
         if set(record) != {"schema_version", "event_type", "context_id", "context"}:
@@ -137,12 +168,16 @@ def _null_intervals(record: Mapping[str, Any]) -> bool:
     )
 
 
-def _validate_expanded(expanded: Mapping[str, Any]) -> None:
+def _reject_null_intervals(expanded: Mapping[str, Any]) -> None:
     if _null_intervals(expanded):
         raise ValueError(
             "metadata.intervals must be a non-empty list of [offset_ns, duration_ns] "
             "pairs"
         )
+
+
+def _validate_expanded(expanded: Mapping[str, Any]) -> None:
+    _reject_null_intervals(expanded)
     parse_inference_record(expanded)
 
 
@@ -223,10 +258,10 @@ def expand_inference_records(
     return expanded
 
 
-def iter_inference_records(
-    path: str | Path, decoder: CorrelationRecordDecoder | None = None
-) -> Iterator[tuple[int, dict[str, Any]]]:
-    decoder = decoder if decoder is not None else CorrelationRecordDecoder()
+def _decoded_lines(
+    path: str | Path, decode: Callable[[Mapping[str, Any]], _T | None]
+) -> Iterator[tuple[int, _T]]:
+    """Each line's decoded value with its physical line number."""
     with Path(path).open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
@@ -235,11 +270,27 @@ def iter_inference_records(
                 record = json.loads(line)
                 if not isinstance(record, dict):
                     raise ValueError("record must be an object")
-                expanded = decoder.decode(record)
+                value = decode(record)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"line {line_number}: {exc}") from exc
-            if expanded is not None:
-                yield line_number, expanded
+            if value is not None:
+                yield line_number, value
+
+
+def iter_inference_records(
+    path: str | Path, decoder: CorrelationRecordDecoder | None = None
+) -> Iterator[tuple[int, dict[str, Any]]]:
+    """Expanded record dicts, definitions consumed, with physical line numbers."""
+    decoder = decoder if decoder is not None else CorrelationRecordDecoder()
+    return _decoded_lines(path, decoder.decode)
+
+
+def iter_inference_events(
+    path: str | Path, decoder: CorrelationRecordDecoder | None = None
+) -> Iterator[tuple[int, InferenceRecord]]:
+    """Typed events, each parsed once, with physical line numbers."""
+    decoder = decoder if decoder is not None else CorrelationRecordDecoder()
+    return _decoded_lines(path, decoder.decode_event)
 
 
 def read_inference_records(path: str | Path) -> list[dict[str, Any]]:

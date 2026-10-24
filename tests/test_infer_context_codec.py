@@ -69,6 +69,41 @@ def test_shared_context_roundtrip_and_schema(tmp_path: Path) -> None:
     assert expanded[1]["context"]["run_id"] == "run"
 
 
+def test_editing_an_expanded_context_leaves_later_records_intact() -> None:
+    from stormlog.infer.correlation_codec import CorrelationRecordDecoder
+
+    event = _event()
+    definition, first = CorrelationRecordEncoder().encode(event.to_record())
+    decoder = CorrelationRecordDecoder()
+    decoder.decode(definition)
+    expanded = decoder.decode(first)
+    assert expanded is not None
+    expanded["context"]["run_id"] = "changed"
+    assert decoder.decode_event(first) == event
+
+
+def test_loading_parses_each_record_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from stormlog.infer import correlation_codec
+
+    events = [replace(_event(), event_id=str(i)) for i in range(3)]
+    path = tmp_path / "events.jsonl"
+    with JsonlEventWriter(path) as writer:
+        for event in events:
+            writer.append(event.to_record())
+    parsed = []
+    real = correlation_codec.parse_inference_record
+
+    def counting(record: Any) -> Any:
+        parsed.append(record["event_id"])
+        return real(record)
+
+    monkeypatch.setattr(correlation_codec, "parse_inference_record", counting)
+    assert load_inference_artifact(path) == events
+    assert parsed == ["0", "1", "2"]
+
+
 def test_run_summary_expands_compact_artifact_identity() -> None:
     from stormlog.infer.run_summary import summary_from_records
 
