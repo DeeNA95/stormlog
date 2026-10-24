@@ -16,6 +16,7 @@ Release dates are the GitHub release publication dates.
   ([#259](https://github.com/Silas-Asamoah/stormlog/issues/259)). The loader
   restores complete events and continues reading legacy and mixed artifacts.
   Compact artifacts require a reader supporting v4; accounting is unchanged.
+  On the #216 audit workload, compact artifacts are about 32% smaller.
 
 Inference workload control for
 [#212](https://github.com/Silas-Asamoah/stormlog/issues/212)

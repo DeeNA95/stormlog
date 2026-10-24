@@ -540,15 +540,9 @@ def _parse_ref_fields(values: dict[str, Any]) -> None:
 
 def load_inference_artifact(path: str | Path) -> list[InferenceRecord]:
     """Read mixed legacy and correlation records in their original order."""
-    from .correlation_codec import iter_inference_records
+    from .correlation_codec import iter_inference_events
 
-    events: list[InferenceRecord] = []
-    for line_number, record in iter_inference_records(path):
-        try:
-            events.append(parse_inference_record(record))
-        except (ValueError, TypeError) as exc:
-            raise ValueError(f"line {line_number}: {exc}") from exc
-    return events
+    return [event for _, event in iter_inference_events(path)]
 
 
 __all__ = [

@@ -34,6 +34,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from stormlog.infer.correlation_codec import expand_inference_records
 from stormlog.infer.host_clock import host_boot_id, wall_clock_domain
 from stormlog.infer.qualify.ground_truth import (
     Expectation,
@@ -933,12 +934,7 @@ class InjectionRun:
         raise TimeoutError("the victim never started measuring")
 
     def _victim_records(self) -> list[dict[str, Any]]:
-        path = self.directory.run / "victim.jsonl"
-        if not path.exists():
-            return []
-        data = path.read_bytes()
-        complete = data[: data.rfind(b"\n") + 1]
-        return [json.loads(line) for line in complete.splitlines() if line.strip()]
+        return _complete_records(self.directory.run / "victim.jsonl")
 
     def _sleep_until(self, at_ns: int) -> None:
         """Sleep until ``at_ns`` on the run's clock, a slice at a time: these
@@ -1197,6 +1193,17 @@ def name_engine(
     return tuple(
         replace(e, engine=producer) if e.component in ENGINE_COMPONENTS else e
         for e in expects
+    )
+
+
+def _complete_records(path: Path) -> list[dict[str, Any]]:
+    """The records on a growing artifact's complete lines, contexts restored."""
+    if not path.exists():
+        return []
+    data = path.read_bytes()
+    complete = data[: data.rfind(b"\n") + 1]
+    return expand_inference_records(
+        json.loads(line) for line in complete.splitlines() if line.strip()
     )
 
 
