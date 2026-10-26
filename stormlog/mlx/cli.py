@@ -118,7 +118,8 @@ def _emit(args: argparse.Namespace, payload: dict[str, Any]) -> None:
         print(payload.get("summary", "MLX allocator in this process"))
         if payload.get("artifact_dir"):
             print(f"Artifacts: {payload['artifact_dir']}")
-        if payload.get("error"):
+        # A failed command's summary is often its error; say it once.
+        if payload.get("error") and payload["error"] != payload.get("summary"):
             print(payload["error"], file=sys.stderr)
 
 

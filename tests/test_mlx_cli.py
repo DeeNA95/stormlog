@@ -265,3 +265,12 @@ def test_capture_options_name_the_invalid_setting(name: str) -> None:
     options: dict[str, Any] = {name: -1.0}
     with pytest.raises(ValueError, match=f"{name} must be positive"):
         CaptureOptions(**options)
+
+
+def test_text_mode_prints_an_analyze_error_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "missing.json"
+    assert main(["analyze", str(missing), "--output", str(tmp_path / "out")]) == 5
+    captured = capsys.readouterr()
+    assert (captured.out + captured.err).count(str(missing)) == 1
