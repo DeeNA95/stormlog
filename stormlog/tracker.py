@@ -903,11 +903,13 @@ class MemoryTracker:
         allocated: Optional[int],
         reserved: Optional[int],
     ) -> bool:
-        # Fragmentation warning
+        # Fragmentation warning. With nothing allocated the reserved pool is
+        # idle cache, not fragmented memory, and every sample would warn.
         if (
             self.collector_capabilities.supports_fragmentation_analysis
             and reserved is not None
             and allocated is not None
+            and allocated > 0
             and reserved > 0
         ):
             fragmentation = (reserved - allocated) / reserved

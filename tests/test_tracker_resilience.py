@@ -932,3 +932,23 @@ def test_memory_tracker_emits_structured_phase_boundaries(
     assert enter_scope.attributes == {"microbatch": 4}
     assert exit_scope.scope_id == enter_scope.scope_id
     assert exit_scope.path == enter_scope.path
+
+
+@pytest.mark.parametrize(
+    ("allocated", "reserved", "warned"),
+    [(0, 384 * 1024, False), (128, 1024, True), (900, 1024, False)],
+)
+def test_fragmentation_warns_only_with_memory_allocated(
+    monkeypatch: pytest.MonkeyPatch, allocated: int, reserved: int, warned: bool
+) -> None:
+    sample = _sample(allocated=allocated, reserved=reserved)
+    collector = _SequencedCollector([DeviceMemorySampleResult(sample=sample)])
+    tracker = _build_tracker(monkeypatch, collector)
+
+    emitted = tracker._check_fragmentation_alert(
+        None, sample=sample, allocated=allocated, reserved=reserved
+    )
+
+    contexts = [event.context or "" for event in tracker.get_events()]
+    assert emitted is warned
+    assert any(c.startswith("High fragmentation") for c in contexts) is warned
