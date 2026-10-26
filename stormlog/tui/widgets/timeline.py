@@ -9,6 +9,18 @@ from textual.widgets import Static
 from stormlog.timeline_markers import TimelineMarker
 
 
+def _mounted_chart_width(widget: Static, decoration: int) -> int | None:
+    """Columns a chart line can use once the widget has been laid out."""
+    width = widget.content_size.width - decoration
+    return width if width > 0 else None
+
+
+def _stretch(values: Sequence[Any], width: int) -> list[Any]:
+    """Repeat each sample so a short series spans ``width`` columns."""
+    count = len(values)
+    return [values[index * count // width] for index in range(width)]
+
+
 class TimelineCanvas(Static):
     """ASCII timeline renderer for quick visual feedback."""
 
@@ -92,12 +104,17 @@ class TimelineCanvas(Static):
     def _resample(self, values: Sequence[float | None]) -> list[float | None]:
         if not values:
             return []
-        if len(values) <= self.canvas_width:
+        # Laid out, the chart spans the widget: "[" and "]" take two columns.
+        mounted = _mounted_chart_width(self, 2)
+        width = mounted or self.canvas_width
+        if len(values) <= width:
+            if mounted and len(values) > 1:
+                return _stretch(values, width)
             return list(values)
 
-        step = len(values) / self.canvas_width
+        step = len(values) / width
         sampled = []
-        for i in range(self.canvas_width):
+        for i in range(width):
             idx = min(int(round(i * step)), len(values) - 1)
             start = int(i * step)
             end = min(len(values), int((i + 1) * step) + 1)
@@ -219,12 +236,17 @@ class DistributedTimelineCanvas(Static):
     def _resample(self, values: Sequence[float]) -> list[float]:
         if not values:
             return []
-        if len(values) <= self.canvas_width:
+        # Laid out, the chart spans the widget after its indent and brackets.
+        mounted = _mounted_chart_width(self, 6)
+        width = mounted or self.canvas_width
+        if len(values) <= width:
+            if mounted and len(values) > 1:
+                return _stretch(values, width)
             return list(values)
 
-        step = len(values) / self.canvas_width
+        step = len(values) / width
         sampled = []
-        for index in range(self.canvas_width):
+        for index in range(width):
             source_index = min(int(round(index * step)), len(values) - 1)
             sampled.append(values[source_index])
         return sampled
