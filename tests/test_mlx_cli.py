@@ -256,3 +256,12 @@ def test_capture_options_refuse_a_buffer_smaller_than_a_record() -> None:
     with pytest.raises(ValueError, match="max_buffer_bytes must be at least"):
         CaptureOptions(max_buffer_bytes=MIN_BUFFER_BYTES - 1)
     assert CaptureOptions(max_buffer_bytes=MIN_BUFFER_BYTES).max_buffer_bytes
+
+
+@pytest.mark.parametrize("name", ["interval", "alert_threshold_mb"])
+def test_capture_options_name_the_invalid_setting(name: str) -> None:
+    from stormlog.mlx.artifacts import CaptureOptions
+
+    options: dict[str, Any] = {name: -1.0}
+    with pytest.raises(ValueError, match=f"{name} must be positive"):
+        CaptureOptions(**options)

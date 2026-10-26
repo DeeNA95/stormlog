@@ -51,9 +51,9 @@ class CaptureOptions:
     world_size: int | None = None
 
     def __post_init__(self) -> None:
-        positive_interval(self.interval)
+        positive_interval(self.interval, "interval")
         if self.alert_threshold_mb is not None:
-            positive_interval(self.alert_threshold_mb)
+            positive_interval(self.alert_threshold_mb, "alert_threshold_mb")
         for name in (
             "max_history",
             "rollover_max_events",
