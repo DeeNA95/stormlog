@@ -150,8 +150,11 @@ class MemoryTracker:
             )
             self._sink = None
             if self._sink_config is not None:
-                self._sink = AppendOnlyTelemetrySink(self._sink_config)
-                self._sink.start_session(self._session)
+                # Keep the sink only once its session has started: cleanup
+                # after a failed start would otherwise reopen it and write.
+                sink = AppendOnlyTelemetrySink(self._sink_config)
+                sink.start_session(self._session)
+                self._sink = sink
 
     def stop_tracking(self, *, status: str | None = None) -> TrackingResult | None:
         with self._lifecycle_lock:

@@ -193,6 +193,7 @@ def test_failed_sink_start_does_not_leave_running_session(
         tracker.start_tracking()
     assert not tracker.is_tracking
     assert tracker.session_summary.status == "incomplete"
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
 
 
 def test_alerts_are_bounded_without_allocator_mutations() -> None:
