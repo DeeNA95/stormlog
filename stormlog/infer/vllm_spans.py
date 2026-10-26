@@ -999,8 +999,12 @@ class OtlpSpanReceiver:
         if not self._enqueue(spans, media, handler.client_address[0]):
             _respond_busy(handler)
             return
-        # An empty ExportTraceServiceResponse is valid in either encoding.
-        _respond(handler, 200, b"" if media == PROTOBUF_MEDIA else b"{}", media)
+        # An empty ExportTraceServiceResponse is valid in either encoding. Name
+        # it with our own constant, never the request's header text.
+        if media == PROTOBUF_MEDIA:
+            _respond(handler, 200, b"", PROTOBUF_MEDIA)
+        else:
+            _respond(handler, 200, b"{}", JSON_MEDIA)
 
     def _decode(
         self,
