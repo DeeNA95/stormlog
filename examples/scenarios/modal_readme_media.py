@@ -426,7 +426,24 @@ def _png(svg: Path) -> Path | None:
         capture_output=True,
         timeout=120,
     )
+    _shrink(png)
     return png
+
+
+def _shrink(png: Path) -> None:
+    """A 256-colour palette: a terminal has few colours, and the repository
+    refuses files over 500 KB. Skipped without Pillow."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return
+    with Image.open(png) as image:
+        palette = image.convert("RGB").quantize(
+            colors=256,
+            method=Image.Quantize.FASTOCTREE,
+            dither=Image.Dither.NONE,
+        )
+    palette.save(png, optimize=True)
 
 
 @app.local_entrypoint()  # type: ignore[misc]
