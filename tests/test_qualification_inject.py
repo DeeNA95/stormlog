@@ -2360,7 +2360,7 @@ def _fail_with_signals_pending(*signums: int) -> None:
     libc = ctypes.PyDLL(None)
     # Opaque, aligned storage: sigset_t is 128 bytes on Linux and 4 on macOS.
     saved_mask = (ctypes.c_uint64 * 16)()
-    change_mask = libc.pthread_sigmask
+    change_mask: Any = libc.pthread_sigmask
     change_mask.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
     change_mask.restype = ctypes.c_int
     assert change_mask(signal.SIG_SETMASK, None, saved_mask) == 0
