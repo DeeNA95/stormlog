@@ -145,11 +145,8 @@ except ImportError:
     Figlet = None
 
 
-WELCOME_MESSAGES = [
-    "Stormlog",
-    "Live Monitoring & Watchdogs",
-    "CLI · Docs · Examples",
-]
+# One message: longer ones wrap to twice the banner's height.
+WELCOME_MESSAGES = ["Stormlog"]
 _VIZ_INSTALL_GUIDANCE = (
     "Visualization dependencies are unavailable. "
     "Install with `pip install 'stormlog[viz]'`."
@@ -322,7 +319,13 @@ class GPUMemoryProfilerTUI(App):
     def _overview_markdown(self) -> str:
         if self.framework == "mlx":
             system = get_host_info()
-            return f"# System Overview\nPlatform: {system['platform']} / {system['architecture']}\nPython: {system['python_version']}\nMLX is initialized only by an explicit runtime action."
+            return (
+                "## System\n\n"
+                f"- **Platform**: {system['platform']} / {system['architecture']}\n"
+                f"- **Python**: {system['python_version']}\n\n"
+                "MLX starts only when you ask for runtime info, a sample or "
+                "tracking in the MLX tab."
+            )
         return _build_system_markdown()
 
     async def refresh_mlx_info(self) -> None:

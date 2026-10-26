@@ -7,39 +7,31 @@ from typing import Any
 
 
 def build_welcome_info() -> str:
-    """Build welcome navigation guide text."""
+    """Build the overview's guide to the tabs and keys."""
     return dedent(
         """
-        # Quick Start Guide
+        ## Tabs
 
-        ## Navigate the TUI
+        - **PyTorch**, **TensorFlow**: device memory now, and the profiles
+          recorded in this process
+        - **MLX**: the Apple Silicon allocator, samples and saved MLX artifacts
+        - **Monitoring**: live tracking, alert thresholds, cleanup, CSV or
+          JSON export
+        - **Visualizations**: the tracked timeline, saved as PNG or HTML
+        - **Diagnostics**: compare ranks from live tracking or saved artifacts
+        - **CLI & Actions**: run `gpumemprof` and `tfmemprof` commands and
+          sample workloads
 
-        Click on any tab above to explore different features:
+        ## Keys
 
-        - **PyTorch** → View PyTorch GPU stats, run profiling samples, and see profile results
-        - **TensorFlow** → View TensorFlow GPU stats, run profiling samples, and see profile results
-        - **Monitoring** → Start live memory tracking, set alert thresholds, export CSV/JSON data
-        - **Visualizations** → Generate timeline plots (PNG/HTML) from tracking sessions
-        - **Diagnostics** → Compare distributed ranks, hidden gaps, and first-cause indicators
-        - **CLI & Actions** → Run CLI commands interactively and execute sample workloads
+        `q` quit · `r` refresh this overview · `f` focus the command log ·
+        `g` and `t` log `gpumemprof` and `tfmemprof` examples
 
-        ## Keyboard Shortcuts
+        ## Inference
 
-        - **r** - Refresh overview tab
-        - **g** - Log gpumemprof command examples
-        - **t** - Log tfmemprof command examples
-        - **f** - Focus log area in CLI tab
-        - **q** - Quit application
-
-        ## Getting Started
-
-        1. **Check System Info** - Scroll down to see your platform, Python version, and GPU details
-        2. **View GPU Stats** - Visit **PyTorch** or **TensorFlow** tabs to see real-time GPU memory statistics
-        3. **Start Tracking** - Go to **Monitoring** tab and click "Start Live Tracking" to begin monitoring
-        4. **Run Samples** - Use **CLI & Actions** tab to run sample workloads and see profiling results
-        5. **Export Data** - After tracking, use "Export CSV" or "Export JSON" buttons in Monitoring tab
-
-        ---
+        Profiling an LLM server? `stormlog infer profile` measures it and
+        `stormlog infer diagnose` explains its slow requests. Both run from
+        the shell; see `stormlog infer --help`.
         """
     ).strip()
 
@@ -52,7 +44,7 @@ def build_system_markdown(
     tf_gpu_info: dict[str, Any],
 ) -> str:
     lines = [
-        "# System Overview",
+        "## System",
         "",
         f"- **Platform**: {system_info.get('platform', 'Unknown')}",
         f"- **Python**: {system_info.get('python_version', 'Unknown')}",
@@ -70,7 +62,7 @@ def build_system_markdown(
 
     if gpu_info:
         lines.append("")
-        lines.append("## GPU Snapshot")
+        lines.append("## GPU")
         lines.extend(
             [
                 f"- **Device Name**: {gpu_info.get('device_name', 'Unknown')}",
@@ -89,7 +81,7 @@ def build_system_markdown(
     lines.append("")
     if tf_gpu_info and tf_gpu_info.get("devices"):
         lines.append("")
-        lines.append("## TensorFlow GPU Snapshot")
+        lines.append("## TensorFlow GPU")
         device = tf_gpu_info["devices"][0]
         lines.extend(
             [
@@ -100,15 +92,13 @@ def build_system_markdown(
         )
 
     lines.append("")
-    lines.append("## Getting Started")
+    lines.append("## First commands")
     lines.append("")
-    lines.append("- `python -m examples.basic.pytorch_demo`")
-    lines.append("- `python -m examples.basic.tensorflow_demo`")
-    lines.append("- `python -m examples.cli.quickstart`")
+    lines.append("- `gpumemprof info`")
+    lines.append("- `gpumemprof track --duration 60 --output tracking.json`")
+    lines.append("- `gpumemprof diagnose --duration 0 --output artifacts/diag`")
     lines.append("")
-    lines.append(
-        "Need more? Visit the [Example Test Guides](docs/examples/test_guides/README.md)."
-    )
+    lines.append("Docs: https://stormlog.readthedocs.io")
     return "\n".join(lines)
 
 
@@ -144,69 +134,41 @@ def build_tensorflow_stats_rows(gpu_info: dict[str, Any]) -> list[dict[str, Any]
 def build_framework_markdown(framework: str) -> str:
     if framework == "mlx":
         return dedent(
-            """            # MLX Metal allocator
-            Install `stormlog[mlx,tui]` on native Apple Silicon macOS.
-            Minimum MLX: 0.32.3. Runtime availability is checked only on request.
-            Active allocations, reusable cache, native lifetime peak and process RSS
-            have different scopes. Device free/total and fragmentation are unavailable.
-            Live tracking observes this TUI process; load saved artifacts for other processes.
-            Profiles evaluate explicit roots and report synchronized host time.
-            CLI: `mlxmemprof run --output artifacts/mlx-run -- script.py`
-            Offline: `mlxmemprof analyze artifacts/mlx-run`
+            """
+            **MLX** on native Apple Silicon: install `stormlog[mlx,tui]` (MLX
+            0.32.3 or newer). Active allocations, reusable cache, the native
+            lifetime peak and process RSS have different scopes; device
+            free/total and fragmentation are unavailable. Profiles evaluate
+            explicit roots and report synchronized host time.
+
+            For another process, capture it with
+            `mlxmemprof run --output artifacts/mlx-run -- script.py`, then load
+            the bundle below or run `mlxmemprof analyze artifacts/mlx-run`.
             """
         ).strip()
     if framework == "pytorch":
         return dedent(
             """
-            # PyTorch Playbook
+            **PyTorch** device memory as PyTorch reports it, and the profiles
+            recorded in this process with `profile_function` or
+            `profile_context`. **PyTorch Sample** in CLI & Actions records one.
 
-            1. **Basic profiling**
-               ```bash
-               python -m examples.basic.pytorch_demo
-               ```
-            2. **Advanced tracking (alerts, watchdog)**
-               ```bash
-               python -m examples.advanced.tracking_demo
-               ```
-            3. **Telemetry + diagnostics**
-               ```bash
-               python -m examples.scenarios.mps_telemetry_scenario
-               python -m examples.scenarios.oom_flight_recorder_scenario --mode simulated
-               gpumemprof diagnose --duration 0 --output ./artifacts/diag
-               ```
-            4. **CLI helpers**
-               ```bash
-               gpumemprof info
-               gpumemprof track --duration 60 --output tracking.json
-               ```
-
-            Check the [PyTorch Testing Guide](docs/pytorch_testing_guide.md) for
-            full workflows and troubleshooting steps.
+            From the shell: `gpumemprof track --duration 60 --output
+            tracking.json` and `gpumemprof diagnose --duration 0 --output
+            artifacts/diag`. Guide:
+            https://stormlog.readthedocs.io/en/latest/pytorch_testing_guide.html
             """
         ).strip()
 
     return dedent(
         """
-        # TensorFlow Playbook
+        **TensorFlow** device memory as TensorFlow reports it, and the
+        profiles recorded in this process. **TensorFlow Sample** in CLI &
+        Actions records one.
 
-        1. **Basic profiling**
-           ```bash
-           python -m examples.basic.tensorflow_demo
-           ```
-        2. **CLI helpers**
-           ```bash
-           tfmemprof info
-           tfmemprof monitor --duration 30 --interval 0.5
-           tfmemprof track --output tf_results.json
-           ```
-        3. **Telemetry + diagnostics**
-           ```bash
-           python -m examples.scenarios.tf_end_to_end_scenario
-           tfmemprof diagnose --duration 0 --output ./artifacts/tf-diag
-           ```
-
-        The [TensorFlow Testing Guide](docs/tensorflow_testing_guide.md) includes
-        deeper recipes, including mixed precision and multi-GPU notes.
+        From the shell: `tfmemprof track --output tf_results.json` and
+        `tfmemprof diagnose --duration 0 --output artifacts/tf-diag`. Guide:
+        https://stormlog.readthedocs.io/en/latest/tensorflow_testing_guide.html
         """
     ).strip()
 
@@ -214,30 +176,10 @@ def build_framework_markdown(framework: str) -> str:
 def build_cli_markdown() -> str:
     return dedent(
         """
-        # CLI Quick Samples
-
-        ```bash
-        gpumemprof info
-        gpumemprof monitor --duration 30 --interval 0.5
-        gpumemprof track --duration 60 --output tracking.json
-        gpumemprof diagnose --duration 0 --output artifacts/diag
-
-        tfmemprof info
-        tfmemprof monitor --duration 30 --interval 0.5
-        tfmemprof track --duration 60 --output tf_tracking.json
-        tfmemprof diagnose --duration 0 --output artifacts/tf_diag
-
-        python -m examples.scenarios.oom_flight_recorder_scenario --mode simulated
-        python -m examples.cli.capability_matrix --mode smoke --target both --oom-mode simulated --skip-tui
-
-        # Optional: fuller dashboard
-        stormlog
-
-        # Ensure pip shows progress
-        pip install --progress-bar on "stormlog[tui,torch]"
-        ```
-
-        Use the buttons below to log summaries or copy commands.
+        Run a command and read its output below: `gpumemprof` for PyTorch,
+        `tfmemprof` for TensorFlow, `mlxmemprof` for MLX, and
+        `stormlog infer` for inference servers. **OOM Scenario** and
+        **Capability Matrix** run examples from a source checkout.
         """
     ).strip()
 
@@ -245,12 +187,10 @@ def build_cli_markdown() -> str:
 def build_visual_markdown() -> str:
     return dedent(
         """
-        # Visualization Tips
-
-        - Start live tracking to collect timeline samples, then refresh the view.
-        - Use `Generate PNG Plot` to save a Matplotlib graph (writes to ./visualizations).
-        - Prefer `Generate HTML Plot` for an interactive Plotly view you can open in a browser.
-        - A lightweight ASCII chart appears below so you can inspect trends without leaving the terminal.
+        The live tracking session's timeline. **Refresh Timeline** redraws
+        it; **Generate PNG Plot** (Matplotlib) and **Generate HTML Plot**
+        (interactive Plotly) save it under `./visualizations` and need
+        `stormlog[viz]`.
         """
     ).strip()
 
@@ -258,13 +198,11 @@ def build_visual_markdown() -> str:
 def build_diagnostics_markdown() -> str:
     return dedent(
         """
-        # Distributed Diagnostics
-
-        - **Load Live** to read telemetry directly from the active tracker session.
-        - **Load Artifacts** to merge JSON/CSV exports or diagnose directories.
-        - Use **Rank Filter** (`all`, `0,2,4-7`) to narrow the comparison set.
-        - Select a rank in the table to pin timeline focus.
-        - Review **earliest** and **most severe** first-cause indicators in the anomaly summary.
+        Compare the ranks of one run. **Load Live** reads the tracking
+        session; **Load Artifacts** merges JSON or CSV exports and diagnose
+        directories, given as comma-separated paths. Filter ranks with `all`
+        or `0,2,4-7`, select a rank to focus its timeline, and read the
+        earliest and most severe first-cause indicators below.
         """
     ).strip()
 
