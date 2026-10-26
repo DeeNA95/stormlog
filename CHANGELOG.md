@@ -539,8 +539,9 @@ the flaky benchmark memory gates
 ### Changed
 
 - The terminal UI is titled Stormlog. Its tabs have compact, labelled controls;
-  timelines span the panel in block elements; repeated alerts share one row
-  with a count, newest first; and the MLX tab describes its device in words.
+  timelines span the panel in coloured block elements, one colour per series;
+  repeated alerts share one row with a count, newest first; Diagnostics names
+  each indicator's phase; and the MLX tab describes its device in words.
 - The README is rewritten around training and inference, with screenshots
   taken on an NVIDIA L4 by `examples/scenarios/modal_readme_media.py`.
 - **Breaking:** `stormlog infer analyze` JSON is `analysis_version: 2`.
@@ -662,8 +663,20 @@ the flaky benchmark memory gates
 - The terminal UI's Markdown guides rendered empty, the PyTorch and TensorFlow
   samples never reached their tabs, and controls on the Monitoring and
   Diagnostics tabs were clipped. All three are fixed.
-- `MemoryTracker` no longer warns "High fragmentation" when nothing is
-  allocated. On Apple MPS every sample used to raise the warning.
+- Fragmentation means inactive split blocks over reserved memory everywhere,
+  as `gpumemprof diagnose` already defined it: the tracker's warning, the
+  derived `fragmentation_ratio`, gap analysis's `fragmentation_like` and the
+  analyzer. They took reserved minus allocated, which is PyTorch's reusable
+  cache, so an ordinary ResNet-18 run on an L4 read about 96% and warned on
+  every sample; that share is now `allocator_cache_ratio`. Without an
+  inactive-split counter fragmentation is unavailable (`None`), and the MPS
+  and CPU collectors no longer claim fragmentation analysis. The advice for
+  fragmentation no longer suggests `torch.cuda.empty_cache()`.
+- `MemoryTracker`'s first sample sets its baseline. Memory allocated before
+  tracking started, such as a model already on the device, counted as a
+  large allocation of the session and became its earliest anomaly.
+- The TUI's PyTorch and TensorFlow samples log their own run, not the shared
+  profiler's running totals.
 - `stormlog infer analyze` no longer keeps the first of two different
   deliveries of a request's vLLM span. That request, and any request with more
   than one span, is quarantined: its spans are left out of the case's span

@@ -129,9 +129,9 @@ found, the Diagnostics tab defaults to the newest `completed` session and lets
 you switch to another one by entering its id in `Session` and applying it.
 Filter ranks in `Ranks`.
 
-If the loaded telemetry contains `phase_enter` / `phase_exit` records, rank rows
-and earliest-indicator details show the resolved phase path directly in the
-Diagnostics model.
+If the loaded telemetry contains `phase_enter` / `phase_exit` records, the
+indicator table's Phase column shows each indicator's resolved phase path,
+for example `epoch 1 / train`, and rank rows carry it in the Diagnostics model.
 
 When the product is choosing a useful winner from an otherwise ambiguous phase
 set, the TUI surfaces that with a `(likely)` marker instead of flattening it
@@ -180,8 +180,9 @@ Use this tab when you want to kick off a CLI flow and keep the output attached t
 3. Review the inline log output.
 4. If you need more detail, rerun the same command in a normal shell and archive the artifacts.
 
-The screenshots on this page come from the shipped TUI on an NVIDIA L4, with
-a PyTorch training loop running in the same process, except the MLX tab, which
+The screenshots on this page come from the shipped TUI on an NVIDIA L4 while
+ResNet-18 trained on CIFAR-10 for six epochs in the same process, each epoch's
+training and evaluation marked as tracker phases, except the MLX tab, which
 was taken on Apple Silicon. `examples/scenarios/tui_screenshots.py` takes them
 on any machine, and `examples/scenarios/modal_readme_media.py` reruns the L4
 capture on Modal.

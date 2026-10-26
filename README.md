@@ -104,9 +104,9 @@ print(f"Peak: {profiler.get_summary()['peak_memory_usage'] / 1024**2:.1f} MB")
 ```
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Silas-Asamoah/stormlog/main/docs/tui-visualizations-current.png" alt="Stormlog's terminal UI showing the memory timeline of a PyTorch training run" width="900">
+  <img src="https://raw.githubusercontent.com/Silas-Asamoah/stormlog/main/docs/tui-diagnostics-current.png" alt="Stormlog's terminal UI after ResNet-18 trained on CIFAR-10: the memory timeline, its markers, and the first anomaly attributed to epoch 1 / train" width="900">
   <br/>
-  <em>The terminal UI during a PyTorch training run on an NVIDIA L4: allocated memory per sample, and the caching allocator's reserved pool.</em>
+  <em>The terminal UI after ResNet-18 trained on CIFAR-10 for six epochs on an NVIDIA L4 (87.8% test accuracy): the memory timeline with its markers, and the first anomaly attributed to <code>epoch 1 / train</code>.</em>
 </p>
 
 ### Inference
