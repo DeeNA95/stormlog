@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping, Sequence
 
+from rich.text import Text
 from textual.widgets import Static
 
 from stormlog.timeline_markers import TimelineMarker
@@ -25,6 +27,48 @@ def _stretch(values: Sequence[Any], width: int) -> list[Any]:
 # space and a gap is "?".
 SPARK_LEVELS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
 
+# Each series keeps one colour on both of its lines: the label and the bars.
+SERIES_STYLES = {
+    "Allocated": "#4ea8ff",
+    "Active allocator": "#4ea8ff",
+    "Reserved": "#ffa62b",
+    "Reusable cache": "#ffa62b",
+    "Device Used": "#4ebf71",
+    "Process RSS": "#c678dd",
+}
+RANK_STYLE = "#4ea8ff"
+MARKER_STYLES = {"!": "bold #e5484d", "~": "#ffa62b", "i": "#4ea8ff", "=": "#56b6c2"}
+_MARKER = re.compile(r"(?:(?<=markers: )|(?<= \| ))([!~i=]) [^|]+")
+
+
+def styled_chart(text: str) -> Text:
+    """Colour a chart's plain lines: each series in its own colour, gaps dim,
+    markers by severity. The plain text is unchanged."""
+    lines: list[Text] = []
+    style = ""
+    for line in text.split("\n"):
+        rendered = Text(line)
+        series = next((name for name in SERIES_STYLES if line.startswith(name)), None)
+        stripped = line.strip()
+        if series is not None:
+            style = SERIES_STYLES[series]
+            rendered.stylize(f"bold {style}", 0, len(series))
+        elif re.match(r"[*\s]r\d+ ", line):
+            style = RANK_STYLE
+            if line.startswith("*"):
+                rendered.stylize("bold", 0, len(line))
+        elif stripped.startswith("[") and stripped.endswith("]") and style:
+            start = line.index("[") + 1
+            rendered.stylize(style, start, len(line) - 1)
+            rendered.highlight_regex(r"\?", "dim")
+        elif stripped.startswith("markers:"):
+            for match in _MARKER.finditer(line):
+                rendered.stylize(
+                    MARKER_STYLES[match.group(1)], match.start(), match.end()
+                )
+        lines.append(rendered)
+    return Text("\n").join(lines)
+
 
 class TimelineCanvas(Static):
     """ASCII timeline renderer for quick visual feedback."""
@@ -44,7 +88,7 @@ class TimelineCanvas(Static):
             ):
                 if key in timeline:
                     lines.extend(self._build_chart_lines(label, timeline[key]))
-            self.update("\n".join(lines))
+            self.update(styled_chart("\n".join(lines)))
             return
         allocated, reserved, values = self._timeline_usage_series(timeline)
         if not values:
@@ -62,7 +106,7 @@ class TimelineCanvas(Static):
             if reserved_lines
             else "\n".join(allocated_lines)
         )
-        self.update(text)
+        self.update(styled_chart(text))
 
     @staticmethod
     def _timeline_usage_series(timeline: dict[str, Any]) -> tuple[Any, Any, Any]:
@@ -192,7 +236,11 @@ class DistributedTimelineCanvas(Static):
                 f"... showing {self.max_ranks}/{len(ordered)} ranks (apply filter for more)."
             )
 
-        self.update("\n".join(lines) if lines else "No timeline samples to render.")
+        self.update(
+            styled_chart("\n".join(lines))
+            if lines
+            else "No timeline samples to render."
+        )
 
     def _build_rank_lines(
         self,
