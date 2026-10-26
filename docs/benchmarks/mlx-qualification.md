@@ -16,9 +16,9 @@ work. No claim of full MLX integration completion is made.
   no PyTorch, TensorFlow or JAX installed. Package/class/offline imports were
   also tested with imports of all four frameworks explicitly blocked.
 - Qualification began at revision `2498e07` with the PR 1 tracking/packaging
-  changes in the working tree. Per-module SHA-256 digests are recorded in
-  `artifacts/mlx-pr1-qualification/qualification.json` to identify the exact
-  tested implementation. Generated artifacts are ignored by Git.
+  changes uncommitted in the working tree. Per-module SHA-256 digests were kept
+  in a local artifact that is not in the repository, so the exact tested source
+  can't be checked from here.
 
 The filesystem sandbox could not initialize a Metal device. The same native
 probe and tests succeeded with native device access outside that sandbox.
