@@ -23,7 +23,6 @@ from textual.widgets import (
     LoadingIndicator,
     Markdown,
     RichLog,
-    Rule,
     TabbedContent,
     TabPane,
 )
@@ -320,7 +319,7 @@ class GPUMemoryProfilerTUI(App):
         if self.framework == "mlx":
             system = get_host_info()
             return (
-                "## System\n\n"
+                "### System\n\n"
                 f"- **Platform**: {system['platform']} / {system['architecture']}\n"
                 f"- **Python**: {system['python_version']}\n\n"
                 "MLX starts only when you ask for runtime info, a sample or "
@@ -466,7 +465,7 @@ class GPUMemoryProfilerTUI(App):
             id="diagnostics-path-input",
         )
         self.diagnostics_session_input = Input(
-            placeholder="auto-select latest completed session",
+            placeholder="latest completed session",
             id="diagnostics-session-input",
         )
         self.diagnostics_rank_filter_input = Input(
@@ -490,8 +489,11 @@ class GPUMemoryProfilerTUI(App):
             with TabPane("Overview"):
                 yield VerticalScroll(
                     self.welcome_panel,
-                    self.welcome_info,
-                    self.overview_panel,
+                    Horizontal(
+                        self.overview_panel,
+                        self.welcome_info,
+                        id="overview-columns",
+                    ),
                 )
 
             with TabPane("PyTorch"):
@@ -509,6 +511,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="warning",
                         ),
                         id="pytorch-profile-controls",
+                        classes="controls",
                     ),
                     GPUStatsTable(
                         "pytorch",
@@ -534,6 +537,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="warning",
                         ),
                         id="tensorflow-profile-controls",
+                        classes="controls",
                     ),
                     GPUStatsTable(
                         "tensorflow",
@@ -554,23 +558,37 @@ class GPUMemoryProfilerTUI(App):
                         id="mlx-runtime-status",
                     ),
                     Horizontal(
-                        Button("Runtime Info", id="btn-mlx-info"),
-                        Button("MLX Sample", id="btn-run-mlx"),
-                        Button("Use MLX for Tracking", id="btn-select-mlx"),
-                        classes="mlx-controls",
+                        Button("Runtime Info", id="btn-mlx-info", variant="primary"),
+                        Button("MLX Sample", id="btn-run-mlx", variant="primary"),
+                        Button(
+                            "Use MLX for Tracking",
+                            id="btn-select-mlx",
+                            variant="success",
+                        ),
+                        Button(
+                            "Refresh Profiles",
+                            id="btn-refresh-mlx-profiles",
+                            variant="primary",
+                        ),
+                        Button(
+                            "Clear Profiles",
+                            id="btn-clear-mlx-profiles",
+                            variant="warning",
+                        ),
+                        classes="controls mlx-controls",
                     ),
                     Horizontal(
-                        Button("Refresh Profiles", id="btn-refresh-mlx-profiles"),
-                        Button("Clear Profiles", id="btn-clear-mlx-profiles"),
-                        classes="mlx-controls",
-                    ),
-                    Horizontal(
+                        Label("Artifact"),
                         Input(
                             placeholder="MLX profile JSON or telemetry/bundle directory",
                             id="mlx-artifact-path",
                         ),
-                        Button("Load Artifact", id="btn-load-mlx-artifact"),
-                        classes="mlx-controls",
+                        Button(
+                            "Load Artifact",
+                            id="btn-load-mlx-artifact",
+                            variant="success",
+                        ),
+                        classes="controls mlx-controls",
                     ),
                     self.mlx_profile_table,
                     self.mlx_timeline_canvas,
@@ -592,14 +610,6 @@ class GPUMemoryProfilerTUI(App):
                         ),
                         self.watchdog_button,
                         Button(
-                            "Apply Thresholds",
-                            id="btn-apply-thresholds",
-                            variant="primary",
-                        ),
-                        id="monitor-controls-row1",
-                    ),
-                    Horizontal(
-                        Button(
                             "Force Cleanup",
                             id="btn-force-cleanup",
                             variant="success",
@@ -608,6 +618,22 @@ class GPUMemoryProfilerTUI(App):
                             "Aggressive Cleanup",
                             id="btn-force-cleanup-aggressive",
                             variant="error",
+                        ),
+                        id="monitor-controls-row1",
+                        classes="controls",
+                    ),
+                    Horizontal(
+                        Horizontal(
+                            Label("Warning %"),
+                            self.warning_input,
+                            Label("Critical %"),
+                            self.critical_input,
+                            Button(
+                                "Apply Thresholds",
+                                id="btn-apply-thresholds",
+                                variant="primary",
+                            ),
+                            id="monitor-thresholds",
                         ),
                         Button(
                             "Export CSV",
@@ -619,21 +645,12 @@ class GPUMemoryProfilerTUI(App):
                             id="btn-export-json",
                             variant="success",
                         ),
-                        id="monitor-controls-row2",
-                    ),
-                    Horizontal(
                         Button(
                             "Clear Monitor Log",
                             id="btn-clear-monitor-log",
                         ),
-                        id="monitor-controls-row3",
-                    ),
-                    Horizontal(
-                        Label("Warning %"),
-                        self.warning_input,
-                        Label("Critical %"),
-                        self.critical_input,
-                        id="monitor-thresholds",
+                        id="monitor-controls-row2",
+                        classes="controls",
                     ),
                     self.monitor_stats_table,
                     self.alert_history_table,
@@ -660,6 +677,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="success",
                         ),
                         id="visual-buttons",
+                        classes="controls",
                     ),
                     self.timeline_stats_table,
                     self.timeline_canvas,
@@ -681,19 +699,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="success",
                         ),
                         Button("Refresh", id="btn-diag-refresh", variant="primary"),
-                        id="diagnostics-controls-row1",
-                    ),
-                    Horizontal(
-                        self.diagnostics_path_input,
-                        self.diagnostics_session_input,
-                        Button(
-                            "Apply Session",
-                            id="btn-diag-apply-session",
-                            variant="primary",
-                        ),
-                        id="diagnostics-controls-row2",
-                    ),
-                    Horizontal(
+                        Label("Ranks"),
                         self.diagnostics_rank_filter_input,
                         Button(
                             "Apply Filter",
@@ -705,7 +711,21 @@ class GPUMemoryProfilerTUI(App):
                             id="btn-diag-reset-filter",
                             variant="warning",
                         ),
-                        id="diagnostics-controls-row3",
+                        id="diagnostics-controls-row1",
+                        classes="controls",
+                    ),
+                    Horizontal(
+                        Label("Artifacts"),
+                        self.diagnostics_path_input,
+                        Label("Session"),
+                        self.diagnostics_session_input,
+                        Button(
+                            "Apply Session",
+                            id="btn-diag-apply-session",
+                            variant="primary",
+                        ),
+                        id="diagnostics-controls-row2",
+                        classes="controls",
                     ),
                     self.diagnostics_rank_table,
                     self.diagnostics_timeline_canvas,
@@ -716,7 +736,6 @@ class GPUMemoryProfilerTUI(App):
             with TabPane("CLI & Actions"):
                 yield VerticalScroll(
                     self.cli_panel,
-                    Rule(),
                     Horizontal(
                         Button(
                             "gpumemprof info", id="btn-log-system", variant="primary"
@@ -737,6 +756,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="warning",
                         ),
                         id="cli-buttons-row1",
+                        classes="controls",
                     ),
                     Horizontal(
                         Button(
@@ -752,14 +772,17 @@ class GPUMemoryProfilerTUI(App):
                             variant="success",
                         ),
                         id="cli-buttons-row2",
+                        classes="controls",
                     ),
                     Horizontal(
+                        Label("Command"),
                         self.cli_command_input,
                         Button("Run Command", id="btn-cli-run", variant="primary"),
                         Button(
                             "Cancel Command", id="btn-cli-cancel", variant="warning"
                         ),
                         id="cli-runner",
+                        classes="controls",
                     ),
                     self.loader,
                     self.command_log,

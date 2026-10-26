@@ -10,7 +10,7 @@ def build_welcome_info() -> str:
     """Build the overview's guide to the tabs and keys."""
     return dedent(
         """
-        ## Tabs
+        ### Tabs
 
         - **PyTorch**, **TensorFlow**: device memory now, and the profiles
           recorded in this process
@@ -22,12 +22,12 @@ def build_welcome_info() -> str:
         - **CLI & Actions**: run `gpumemprof` and `tfmemprof` commands and
           sample workloads
 
-        ## Keys
+        ### Keys
 
         `q` quit · `r` refresh this overview · `f` focus the command log ·
         `g` and `t` log `gpumemprof` and `tfmemprof` examples
 
-        ## Inference
+        ### Inference
 
         Profiling an LLM server? `stormlog infer profile` measures it and
         `stormlog infer diagnose` explains its slow requests. Both run from
@@ -44,10 +44,10 @@ def build_system_markdown(
     tf_gpu_info: dict[str, Any],
 ) -> str:
     lines = [
-        "## System",
+        "### System",
         "",
         f"- **Platform**: {system_info.get('platform', 'Unknown')}",
-        f"- **Python**: {system_info.get('python_version', 'Unknown')}",
+        f"- **Python**: {str(system_info.get('python_version', 'Unknown')).split()[0]}",
         f"- **TensorFlow (Python)**: {tf_system_info.get('tensorflow_version', 'N/A')}",
         f"- **CUDA Available**: {system_info.get('cuda_available', False)}",
     ]
@@ -62,7 +62,7 @@ def build_system_markdown(
 
     if gpu_info:
         lines.append("")
-        lines.append("## GPU")
+        lines.append("### GPU")
         lines.extend(
             [
                 f"- **Device Name**: {gpu_info.get('device_name', 'Unknown')}",
@@ -81,7 +81,7 @@ def build_system_markdown(
     lines.append("")
     if tf_gpu_info and tf_gpu_info.get("devices"):
         lines.append("")
-        lines.append("## TensorFlow GPU")
+        lines.append("### TensorFlow GPU")
         device = tf_gpu_info["devices"][0]
         lines.extend(
             [
@@ -92,7 +92,7 @@ def build_system_markdown(
         )
 
     lines.append("")
-    lines.append("## First commands")
+    lines.append("### First commands")
     lines.append("")
     lines.append("- `gpumemprof info`")
     lines.append("- `gpumemprof track --duration 60 --output tracking.json`")
