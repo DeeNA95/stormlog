@@ -65,7 +65,8 @@ TensorFlow, JAX, platform-gated MLX, W&B, and inference tokenizer dependencies.
 TensorFlow-specific APIs live under `stormlog.tensorflow`; JAX-specific APIs
 live under `stormlog.jax`. MLX Python APIs live under `stormlog.mlx`; see the
 [MLX guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/mlx_testing_guide.md) for process allocator scope and lazy
-evaluation. MLX CLI and dedicated TUI support are planned follow-up work.
+evaluation. Use `mlxmemprof run -- script.py` for in-process capture and
+`stormlog tui --framework mlx` for MLX tracking or saved-artifact browsing.
 
 | Task | Use |
 | --- | --- |
@@ -215,13 +216,17 @@ pip install "stormlog[tui,torch]"
 stormlog
 ```
 
-The current TUI startup path imports PyTorch immediately, so `stormlog[tui]` alone is not enough yet.
+For MLX on native Apple Silicon, install `stormlog[mlx,tui]` and launch
+`stormlog tui --framework mlx`. Live tracking observes the TUI process; use
+`mlxmemprof run -- script.py` to capture a separate workload and load its saved
+bundle in the MLX tab. Offline MLX artifact browsing needs only `stormlog[tui]`.
 
 The current TUI tabs are:
 
 - `Overview`
 - `PyTorch`
 - `TensorFlow`
+- `MLX`
 - `Monitoring`
 - `Visualizations`
 - `Diagnostics`

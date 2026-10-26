@@ -12,6 +12,18 @@ Missing MLX, an unsupported platform, a broken native loader, and unavailable
 Metal produce distinct exceptions with chained causes. Successful runtime
 discovery is cached; sampled counters and failed discovery are not cached.
 
+## Feature matrix
+
+| Surface | Core support | Limits |
+| --- | --- | --- |
+| Python | Snapshots, function/context profiles, passive tracking, phases | Explicit lazy roots; process allocator scope |
+| CLI | Info, monitor, track, same-process run, offline analyze, diagnose | Script mode only; no attachment to server allocators |
+| TUI | Explicit MLX actions, live tracking, saved profiles and nullable timelines | Live counters belong to the TUI process |
+| Persistence | Telemetry v4, profile v1, bounded sinks/OOM bundles, shared reports/query | No native allocation stacks or fragmentation attribution |
+| Qualification | Framework-free contracts and controlled Apple Silicon Metal gates | Linux MLX CPU/CUDA and distributed runtimes unqualified |
+| PR4 serving milestone | oMLX, MLX-LM and MLX-Audio endpoint profiling and scoped server evidence | Separate planned delivery after the core memory rollout |
+| Optional follow-ups | Metal traces and array-buffer inspection | Outside the core rollout |
+
 ## Counter meanings
 
 | Value | Meaning |
@@ -97,8 +109,7 @@ Tracker exports use telemetry v4; these are different artifact contracts.
 
 Install with `pip install 'stormlog[mlx]'`. The optional dependency is included
 only on Darwin arm64; on other platforms the extra installs no native MLX wheel.
-Base/offline functionality still works there. This first rollout ships Python
-APIs; `mlxmemprof` commands and dedicated TUI support are later PRs.
+Base/offline functionality still works there. The Python APIs and dedicated `mlxmemprof` CLI are available.
 
 ```python
 from pathlib import Path
@@ -153,6 +164,14 @@ For a sink directory use `load_telemetry_sessions("mlx-telemetry")`; for tracker
 JSON exports use the same loader. Default session selection follows the shared
 completed/interrupted/incomplete policy.
 
+Tracker JSON and the TUI's MLX JSON export retain a `telemetry_events` array
+alongside tracking aggregates. The shared loader recognizes this envelope;
+`mlxmemprof analyze mlx-tracking.json` and `stormlog query` can read these
+exports directly, including nullable counters and interrupted captures.
+The exported summary preserves session status even when the retained window
+omits the start event. Offline sample metrics describe those retained events;
+use an append-only sink when the full history is needed.
+
 ## Verification
 
 ```bash
@@ -163,6 +182,107 @@ python3 -m pytest tests/test_mlx_hardware.py -m mlx_hardware -v
 Ordinary tests use an injectable runtime and need no framework installation.
 Hardware tests are opt-in; selecting them requires usable Metal and fails if
 it is unavailable. Linux CI runs fake contracts with all four frameworks absent.
-See [PR 1 hardware qualification](benchmarks/mlx-qualification.md) for the tested
-environment and limits of the evidence. Full CLI/TUI and overhead qualification
-belongs to later rollout PRs.
+See [hardware qualification](benchmarks/mlx-qualification.md) for the tested
+environment and limits of the evidence. CLI round-trips and comparative timing evidence are recorded there as well.
+
+## Offline analysis (PR 2)
+
+`stormlog.mlx.analyzer.analyze(path, session_id=None)` accepts telemetry JSON,
+JSONL, sink directories and MLX profile JSON without importing a framework.
+It uses the shared default session policy or selects the requested session.
+Active, cache and native lifetime peaks remain separate; unknown values remain
+null in the timeline. Growth windows stop at failed samples, recovery boundaries
+and long sampling gaps. Positive active growth asks for workload review; it is
+not proof of a leak. Cache growth is not a fragmentation finding.
+
+Querying MLX telemetry through `stormlog.query` also requires no framework
+initialization. The legacy `stormlog.utils.format_bytes` import remains available
+through a neutral formatting helper used by query consumers.
+
+## Script capture and diagnostic bundles (PR 2)
+
+The same-process runner uses `runpy.run_path(..., run_name="__main__")` and
+sets the script's directory as the first import path. It passes all workload
+arguments through and restores `sys.argv`/`sys.path`, retaining the invocation
+working directory. Sampling begins before user code and ends in a `finally`
+block. The application owns evaluation of lazy arrays, including final work.
+Separate subprocess allocators need their own instrumentation.
+
+Capture bundles contain an environment/capability snapshot, bounded tracking
+summary, rotating telemetry sink, diagnostic summary, session manifest and
+shared `report.json`. Existing output directories receive a unique child
+directory. Active thresholds are opt-in; the watchdog is alert-only. OOM dumps
+use bounded shared flight recording with the narrow MLX allocator classifier.
+
+The report stores workload exit status separately: `SystemExit(None/0)` passes;
+other integer or text values remain in the payload and map to exit 1. Unexpected
+user failure maps to 1, missing scripts to 5, unavailable runtime to 2, observed
+OOM to 3, and interruption to 130. Partial bundles are finalized best-effort;
+diagnostic failure cannot turn a failed workload into success. An idle diagnose
+probe describes this command's own allocator, not another application's memory.
+
+## Dedicated CLI
+
+```bash
+mlxmemprof info --json
+mlxmemprof monitor --duration 2 --interval 0.1
+mlxmemprof track --duration 2 --output artifacts/mlx-track
+mlxmemprof run --output artifacts/mlx-run -- script.py --application-flag value
+mlxmemprof analyze artifacts/mlx-run --output artifacts/mlx-analysis --json
+mlxmemprof diagnose --duration 0.2 --output artifacts/mlx-diagnose --json
+```
+
+`monitor`, `track` and `diagnose` observe their own process. Use `run` for a
+real script workload. `run` passes arguments after the script untouched; module
+mode (`-m`) is deferred. `--json` or `--format json` prints a machine-readable
+result. Workload stdout/stderr stays with the workload, so scripts that print
+can mix their output with the final CLI JSON; `report.json` is the durable
+machine-readable verdict. `analyze` accepts `--session-id` and writes
+`analysis.json` plus the shared report. It can return 3 for candidate growth,
+gaps or unverified completion; inspect findings rather than treating growth
+as a confirmed leak. For `run`, the last sample is taken after the script's
+module globals are released, so growth there means memory still allocated
+after the script ended, not memory it held while running.
+
+Without `--output`, every command writes its bundle to a new
+`mlx-<command>-<time>-N` directory in the current directory. That includes
+`analyze`, whose report records an invalid input as well.
+
+Capture options include `--interval`, `--max-history`, `--rollover-max-events`,
+`--retention-max-files`, `--max-buffer-bytes`, `--job-id`, `--rank`,
+`--local-rank` and `--world-size`. `--max-buffer-bytes` must be at least 64 KiB,
+since one telemetry record is about 2 KB. The first two history/retention limits apply
+independently to memory and disk. Disk retention can remove old segments.
+`--alert-threshold-mb` is an opt-in active allocation alert in MiB. Flight
+recording limits are `--oom-max-dumps` and `--oom-max-total-mb`. No cleanup,
+evaluation or peak reset flags are supplied for passive capture.
+
+
+## TUI and saved artifacts
+
+```bash
+pip install 'stormlog[mlx,tui]'
+stormlog tui --framework mlx
+```
+
+The MLX tab exposes explicit runtime information, a small evaluated sample,
+profile refresh/clear, and loading saved profile JSON, tracker JSON, JSONL,
+telemetry directories or capture bundles. Startup and offline browsing do not
+initialize any framework. Runtime Info, Sample, and Start Live Tracking are
+explicit native actions; unavailable Metal produces a useful error and never
+falls back to a CPU tracker. The default framework remains PyTorch.
+
+Select **Use MLX for Tracking** or start with `--framework mlx` to use MLX in
+Monitoring. Live counters belong to the TUI process. Active allocator bytes,
+reusable cache, host RSS, and native lifetime peak have separate labels. Sampled
+profile peaks and completion verification are shown separately. Unknown values
+remain N/A or gaps; GPU capacity percentages, fragmentation and automatic
+cleanup are unavailable for this adapter. Stopping or closing the app stops its
+sampler. Saved artifacts display without native MLX even on other platforms.
+
+For runnable training and generation recipes, see the [MLX cookbook](cookbook/mlx.md).
+From a source checkout, run `python3 -m examples.basic.mlx_demo --output artifacts/mlx-demo`.
+Serving integration is a separate planned PR4 milestone for oMLX, MLX-LM and
+MLX-Audio. Metal trace capture and array-buffer attribution remain optional
+follow-ups. This core memory rollout introduces no inference wire or memory
+schema bump.

@@ -161,6 +161,7 @@ Repository = "https://github.com/Silas-Asamoah/stormlog.git"
 gpumemprof = "stormlog.cli:main"
 tfmemprof = "stormlog.tensorflow.cli:main"
 jaxmemprof = "stormlog.jax.cli:main"
+mlxmemprof = "stormlog.mlx.cli:main"
 stormlog = "stormlog.entrypoint:main"
 
 # vLLM loads this in its engine-core and worker processes; it does nothing

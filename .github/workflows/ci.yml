@@ -104,7 +104,7 @@ jobs:
             - name: Install framework-independent test environment
               run: |
                   python3 -m pip install --upgrade pip
-                  pip install -e . pytest jsonschema packaging
+                  pip install -e '.[tui]' pytest jsonschema packaging
                   python3 - <<'PY'
                   import importlib.util
                   for name in ("mlx", "torch", "jax", "tensorflow"):
@@ -114,6 +114,7 @@ jobs:
               run: |
                   python3 -m pytest tests/ -o 'python_files=test_mlx*.py' -m 'not mlx_hardware' -q
                   python3 -m pytest tests/test_packaging_contracts.py -q
+                  python3 -m examples.scenarios.mlx_memory_scenario --output /tmp/mlx-contract-qualification
 
     tui-pr-gate:
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/develop')

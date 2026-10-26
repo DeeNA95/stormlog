@@ -93,3 +93,19 @@ def profile_context(
 ) -> AbstractContextManager[ProfileRegion]:
     selected = profiler if profiler is not None else get_global_profiler()
     return selected.profile_context(name, **options)
+
+
+def get_profile_summaries(limit: int = 15) -> list[dict[str, Any]]:
+    """Read already-recorded profiles without constructing a runtime."""
+    with _LOCK:
+        if _GLOBAL is None:
+            return []
+        results = list(reversed(_GLOBAL.get_results()))
+        return [result.to_dict() for result in (results[:limit] if limit else results)]
+
+
+def clear_profiles() -> None:
+    """Clear scalar profile results without runtime discovery or peak reset."""
+    with _LOCK:
+        if _GLOBAL is not None:
+            _GLOBAL.clear_results()

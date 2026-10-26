@@ -107,6 +107,7 @@ and integer rules. A record that passes the schema can still fail to load.
 - `stormlog.cpu_tracker`
 - `stormlog.tensorflow.memory_tracker`
 - `stormlog.jax.memory_tracker`
+- `stormlog.mlx.memory_tracker`
 
 ## Backend capability metadata
 
