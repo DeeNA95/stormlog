@@ -5,6 +5,7 @@ import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Iterator
 
 import pytest
 
@@ -15,11 +16,13 @@ from stormlog.infer.http_transport import EndpointHTTPError, RequestDeadlineExce
 
 
 @contextlib.contextmanager
-def endpoint(body, content_type="application/json", *, trickle=False):
-    calls = []
+def endpoint(
+    body: bytes, content_type: str = "application/json", *, trickle: bool = False
+) -> Iterator[tuple[str, list[Any]]]:
+    calls: list[Any] = []
 
     class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
+        def do_POST(self) -> None:
             calls.append(
                 (
                     self.path,
@@ -42,7 +45,7 @@ def endpoint(body, content_type="application/json", *, trickle=False):
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
-        def log_message(self, *_):
+        def log_message(self, *_: Any) -> None:
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -56,7 +59,7 @@ def endpoint(body, content_type="application/json", *, trickle=False):
         thread.join()
 
 
-def complete(url, *, stream=False, **kwargs):
+def complete(url: str, *, stream: bool = False, **kwargs: Any) -> Any:
     return OpenAICompletionsClient(
         endpoint=url,
         model="/opaque/model alias",
@@ -73,7 +76,7 @@ def complete(url, *, stream=False, **kwargs):
 
 @pytest.mark.parametrize("engine", ["omlx", "mlx-lm"])
 @pytest.mark.parametrize("stream", [False, True])
-def test_completion_protocol_and_separate_ids(engine, stream):
+def test_completion_protocol_and_separate_ids(engine: str, stream: bool) -> None:
     get_adapter(engine, "completion")
     payload = {
         "id": "server-generated",
@@ -97,7 +100,7 @@ def test_completion_protocol_and_separate_ids(engine, stream):
     assert sent["model"] == "/opaque/model alias"
 
 
-def test_total_deadline_stops_continuous_body():
+def test_total_deadline_stops_continuous_body() -> None:
     with endpoint(b" " * 200, trickle=True) as (url, calls):
         started = time.perf_counter()
         with pytest.raises(RequestDeadlineExceeded):
@@ -106,7 +109,7 @@ def test_total_deadline_stops_continuous_body():
     assert len(calls) == 1
 
 
-def test_bound_and_embedded_error_are_terminal_and_secret_safe():
+def test_bound_and_embedded_error_are_terminal_and_secret_safe() -> None:
     with endpoint(b"x" * 100) as (url, calls):
         with pytest.raises(ValueError, match="byte limit"):
             complete(url, max_response_bytes=20)
@@ -119,7 +122,7 @@ def test_bound_and_embedded_error_are_terminal_and_secret_safe():
     assert len(calls) == 1
 
 
-def test_endpoint_resolution_and_capability_errors():
+def test_endpoint_resolution_and_capability_errors() -> None:
     assert (
         resolve_endpoint(
             endpoint=None, base_url="http://localhost/v1/", task="completion"

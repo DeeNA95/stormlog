@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import urllib.error
+from typing import Any, Iterator
 
 import pytest
 
@@ -18,13 +19,13 @@ from stormlog.infer.openai_client import OpenAIChatCompletionsClient
 from stormlog.infer.profile import classify_failure
 
 
-def client(url):
+def client(url: str) -> OpenAIChatCompletionsClient:
     return OpenAIChatCompletionsClient(
         endpoint=url, model="opaque", timeout_seconds=0.12
     )
 
 
-def complete(value):
+def complete(value: OpenAIChatCompletionsClient) -> Any:
     return value.complete(
         prompt="input", output_tokens=1, stream=False, stream_include_usage=False
     )
@@ -44,9 +45,11 @@ def complete(value):
     ],
 )
 def test_endpoint_validation_precedes_transport_creation(
-    monkeypatch, client_class, url
-):
-    def unexpected_transport():
+    monkeypatch: pytest.MonkeyPatch,
+    client_class: type[OpenAIChatCompletionsClient],
+    url: str,
+) -> None:
+    def unexpected_transport() -> None:
         pytest.fail(
             "An invalid endpoint must be rejected before creating its transport"
         )
@@ -58,8 +61,10 @@ def test_endpoint_validation_precedes_transport_creation(
         client_class(endpoint=url, model="opaque", timeout_seconds=1)
 
 
-def test_dns_deadline_is_bounded_without_sending_a_request(monkeypatch):
-    def stalled(*args):
+def test_dns_deadline_is_bounded_without_sending_a_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def stalled(*args: Any) -> list[Any]:
         time.sleep(0.3)
         return []
 
@@ -73,13 +78,13 @@ def test_dns_deadline_is_bounded_without_sending_a_request(monkeypatch):
 
 
 @contextlib.contextmanager
-def trickling_socket(wire, *, trickle_headers):
+def trickling_socket(wire: bytes, *, trickle_headers: bool) -> Iterator[str]:
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
     port = listener.getsockname()[1]
 
-    def serve():
+    def serve() -> None:
         connection, _ = listener.accept()
         with connection:
             connection.recv(65536)
@@ -104,7 +109,7 @@ def trickling_socket(wire, *, trickle_headers):
         thread.join(2)
 
 
-def test_trickling_headers_cannot_extend_total_deadline():
+def test_trickling_headers_cannot_extend_total_deadline() -> None:
     with trickling_socket(
         b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}", trickle_headers=True
     ) as url:
@@ -114,7 +119,7 @@ def test_trickling_headers_cannot_extend_total_deadline():
         assert time.perf_counter() - started < 0.3
 
 
-def test_error_body_deadline_preserves_rejected_http_status():
+def test_error_body_deadline_preserves_rejected_http_status() -> None:
     with trickling_socket(
         b"HTTP/1.1 429 Too Many Requests\r\nContent-Length: 100\r\n\r\n" + b"x" * 100,
         trickle_headers=False,
