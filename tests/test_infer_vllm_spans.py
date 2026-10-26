@@ -1857,3 +1857,18 @@ class TestProfileReceiver:
         assert "OSError" in capability["metadata"]["error"]
         warnings = records[-1]["warnings"]
         assert len(warnings) == 1 and "could not listen" in warnings[0]
+
+
+def test_the_reply_names_its_media_type_with_the_receivers_own_constant() -> None:
+    body = JSON_EXPORT
+    request = (
+        b"POST /v1/traces HTTP/1.1\r\nHost: collector\r\n"
+        b"Content-Type: application/json; charset=utf-8\r\n"
+        b"Content-Length: %d\r\n\r\n" % len(body)
+    ) + body
+    with _receiver() as receiver:
+        reply = _raw_post(receiver.listen, request)
+    head, _, content = reply.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.0 200") or head.startswith(b"HTTP/1.1 200")
+    assert b"\r\nContent-Type: application/json\r\n" in head + b"\r\n"
+    assert content == b"{}"

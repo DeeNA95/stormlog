@@ -103,8 +103,13 @@ class _Answered:
         # bounds the whole request, so a long stream that keeps arriving lives.
         limit = getattr(self, "request_deadline_seconds", None)
         deadline = time.perf_counter() + limit if limit is not None else None
-        self._create_connection = _bounded_connection
+        # DNS, connect and the TLS handshake count against the deadline too.
+        self._create_connection = functools.partial(
+            _bounded_connection, request_deadline=deadline
+        )
         call()
+        if deadline is not None:
+            _restore_read_timeout(self)
         self._request_deadline = deadline
         if deadline is not None:
             self._deadline_timer = threading.Timer(
@@ -433,12 +438,24 @@ def _addresses(address: tuple[str, int], deadline: float) -> list[Any]:
     return list(result)
 
 
+def _restore_read_timeout(connection: Any) -> None:
+    """Once connected, each read gets the whole ``--timeout`` again."""
+    timeout = getattr(connection, "timeout", None)
+    sock = getattr(connection, "sock", None)
+    if sock is not None and isinstance(timeout, (int, float)):
+        sock.settimeout(timeout)
+
+
 def _bounded_connection(
     address: tuple[str, int],
     timeout: float,
     source_address: tuple[str, int] | None = None,
+    *,
+    request_deadline: float | None = None,
 ) -> socket.socket:
     deadline = time.perf_counter() + timeout
+    if request_deadline is not None:
+        deadline = min(deadline, request_deadline)
     last: OSError | None = None
     for family, kind, protocol, _canonical, destination in _addresses(
         address, deadline
@@ -452,9 +469,14 @@ def _bounded_connection(
             if source_address is not None:
                 sock.bind(source_address)
             sock.connect(destination)
-            # --timeout bounds each later read in full; an opt-in request
-            # deadline bounds the whole request separately.
-            sock.settimeout(timeout)
+            # --timeout bounds each later read in full, the TLS handshake
+            # included; with a request deadline, never past what is left of
+            # it. The caller restores --timeout once connected.
+            sock.settimeout(
+                timeout
+                if request_deadline is None
+                else max(1e-9, min(timeout, request_deadline - time.perf_counter()))
+            )
             return sock
         except OSError as exc:
             last = exc
