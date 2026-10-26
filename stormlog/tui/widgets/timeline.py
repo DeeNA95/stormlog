@@ -47,27 +47,34 @@ def styled_chart(text: str) -> Text:
     lines: list[Text] = []
     style = ""
     for line in text.split("\n"):
-        rendered = Text(line)
-        series = next((name for name in SERIES_STYLES if line.startswith(name)), None)
-        stripped = line.strip()
-        if series is not None:
-            style = SERIES_STYLES[series]
-            rendered.stylize(f"bold {style}", 0, len(series))
-        elif re.match(r"[*\s]r\d+ ", line):
-            style = RANK_STYLE
-            if line.startswith("*"):
-                rendered.stylize("bold", 0, len(line))
-        elif stripped.startswith("[") and stripped.endswith("]") and style:
-            start = line.index("[") + 1
-            rendered.stylize(style, start, len(line) - 1)
-            rendered.highlight_regex(r"\?", "dim")
-        elif stripped.startswith("markers:"):
-            for match in _MARKER.finditer(line):
-                rendered.stylize(
-                    MARKER_STYLES[match.group(1)], match.start(), match.end()
-                )
+        rendered, style = _styled_line(line, style)
         lines.append(rendered)
     return Text("\n").join(lines)
+
+
+def _styled_line(line: str, style: str) -> tuple[Text, str]:
+    """One line coloured, and the series colour the lines after it take."""
+    rendered = Text(line)
+    series = next((name for name in SERIES_STYLES if line.startswith(name)), None)
+    stripped = line.strip()
+    if series is not None:
+        style = SERIES_STYLES[series]
+        rendered.stylize(f"bold {style}", 0, len(series))
+    elif re.match(r"[*\s]r\d+ ", line):
+        style = RANK_STYLE
+        if line.startswith("*"):
+            rendered.stylize("bold", 0, len(line))
+    elif stripped.startswith("[") and stripped.endswith("]") and style:
+        rendered.stylize(style, line.index("[") + 1, len(line) - 1)
+        rendered.highlight_regex(r"\?", "dim")
+    elif stripped.startswith("markers:"):
+        _style_markers(rendered, line)
+    return rendered, style
+
+
+def _style_markers(rendered: Text, line: str) -> None:
+    for match in _MARKER.finditer(line):
+        rendered.stylize(MARKER_STYLES[match.group(1)], match.start(), match.end())
 
 
 class TimelineCanvas(Static):
