@@ -2031,7 +2031,10 @@ class GPUMemoryProfilerTUI(App):
     def _pytorch_sample_workload() -> dict[str, Any]:
         if GPUMemoryProfiler is None or torch is None:
             raise RuntimeError("PyTorch profiler is unavailable.")
-        return run_pytorch_sample_workload(GPUMemoryProfiler, torch)
+        from stormlog.context_profiler import get_global_profiler
+
+        # The PyTorch tab lists the global profiler's results.
+        return run_pytorch_sample_workload(get_global_profiler, torch)
 
     @staticmethod
     def _tensorflow_sample_workload() -> Any:
@@ -2040,7 +2043,10 @@ class GPUMemoryProfilerTUI(App):
                 "TensorFlow profiler is unavailable. Install TensorFlow support with: "
                 "pip install 'stormlog[tf]'"
             )
-        return run_tensorflow_sample_workload(TFMemoryProfiler, tf)
+        from stormlog.tensorflow.context_profiler import get_global_profiler
+
+        # The TensorFlow tab lists the global profiler's profiles.
+        return run_tensorflow_sample_workload(get_global_profiler, tf)
 
     @staticmethod
     def _cpu_sample_workload() -> dict[str, Any]:
