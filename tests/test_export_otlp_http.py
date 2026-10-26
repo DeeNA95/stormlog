@@ -523,11 +523,13 @@ def test_a_tls_collector_dribbling_its_answer_is_cut_at_the_deadline(
 ) -> None:
     # The watchdog shuts the registered SSLSocket down in the middle of a read.
     cert, key = tls_files
+    context = ssl.create_default_context(cafile=str(cert))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     with _tls_dribbler(cert, key) as port:
         transport = _transport(
             f"https://127.0.0.1:{port}",
             attempt_seconds=0.6,
-            ssl_context=ssl.create_default_context(cafile=str(cert)),
+            ssl_context=context,
         )
         started = time.monotonic()
         out = transport.send(_body(), spans=3)
@@ -611,3 +613,11 @@ def test_only_a_loopback_address_or_localhost_is_this_host(
     url: str, loopback: bool
 ) -> None:
     assert Destination.parse(url).loopback is loopback
+
+
+def test_an_https_destination_refuses_tls_before_1_2() -> None:
+    import ssl
+
+    transport = _transport("https://collector.example:4318/v1/traces")
+    assert transport._ssl is not None
+    assert transport._ssl.minimum_version == ssl.TLSVersion.TLSv1_2

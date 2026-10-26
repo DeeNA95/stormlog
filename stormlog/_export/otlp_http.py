@@ -177,7 +177,11 @@ class OtlpHttpTransport:
         self.watchdog = watchdog or Watchdog(name="stormlog-otlp-watchdog")
         self._ssl = ssl_context
         if destination.scheme == "https" and ssl_context is None:
-            self._ssl = ssl.create_default_context()
+            context = ssl.create_default_context()
+            # Python 3.10+ already refuses TLS 1.0 and 1.1 here; pin it. A
+            # caller's own context is used as given.
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            self._ssl = context
         self._headers = {
             **dict(headers or {}),
             "Content-Type": media_type,
