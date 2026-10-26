@@ -124,7 +124,7 @@ tracker = MemoryTracker(
     ),
 )
 with tracker.tracking():
-    with tracker.phase("train", {"epoch": 1}):
+    with tracker.phase("train", metadata={"epoch": 1}):
         train_or_generate()  # the application owns evaluation and its streams
 tracker.export("mlx-tracking.json")
 ```
