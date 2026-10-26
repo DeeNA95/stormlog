@@ -102,6 +102,7 @@ def test_the_digest_changes_with_anything_that_shapes_the_requests(
             {"cache_reset_url": "http://127.0.0.1:2/flush_cache"},
         ),
         ({"timeout_seconds": 60.0}, {"timeout_seconds": 120.0}),
+        ({}, {"request_deadline_seconds": 30.0}),
         ({}, {"drain_timeout_seconds": 5.0}),
         # A closed loop ignores the open-loop limit and overflow policy.
         ({"max_in_flight": 4}, {"max_in_flight": 128, "overflow": "drop"}),
@@ -261,7 +262,7 @@ def test_extra_fields_reach_the_request_body(monkeypatch: pytest.MonkeyPatch) ->
             return _Response({"choices": [{"message": {"content": "hi"}}]})
 
     monkeypatch.setattr(
-        "stormlog.infer.openai_client.inference_opener", lambda: _Opener()
+        "stormlog.infer.openai_client.inference_opener", lambda *_: _Opener()
     )
     client = OpenAIChatCompletionsClient(
         endpoint="http://127.0.0.1:1/v1/chat/completions",
@@ -381,3 +382,37 @@ def test_the_spec_digest_leaves_the_seed_out(tmp_path: Path) -> None:
         "spec_digest": None,
         "realization_digest": "x",
     }
+
+
+def test_the_request_deadline_is_recorded_with_the_timeouts(tmp_path: Path) -> None:
+    unset = _workload(tmp_path / "a", request_count=1)
+    capped = _workload(tmp_path / "b", request_count=1, request_deadline_seconds=30.0)
+    assert unset["measurement"]["request_deadline_seconds"] is None
+    assert capped["measurement"]["request_deadline_seconds"] == 30.0
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_the_request_deadline_flag_must_be_positive(tmp_path: Path, value: str) -> None:
+    import contextlib
+    import io
+
+    from stormlog.exit_codes import ExitCode
+    from stormlog.infer.cli import main as infer_main
+
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        code = infer_main(
+            [
+                "profile",
+                "--endpoint",
+                "http://127.0.0.1:1/v1/chat/completions",
+                "--model",
+                "fake-model",
+                "--output",
+                str(tmp_path / "never.jsonl"),
+                "--request-deadline",
+                value,
+            ]
+        )
+    assert code == ExitCode.USAGE
+    assert "--request-deadline must be > 0" in stderr.getvalue()

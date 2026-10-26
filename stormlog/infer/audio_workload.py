@@ -195,6 +195,7 @@ class AudioWorkload:
                 "duration_seconds": config.duration_seconds,
                 "overflow": config.overflow,
                 "timeout_seconds": config.timeout_seconds,
+                "request_deadline_seconds": config.request_deadline_seconds,
                 "drain_timeout_seconds": config.drain_timeout,
                 "max_response_bytes": config.max_response_bytes,
                 "max_audio_seconds": config.max_audio_seconds,

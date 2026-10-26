@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import http.client
 import math
 import os
@@ -98,10 +99,10 @@ class _Answered:
         self.response_class = _response_class(self._status_line)
 
     def _connect_deadline(self, call: Any) -> None:
-        timeout = getattr(self, "timeout", None)
-        deadline = (
-            time.perf_counter() + timeout if isinstance(timeout, (int, float)) else None
-        )
+        # The socket timeout bounds each read; only an opt-in request deadline
+        # bounds the whole request, so a long stream that keeps arriving lives.
+        limit = getattr(self, "request_deadline_seconds", None)
+        deadline = time.perf_counter() + limit if limit is not None else None
         self._create_connection = _bounded_connection
         call()
         self._request_deadline = deadline
@@ -130,6 +131,12 @@ class _Answered:
 
 
 class _TrackedHTTPConnection(_Answered, http.client.HTTPConnection):
+    def __init__(
+        self, *args: Any, request_deadline_seconds: float | None = None, **kwargs: Any
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.request_deadline_seconds = request_deadline_seconds
+
     def connect(self) -> None:
         try:
             self._connect_deadline(super().connect)
@@ -149,6 +156,12 @@ class _TrackedHTTPConnection(_Answered, http.client.HTTPConnection):
 
 
 class _TrackedHTTPSConnection(_Answered, http.client.HTTPSConnection):
+    def __init__(
+        self, *args: Any, request_deadline_seconds: float | None = None, **kwargs: Any
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.request_deadline_seconds = request_deadline_seconds
+
     def connect(self) -> None:
         try:
             self._connect_deadline(super().connect)
@@ -168,17 +181,38 @@ class _TrackedHTTPSConnection(_Answered, http.client.HTTPSConnection):
 
 
 class _TrackedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, request_deadline_seconds: float | None = None) -> None:
+        super().__init__()
+        self.request_deadline_seconds = request_deadline_seconds
+
     def http_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
-        return self.do_open(_TrackedHTTPConnection, req)
+        return self.do_open(
+            functools.partial(
+                _TrackedHTTPConnection,
+                request_deadline_seconds=self.request_deadline_seconds,
+            ),
+            req,
+        )
 
 
 class _TrackedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, request_deadline_seconds: float | None = None) -> None:
+        super().__init__()
+        self.request_deadline_seconds = request_deadline_seconds
+
     def https_open(self, req: urllib.request.Request) -> http.client.HTTPResponse:
         options: dict[str, Any] = {"context": getattr(self, "_context", None)}
         check_hostname = getattr(self, "_check_hostname", None)
         if check_hostname is not None:
             options["check_hostname"] = check_hostname
-        return self.do_open(_TrackedHTTPSConnection, req, **options)
+        return self.do_open(
+            functools.partial(
+                _TrackedHTTPSConnection,
+                request_deadline_seconds=self.request_deadline_seconds,
+            ),
+            req,
+            **options,
+        )
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -192,18 +226,22 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def inference_opener() -> urllib.request.OpenerDirector:
+def inference_opener(
+    request_deadline_seconds: float | None = None,
+) -> urllib.request.OpenerDirector:
     """An opener that marks where a request failed and goes straight there.
 
     It follows no redirects and ignores proxies from the environment. Through
     a proxy, ``connect()`` reaches the proxy, so a server that cannot be
     reached reads as the proxy's HTTP 502 rather than as ``unreachable``.
+    The ``timeout`` given to ``open`` bounds each socket wait;
+    ``request_deadline_seconds``, when set, also bounds the whole request.
     """
     return urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         _NoRedirect(),
-        _TrackedHTTPHandler(),
-        _TrackedHTTPSHandler(),
+        _TrackedHTTPHandler(request_deadline_seconds),
+        _TrackedHTTPSHandler(request_deadline_seconds),
     )
 
 
@@ -260,12 +298,14 @@ def safe_error(value: str, *, secrets: tuple[str | None, ...] = ()) -> str:
 
 
 class BoundedResponse:
-    """Bound cumulative reads and stop the underlying socket at a total deadline."""
+    """Bound cumulative reads, and stop the socket at a total deadline if one is set."""
 
-    def __init__(self, response: Any, *, deadline: float, max_bytes: int) -> None:
+    def __init__(
+        self, response: Any, *, deadline: float | None, max_bytes: int
+    ) -> None:
         if type(max_bytes) is not int or max_bytes < 1:
             raise ValueError("response byte limit must be a positive integer")
-        if not math.isfinite(deadline):
+        if deadline is not None and not math.isfinite(deadline):
             raise ValueError("request deadline must be finite")
         self.response = response
         self.deadline = deadline
@@ -278,7 +318,7 @@ class BoundedResponse:
     def __enter__(self) -> "BoundedResponse":
         fp = getattr(self.response, "fp", None)
         sock = getattr(getattr(fp, "raw", None), "_sock", None)
-        if sock is not None:
+        if sock is not None and self.deadline is not None:
             self._timer = threading.Timer(
                 max(0, self.deadline - time.perf_counter()), _shutdown, args=(sock,)
             )
@@ -290,8 +330,11 @@ class BoundedResponse:
         if self._timer is not None:
             self._timer.cancel()
 
+    def _expired(self) -> bool:
+        return self.deadline is not None and time.perf_counter() >= self.deadline
+
     def _checked(self, data: bytes) -> bytes:
-        if time.perf_counter() >= self.deadline:
+        if self._expired():
             raise RequestDeadlineExceeded(self.status)
         self.bytes_read += len(data)
         if self.bytes_read > self.max_bytes:
@@ -304,7 +347,7 @@ class BoundedResponse:
         try:
             data = self._checked(read(remaining))
         except OSError as exc:
-            if time.perf_counter() >= self.deadline:
+            if self._expired():
                 raise RequestDeadlineExceeded(self.status) from exc
             raise
         if not data:

@@ -630,6 +630,9 @@ def _workload_fields(records: Sequence[Mapping[str, Any]]) -> dict[str, RunField
         "workload.drain_timeout_seconds": RunField(
             measurement.get("drain_timeout_seconds"), source, OBSERVED
         ),
+        "workload.request_deadline_seconds": RunField(
+            measurement.get("request_deadline_seconds"), source, OBSERVED
+        ),
     }
 
 

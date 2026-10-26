@@ -19,9 +19,9 @@ from stormlog.infer.openai_client import OpenAIChatCompletionsClient
 from stormlog.infer.profile import classify_failure
 
 
-def client(url: str) -> OpenAIChatCompletionsClient:
+def client(url: str, **options: Any) -> OpenAIChatCompletionsClient:
     return OpenAIChatCompletionsClient(
-        endpoint=url, model="opaque", timeout_seconds=0.12
+        endpoint=url, model="opaque", timeout_seconds=0.12, **options
     )
 
 
@@ -115,7 +115,7 @@ def test_trickling_headers_cannot_extend_total_deadline() -> None:
     ) as url:
         started = time.perf_counter()
         with pytest.raises(RequestDeadlineExceeded):
-            complete(client(url))
+            complete(client(url, request_deadline_seconds=0.12))
         assert time.perf_counter() - started < 0.3
 
 
@@ -125,6 +125,24 @@ def test_error_body_deadline_preserves_rejected_http_status() -> None:
         trickle_headers=False,
     ) as url:
         with pytest.raises(EndpointHTTPError) as raised:
-            complete(client(url))
+            complete(client(url, request_deadline_seconds=0.12))
     assert raised.value.status == 429
     assert classify_failure(raised.value) == ("rejected", 429)
+
+
+def test_a_response_that_keeps_arriving_outlives_the_read_timeout() -> None:
+    # --timeout bounds each read, not the request: without --request-deadline
+    # a response that keeps arriving runs past it and completes.
+    body = b'{"choices": [{"message": {"content": "ok"}}]}'
+    wire = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+    with trickling_socket(wire, trickle_headers=False) as url:
+        started = time.perf_counter()
+        result = complete(client(url))
+    assert time.perf_counter() - started > 3 * 0.12
+    assert result.text == "ok"
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+def test_a_request_deadline_must_be_positive_and_finite(value: float) -> None:
+    with pytest.raises(ValueError, match="request deadline"):
+        client("http://127.0.0.1:1/v1/chat/completions", request_deadline_seconds=value)

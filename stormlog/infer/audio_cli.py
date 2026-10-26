@@ -41,7 +41,20 @@ def add_audio_parser(
         "--stream", action=argparse.BooleanOptionalAction, default=False
     )
     parser.add_argument("--response-format", choices=["wav", "json", "ndjson"])
-    parser.add_argument("--timeout", type=float, default=60)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=60,
+        help="Longest wait in seconds for each response read (default: 60)",
+    )
+    parser.add_argument(
+        "--request-deadline",
+        type=float,
+        help=(
+            "Cap each request's total time in seconds, including a response "
+            "still arriving (default: none)"
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-response-bytes", type=int, default=64 * 1024**2)
     parser.add_argument("--max-fixture-bytes", type=int, default=32 * 1024**2)
@@ -84,6 +97,7 @@ def cmd_profile_audio(args: argparse.Namespace) -> int:
             stream=args.stream,
             response_format=args.response_format,
             timeout_seconds=args.timeout,
+            request_deadline_seconds=args.request_deadline,
             max_response_bytes=args.max_response_bytes,
             max_fixture_bytes=args.max_fixture_bytes,
             max_manifest_bytes=args.max_manifest_bytes,

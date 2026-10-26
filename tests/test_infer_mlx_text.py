@@ -104,7 +104,7 @@ def test_total_deadline_stops_continuous_body() -> None:
     with endpoint(b" " * 200, trickle=True) as (url, calls):
         started = time.perf_counter()
         with pytest.raises(RequestDeadlineExceeded):
-            complete(url, timeout_seconds=0.12)
+            complete(url, request_deadline_seconds=0.12)
         assert time.perf_counter() - started < 0.5
     assert len(calls) == 1
 

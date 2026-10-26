@@ -165,6 +165,7 @@ class InferenceProfiler:
             endpoint=config.endpoint,
             model=config.model,
             timeout_seconds=config.timeout_seconds,
+            request_deadline_seconds=config.request_deadline_seconds,
             api_key=config.api_key,
             max_tokens_field=config.max_tokens_field,
             extra_body=config.extra_body,

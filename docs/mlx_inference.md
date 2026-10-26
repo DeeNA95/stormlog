@@ -17,8 +17,10 @@ stormlog infer profile --engine mlx-lm --task completion \
 
 Model IDs remain opaque. `--endpoint` is a full URL; `--base-url` gains only
 the task route. JSON and SSE share the existing no-redirect, no-proxy,
-no-retry transport. `--timeout` bounds the total request, including trickling
-responses; `--max-response-bytes` bounds cumulative response data. Sent
+no-retry transport. `--timeout` bounds each wait for response data, so a
+response that keeps arriving can take longer; `--request-deadline` caps the
+whole request, including a trickling response, and is off by default.
+`--max-response-bytes` bounds cumulative response data. Sent
 request IDs and server-generated completion IDs are recorded independently.
 Unknown server versions and execution attribution remain unavailable.
 

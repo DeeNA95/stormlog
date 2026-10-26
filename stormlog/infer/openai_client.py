@@ -68,6 +68,7 @@ class OpenAIChatCompletionsClient:
         extra_body: dict[str, Any] | None = None,
         max_response_bytes: int = 16 * 1024**2,
         task: str = "chat",
+        request_deadline_seconds: float | None = None,
     ) -> None:
         _validate_http_endpoint(endpoint)
         if task not in {"chat", "completion"}:
@@ -76,15 +77,20 @@ class OpenAIChatCompletionsClient:
             raise ValueError("response byte limit must be a positive integer")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("request timeout must be positive and finite")
+        if request_deadline_seconds is not None and (
+            not math.isfinite(request_deadline_seconds) or request_deadline_seconds <= 0
+        ):
+            raise ValueError("request deadline must be positive and finite")
         self.task = task
         self.max_response_bytes = max_response_bytes
         self.endpoint = endpoint
         self.model = model
         self.timeout_seconds = timeout_seconds
+        self.request_deadline_seconds = request_deadline_seconds
         self.api_key = api_key
         self.max_tokens_field = max_tokens_field
         self.extra_body = validate_extra_body(extra_body, max_tokens_field, task=task)
-        self._opener = inference_opener()
+        self._opener = inference_opener(request_deadline_seconds)
 
     def complete(
         self,
@@ -139,7 +145,7 @@ class OpenAIChatCompletionsClient:
             ) as raw_response:
                 with BoundedResponse(
                     raw_response,
-                    deadline=started_perf + self.timeout_seconds,
+                    deadline=self._deadline(started_perf),
                     max_bytes=self.max_response_bytes,
                 ) as response:
                     return self._parse_response(
@@ -152,7 +158,7 @@ class OpenAIChatCompletionsClient:
         except urllib.error.HTTPError as exc:
             try:
                 with BoundedResponse(
-                    exc, deadline=started_perf + self.timeout_seconds, max_bytes=65536
+                    exc, deadline=self._deadline(started_perf), max_bytes=65536
                 ) as response:
                     message = safe_error(
                         response.read().decode("utf-8", errors="replace"),
@@ -163,6 +169,11 @@ class OpenAIChatCompletionsClient:
             finally:
                 exc.close()
             raise EndpointHTTPError(exc.code, message) from exc
+
+    def _deadline(self, started_perf: float) -> float | None:
+        """When the whole request must end, if a request deadline is set."""
+        limit = self.request_deadline_seconds
+        return None if limit is None else started_perf + limit
 
     def _prompt_payload(self, prompt: str) -> dict[str, Any]:
         return (

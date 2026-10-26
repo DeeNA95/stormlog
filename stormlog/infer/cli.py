@@ -252,7 +252,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout",
         type=float,
         default=60.0,
-        help="Per-request timeout in seconds (default: 60)",
+        help="Longest wait in seconds for each response read (default: 60)",
+    )
+    profile_parser.add_argument(
+        "--request-deadline",
+        type=float,
+        help=(
+            "Cap each request's total time in seconds, including a response "
+            "still arriving (default: none)"
+        ),
     )
     profile_parser.add_argument(
         "--warmup-requests",
@@ -1100,6 +1108,7 @@ def _profile_config(args: argparse.Namespace) -> ProfileConfig:
         stream=bool(args.stream),
         stream_include_usage=bool(args.stream_usage),
         timeout_seconds=float(args.timeout),
+        request_deadline_seconds=args.request_deadline,
         warmup_requests=int(args.warmup_requests),
         output_path=args.output,
         api_key=args.api_key or os.environ.get("OPENAI_API_KEY"),
@@ -1664,8 +1673,7 @@ def _validate_profile_arguments(args: argparse.Namespace) -> None:
     _validate_prompt_arguments(args)
     _validate_cache_arguments(args)
     _validate_trace_arguments(args)
-    if args.timeout <= 0:
-        raise ValueError("--timeout must be > 0")
+    _validate_timeout_arguments(args)
     if args.warmup_requests < 0:
         raise ValueError("--warmup-requests must be >= 0")
     if args.sample_interval <= 0:
@@ -1673,6 +1681,13 @@ def _validate_profile_arguments(args: argparse.Namespace) -> None:
     _validate_vllm_metrics_arguments(args)
     _validate_vllm_span_arguments(args)
     _validate_execution_dir_argument(args)
+
+
+def _validate_timeout_arguments(args: argparse.Namespace) -> None:
+    if args.timeout <= 0:
+        raise ValueError("--timeout must be > 0")
+    if args.request_deadline is not None and not 0 < args.request_deadline < math.inf:
+        raise ValueError("--request-deadline must be > 0")
 
 
 def _validate_execution_dir_argument(args: argparse.Namespace) -> None:

@@ -76,7 +76,7 @@ def multipart(fixture: AudioFixture, config: AudioProfileConfig) -> tuple[bytes,
 class AudioClient:
     def __init__(self, config: AudioProfileConfig) -> None:
         self.config = config
-        self._opener = inference_opener()
+        self._opener = inference_opener(config.request_deadline_seconds)
 
     def complete(self, fixture: AudioFixture, *, request_id: str) -> AudioResult:
         config = self.config
@@ -112,9 +112,10 @@ class AudioClient:
         state = _AudioResponse(self.config, fixture, started_ns, started)
         try:
             with self._opener.open(request, timeout=self.config.timeout_seconds) as raw:
+                limit = self.config.request_deadline_seconds
                 with BoundedResponse(
                     raw,
-                    deadline=started + self.config.timeout_seconds,
+                    deadline=None if limit is None else started + limit,
                     max_bytes=self.config.max_response_bytes,
                 ) as response:
                     state.read(response)

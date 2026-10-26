@@ -100,6 +100,7 @@ class AudioProfileConfig:
     stream: bool = False
     response_format: str | None = None
     timeout_seconds: float = 60
+    request_deadline_seconds: float | None = None
     max_response_bytes: int = 64 * 1024**2
     max_fixture_bytes: int = 32 * 1024**2
     max_manifest_bytes: int = 8 * 1024**2
@@ -149,6 +150,7 @@ class AudioProfileConfig:
             _positive_integer(getattr(self, key), key)
         for key in (
             "timeout_seconds",
+            "request_deadline_seconds",
             "max_audio_seconds",
             "duration_seconds",
             "drain_timeout_seconds",

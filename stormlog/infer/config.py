@@ -103,6 +103,7 @@ class ProfileConfig:
     stream: bool = True
     stream_include_usage: bool = True
     timeout_seconds: float = 60.0
+    request_deadline_seconds: float | None = None
     warmup_requests: int = 0
     seed: int = 0
     api_key: str | None = None

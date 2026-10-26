@@ -207,7 +207,7 @@ Request outcomes:
 | `status` | Meaning |
 | --- | --- |
 | `ok` | The request completed |
-| `timeout` | The client gave up after `--timeout` while waiting for the response |
+| `timeout` | The client gave up: no response data arrived within `--timeout` of the last read, or the whole request outlasted `--request-deadline` |
 | `rejected` | The server answered HTTP 429 or 503; `http_status` says which |
 | `unreachable` | The connection failed before any byte of the request was sent: refused, DNS, a connect timeout or a TLS handshake. The server never saw the request |
 | `delivery_unknown` | The connection completed, but sending the request failed, or the server reset or closed the connection before the response's status line. A small request is handed to the operating system before the server reads it, so the server may or may not have received it |

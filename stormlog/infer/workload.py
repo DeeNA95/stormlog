@@ -74,6 +74,7 @@ def workload_spec(
             "overflow": config.overflow,
             "drain_timeout_seconds": config.drain_timeout_seconds,
             "timeout_seconds": config.timeout_seconds,
+            "request_deadline_seconds": config.request_deadline_seconds,
         },
         "prompts": prompt_spec.to_record(),
         "warmup": {
