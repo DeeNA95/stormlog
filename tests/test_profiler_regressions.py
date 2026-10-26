@@ -3,6 +3,7 @@ import subprocess
 import sys
 import textwrap
 from collections import defaultdict, deque
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -261,3 +262,46 @@ def test_profile_function_reraises_without_duplicating_profiler_frame(
     assert frame_names.count("profile_function") == 1
     assert "failing_operation" in frame_names
     assert len(harness.results) == 1
+
+
+def test_profile_function_counts_memory_freed_before_it_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A 100 MB tensor freed before the call returns: the net change is the
+    # 512-byte result, but the call allocated 100 MB and freed it.
+    counters = {"allocated_bytes.all.allocated": 0, "allocated_bytes.all.freed": 0}
+    mb = 1024**2
+    cuda = profiler_module.torch.cuda
+    monkeypatch.setattr(cuda, "reset_peak_memory_stats", lambda _device: None)
+    monkeypatch.setattr(cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(cuda, "memory_stats", lambda _device: dict(counters))
+    monkeypatch.setattr(cuda, "max_memory_allocated", lambda _device: 0)
+    monkeypatch.setattr(cuda, "max_memory_reserved", lambda _device: 0)
+
+    def transient() -> None:
+        counters["allocated_bytes.all.allocated"] += 100 * mb + 512
+        counters["allocated_bytes.all.freed"] += 100 * mb
+
+    harness = _ExceptionPathHarness()
+    harness.device = SimpleNamespace(index=0)  # type: ignore[assignment]
+    result = GPUMemoryProfiler.profile_function(harness, transient)  # type: ignore[arg-type, unused-ignore]
+
+    assert result.memory_allocated == 100 * mb + 512
+    assert result.memory_freed == 100 * mb
+
+
+def test_profile_function_falls_back_to_the_net_change_without_counters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cuda = profiler_module.torch.cuda
+    monkeypatch.setattr(cuda, "reset_peak_memory_stats", lambda _device: None)
+    monkeypatch.setattr(cuda, "synchronize", lambda _device: None)
+    monkeypatch.setattr(cuda, "memory_stats", lambda _device: {})
+    monkeypatch.setattr(cuda, "max_memory_allocated", lambda _device: 0)
+    monkeypatch.setattr(cuda, "max_memory_reserved", lambda _device: 0)
+
+    harness = _ExceptionPathHarness()
+    harness.device = SimpleNamespace(index=0)  # type: ignore[assignment]
+    result = GPUMemoryProfiler.profile_function(harness, lambda: None)  # type: ignore[arg-type, unused-ignore]
+
+    assert (result.memory_allocated, result.memory_freed) == (0, 0)

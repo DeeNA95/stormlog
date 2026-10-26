@@ -53,6 +53,41 @@ class MemorySnapshot:
         }
 
 
+def _allocator_totals(device: Any) -> Optional[tuple[int, int]]:
+    """Bytes the caching allocator has allocated and freed so far, if it counts.
+
+    Differences of these counters across a call are what the call allocated
+    and freed, transient tensors included; the net change of allocated memory
+    misses a tensor that is freed before the call returns.
+    """
+    try:
+        stats = torch.cuda.memory_stats(device)
+    except Exception:
+        return None
+    allocated = stats.get("allocated_bytes.all.allocated")
+    freed = stats.get("allocated_bytes.all.freed")
+    if isinstance(allocated, int) and isinstance(freed, int):
+        return allocated, freed
+    return None
+
+
+def _allocated_and_freed(
+    totals_before: Optional[tuple[int, int]],
+    totals_after: Optional[tuple[int, int]],
+    memory_before: "MemorySnapshot",
+    memory_after: "MemorySnapshot",
+) -> tuple[int, int]:
+    """Bytes allocated and freed during a call: the allocator's counters, or
+    the net change of allocated memory where it keeps none."""
+    if totals_before is not None and totals_after is not None:
+        return (
+            max(0, totals_after[0] - totals_before[0]),
+            max(0, totals_after[1] - totals_before[1]),
+        )
+    net = memory_after.allocated_memory - memory_before.allocated_memory
+    return max(0, net), max(0, -net)
+
+
 @dataclass
 class ProfileResult:
     """Results from profiling a function or operation."""
@@ -239,6 +274,7 @@ class GPUMemoryProfiler:
 
         # Take before snapshot
         memory_before = self._take_snapshot(f"before_{function_name}")
+        totals_before = _allocator_totals(self.device)
 
         # Track tensors if enabled
         if self._tensor_tracker:
@@ -277,6 +313,9 @@ class GPUMemoryProfiler:
 
         # Take after snapshot
         memory_after = self._take_snapshot(f"after_{function_name}")
+        allocated, freed = _allocated_and_freed(
+            totals_before, _allocator_totals(self.device), memory_before, memory_after
+        )
 
         # Get peak memory usage
         memory_stats = torch.cuda.memory_stats(self.device)
@@ -315,12 +354,8 @@ class GPUMemoryProfiler:
             memory_before=memory_before,
             memory_after=memory_after,
             memory_peak=memory_peak,
-            memory_allocated=max(
-                0, memory_after.allocated_memory - memory_before.allocated_memory
-            ),
-            memory_freed=max(
-                0, memory_before.allocated_memory - memory_after.allocated_memory
-            ),
+            memory_allocated=allocated,
+            memory_freed=freed,
             tensors_created=tensors_created,
             tensors_deleted=tensors_deleted,
         )
@@ -344,6 +379,7 @@ class GPUMemoryProfiler:
         """
         torch.cuda.reset_peak_memory_stats(self.device)
         memory_before = self._take_snapshot(f"before_{name}")
+        totals_before = _allocator_totals(self.device)
 
         if self._tensor_tracker:
             tensors_before = self._tensor_tracker.count_tensors()
@@ -356,6 +392,12 @@ class GPUMemoryProfiler:
         finally:
             end_time = time.time()
             memory_after = self._take_snapshot(f"after_{name}")
+            allocated, freed = _allocated_and_freed(
+                totals_before,
+                _allocator_totals(self.device),
+                memory_before,
+                memory_after,
+            )
 
             # Get peak memory
             memory_stats = torch.cuda.memory_stats(self.device)
@@ -393,12 +435,8 @@ class GPUMemoryProfiler:
                 memory_before=memory_before,
                 memory_after=memory_after,
                 memory_peak=memory_peak,
-                memory_allocated=max(
-                    0, memory_after.allocated_memory - memory_before.allocated_memory
-                ),
-                memory_freed=max(
-                    0, memory_before.allocated_memory - memory_after.allocated_memory
-                ),
+                memory_allocated=allocated,
+                memory_freed=freed,
                 tensors_created=tensors_created,
                 tensors_deleted=tensors_deleted,
             )
