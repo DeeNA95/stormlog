@@ -163,3 +163,50 @@ def test_memory_leak_detection_keeps_consistent_growth_signal() -> None:
     patterns = MemoryAnalyzer().analyze_memory_patterns(results)
 
     assert any(pattern.pattern_type == "memory_leak" for pattern in patterns)
+
+
+def _make_cached_result(name: str, inactive: int) -> ProfileResult:
+    """A step leaving 1 GiB allocated in 4 GiB reserved: 3 GiB free in cache."""
+    gib = 1024**3
+    snapshot = MemorySnapshot(
+        timestamp=1.0,
+        allocated_memory=gib,
+        reserved_memory=4 * gib,
+        max_memory_allocated=2 * gib,
+        max_memory_reserved=4 * gib,
+        active_memory=gib,
+        inactive_memory=inactive,
+        cpu_memory=0,
+    )
+    return ProfileResult(
+        function_name=name,
+        execution_time=0.1,
+        memory_before=snapshot,
+        memory_after=snapshot,
+        memory_peak=snapshot,
+        memory_allocated=0,
+        memory_freed=0,
+        tensors_created=0,
+        tensors_deleted=0,
+    )
+
+
+def test_a_large_cache_without_split_blocks_is_not_fragmentation() -> None:
+    patterns = MemoryAnalyzer().analyze_memory_patterns(
+        [_make_cached_result("train_step", inactive=0) for _ in range(3)]
+    )
+
+    assert not [p for p in patterns if p.pattern_type == "fragmentation"]
+
+
+def test_split_blocks_over_the_threshold_are_fragmentation() -> None:
+    gib = 1024**3
+    patterns = MemoryAnalyzer().analyze_memory_patterns(
+        [_make_cached_result("train_step", inactive=2 * gib) for _ in range(3)]
+    )
+
+    (pattern,) = [p for p in patterns if p.pattern_type == "fragmentation"]
+    assert pattern.metrics["average_fragmentation"] == pytest.approx(0.5)
+    assert pattern.affected_functions == ["train_step"]
+    assert any("expandable_segments" in s for s in pattern.suggestions)
+    assert not any("empty_cache" in s for s in pattern.suggestions)

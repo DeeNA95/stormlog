@@ -535,8 +535,10 @@ def suggest_memory_optimization(fragmentation_info: Dict[str, Any]) -> List[str]
 
     if fragmentation_ratio > 0.3:
         suggestions.append(
-            "High memory fragmentation detected. Consider calling torch.cuda.empty_cache() "
-            "periodically or restructuring your code to reduce fragmentation."
+            "High memory fragmentation: inactive split blocks hold over 30% of "
+            "reserved memory. Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, "
+            "allocate long-lived tensors before the loop, and keep tensor shapes "
+            "steady."
         )
 
     if utilization_ratio > 0.9:
@@ -547,8 +549,10 @@ def suggest_memory_optimization(fragmentation_info: Dict[str, Any]) -> List[str]
 
     if waste_ratio > 0.2:
         suggestions.append(
-            "Significant memory waste detected. Review memory allocation patterns "
-            "and consider using more efficient data structures."
+            "Over 20% of the GPU is reserved but not allocated: PyTorch's cache "
+            "keeps freed blocks for reuse, which is normal. If another process "
+            "needs that memory, torch.cuda.empty_cache() returns the unused "
+            "segments to the device."
         )
 
     if utilization_ratio < 0.3:
@@ -620,7 +624,9 @@ def memory_summary(device: Optional[Union[str, int, torch.device]] = None) -> st
     summary.append(
         f"  Fragmentation: {fragmentation_info.get('fragmentation_ratio', 0):.1%}"
     )
-    summary.append(f"  Waste: {fragmentation_info.get('waste_ratio', 0):.1%}")
+    # waste_ratio is the reserved-but-unallocated share of the device: the
+    # allocator's cache, kept for reuse. The key stays for existing callers.
+    summary.append(f"  Cached: {fragmentation_info.get('waste_ratio', 0):.1%}")
     summary.append("")
 
     # Suggestions

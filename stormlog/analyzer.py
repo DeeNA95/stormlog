@@ -74,9 +74,12 @@ _GAP_REMEDIATION_BY_CLASSIFICATION: Dict[str, List[str]] = {
         "If gap stabilises after warmup, it may be one-time CUDA context overhead.",
     ],
     "fragmentation_like": [
-        "Call torch.cuda.empty_cache() periodically to release unused reserved blocks.",
-        "Reduce allocation churn by pre-allocating tensors or using memory pools.",
-        "Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to reduce fragmentation.",
+        "Set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True so segments grow "
+        "in place instead of being split.",
+        "Allocate long-lived tensors (weights, optimizer state, buffers) before "
+        "the loop, so short-lived ones do not split their segments.",
+        "Keep shapes steady: pad or bucket variable sequence lengths and image "
+        "sizes into a few sizes.",
     ],
 }
 
@@ -110,7 +113,8 @@ class MemoryAnalyzer:
         # Analysis thresholds
         self.thresholds = {
             "memory_leak_ratio": 0.7,  # Growth in most calls indicates potential leak
-            "fragmentation_ratio": 0.3,  # 30% fragmentation is concerning
+            # Inactive split blocks over reserved: 30% is concerning.
+            "fragmentation_ratio": 0.3,
             "inefficient_allocation_ratio": 0.5,  # 50% waste in allocations
             "slow_function_percentile": 0.9,  # Top 10% slowest functions
             "high_memory_percentile": 0.9,  # Top 10% memory-heavy functions
@@ -119,7 +123,7 @@ class MemoryAnalyzer:
             "gap_ratio_threshold": 0.05,  # 5% of device total = significant gap
             "gap_spike_zscore": 2.0,  # z-score for transient spike detection
             "gap_drift_r_squared": 0.6,  # R-squared for persistent drift
-            "gap_fragmentation_ratio": 0.3,  # reserved-allocated / reserved
+            "gap_fragmentation_ratio": 0.3,  # inactive split / reserved
         }
 
     def analyze_memory_patterns(
@@ -206,7 +210,13 @@ class MemoryAnalyzer:
     def _detect_fragmentation_issues(
         self, results: List[ProfileResult]
     ) -> List[MemoryPattern]:
-        """Detect memory fragmentation patterns."""
+        """Detect memory fragmentation patterns.
+
+        Fragmentation is the share of reserved memory in inactive split
+        blocks (``inactive_split_bytes``), as ``check_memory_fragmentation``
+        measures it. Reserved minus allocated is the caching allocator's free
+        cache, which is reused and is not fragmentation.
+        """
         patterns = []
 
         # Calculate fragmentation metrics across all results
@@ -214,12 +224,11 @@ class MemoryAnalyzer:
         high_frag_functions = []
 
         for result in results:
-            # Use reserved vs allocated memory as fragmentation indicator
-            allocated = result.memory_after.allocated_memory
+            inactive = result.memory_after.inactive_memory
             reserved = result.memory_after.reserved_memory
 
             if reserved > 0:
-                fragmentation_ratio = (reserved - allocated) / reserved
+                fragmentation_ratio = inactive / reserved
                 fragmentation_ratios.append(fragmentation_ratio)
 
                 if fragmentation_ratio > self.thresholds["fragmentation_ratio"]:
@@ -245,12 +254,9 @@ class MemoryAnalyzer:
                                 set(high_frag_functions)
                             ),
                         },
-                        suggestions=[
-                            "Call torch.cuda.empty_cache() periodically",
-                            "Restructure code to reduce allocation/deallocation cycles",
-                            "Consider pre-allocating tensors when possible",
-                            "Use tensor.detach() to break computation graphs early",
-                        ],
+                        suggestions=list(
+                            _GAP_REMEDIATION_BY_CLASSIFICATION["fragmentation_like"]
+                        ),
                     )
                 )
 
