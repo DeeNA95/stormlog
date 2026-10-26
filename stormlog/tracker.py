@@ -903,26 +903,35 @@ class MemoryTracker:
         allocated: Optional[int],
         reserved: Optional[int],
     ) -> bool:
-        # Fragmentation warning. With nothing allocated the reserved pool is
-        # idle cache, not fragmented memory, and every sample would warn.
+        # Fragmentation warning. PyTorch's caching allocator keeps freed
+        # blocks reserved for reuse, so reserved minus allocated is mostly
+        # cache. Where the allocator reports its inactive split blocks (free
+        # space inside segments still in use), they are the fragmentation, as
+        # in check_memory_fragmentation; otherwise the reserved-allocated
+        # ratio stands in. With nothing allocated the pool is idle cache.
+        capabilities = self.collector_capabilities
         if (
-            self.collector_capabilities.supports_fragmentation_analysis
-            and reserved is not None
-            and allocated is not None
-            and allocated > 0
-            and reserved > 0
+            not capabilities.supports_fragmentation_analysis
+            or reserved is None
+            or reserved <= 0
         ):
+            return False
+        inactive = sample.inactive_bytes
+        if capabilities.supports_allocator_inactive and inactive is not None:
+            fragmentation = inactive / reserved
+        elif allocated is not None and allocated > 0:
             fragmentation = (reserved - allocated) / reserved
-            if fragmentation > self.thresholds["fragmentation_threshold"]:
-                self._add_event(
-                    "warning",
-                    change,
-                    f"High fragmentation: {fragmentation:.1%}",
-                    {"fragmentation": fragmentation},
-                    sample=sample,
-                )
-                return True
-
+        else:
+            return False
+        if fragmentation > self.thresholds["fragmentation_threshold"]:
+            self._add_event(
+                "warning",
+                change,
+                f"High fragmentation: {fragmentation:.1%}",
+                {"fragmentation": fragmentation},
+                sample=sample,
+            )
+            return True
         return False
 
     @staticmethod

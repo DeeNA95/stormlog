@@ -935,13 +935,26 @@ def test_memory_tracker_emits_structured_phase_boundaries(
 
 
 @pytest.mark.parametrize(
-    ("allocated", "reserved", "warned"),
-    [(0, 384 * 1024, False), (128, 1024, True), (900, 1024, False)],
+    ("allocated", "reserved", "inactive", "warned"),
+    [
+        # Inactive split blocks reported: they are the fragmentation.
+        (128, 1024, 512, True),
+        (128, 1024, 0, False),  # a large cache with no split blocks
+        (900, 1024, 64, False),
+        # Not reported: the reserved-allocated ratio stands in.
+        (128, 1024, None, True),
+        (900, 1024, None, False),
+        (0, 384 * 1024, None, False),  # nothing allocated: idle cache
+    ],
 )
-def test_fragmentation_warns_only_with_memory_allocated(
-    monkeypatch: pytest.MonkeyPatch, allocated: int, reserved: int, warned: bool
+def test_fragmentation_warns_on_split_blocks_or_the_cache_ratio(
+    monkeypatch: pytest.MonkeyPatch,
+    allocated: int,
+    reserved: int,
+    inactive: int | None,
+    warned: bool,
 ) -> None:
-    sample = _sample(allocated=allocated, reserved=reserved)
+    sample = _sample(allocated=allocated, reserved=reserved, inactive=inactive)
     collector = _SequencedCollector([DeviceMemorySampleResult(sample=sample)])
     tracker = _build_tracker(monkeypatch, collector)
 
