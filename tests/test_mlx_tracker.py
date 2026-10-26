@@ -278,3 +278,14 @@ def test_sampler_failure_is_visible_and_restartable(
     tracker._sampler.callback = original
     tracker.start_tracking()
     assert tracker.stop_tracking().session_summary.status == "completed"
+
+
+def test_tracker_export_loads_with_the_shared_loader(tmp_path: Path) -> None:
+    tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=10)
+    with tracker.tracking():
+        tracker._sample()
+    path = tmp_path / "mlx-tracking.json"
+    tracker.export(path)
+    (session,) = load_telemetry_sessions(path)
+    assert session.summary.status == "completed"
+    assert len(session.events) == tracker.get_results().total_events

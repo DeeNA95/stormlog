@@ -1295,6 +1295,8 @@ def _load_json_records(
                 )
         elif isinstance(payload.get("events"), list):
             records = payload["events"]
+        elif isinstance(payload.get("telemetry_events"), list):
+            records = payload["telemetry_events"]
         elif _looks_like_event_record(payload):
             records = [payload]
         else:
