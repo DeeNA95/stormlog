@@ -124,7 +124,7 @@ tracker = MemoryTracker(
     ),
 )
 with tracker.tracking():
-    with tracker.phase("train", {"epoch": 1}):
+    with tracker.phase("train", metadata={"epoch": 1}):
         train_or_generate()  # the application owns evaluation and its streams
 tracker.export("mlx-tracking.json")
 ```
@@ -240,11 +240,18 @@ can mix their output with the final CLI JSON; `report.json` is the durable
 machine-readable verdict. `analyze` accepts `--session-id` and writes
 `analysis.json` plus the shared report. It can return 3 for candidate growth,
 gaps or unverified completion; inspect findings rather than treating growth
-as a confirmed leak.
+as a confirmed leak. For `run`, the last sample is taken after the script's
+module globals are released, so growth there means memory still allocated
+after the script ended, not memory it held while running.
+
+Without `--output`, every command writes its bundle to a new
+`mlx-<command>-<time>-N` directory in the current directory. That includes
+`analyze`, whose report records an invalid input as well.
 
 Capture options include `--interval`, `--max-history`, `--rollover-max-events`,
 `--retention-max-files`, `--max-buffer-bytes`, `--job-id`, `--rank`,
-`--local-rank` and `--world-size`. The first two history/retention limits apply
+`--local-rank` and `--world-size`. `--max-buffer-bytes` must be at least 64 KiB,
+since one telemetry record is about 2 KB. The first two history/retention limits apply
 independently to memory and disk. Disk retention can remove old segments.
 `--alert-threshold-mb` is an opt-in active allocation alert in MiB. Flight
 recording limits are `--oom-max-dumps` and `--oom-max-total-mb`. No cleanup,

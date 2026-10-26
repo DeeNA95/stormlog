@@ -36,6 +36,15 @@ def _count(value: str) -> int:
     return result
 
 
+def _buffer_bytes(value: str) -> int:
+    from .artifacts import MIN_BUFFER_BYTES
+
+    result = _count(value)
+    if result < MIN_BUFFER_BYTES:
+        raise argparse.ArgumentTypeError(f"must be at least {MIN_BUFFER_BYTES}")
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mlxmemprof",
@@ -50,7 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--format", choices=("json", "txt"), default="txt")
         command.add_argument(
             "--output",
-            help="New bundle directory; an existing directory receives a unique child",
+            help=(
+                "New bundle directory; an existing directory receives a unique "
+                "child. Default: mlx-<command>-<time>-N in the current directory"
+            ),
         )
         if name in ("monitor", "track", "run", "diagnose"):
             _capture_arguments(command)
@@ -88,7 +100,12 @@ def _capture_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--rollover-max-events", type=_count, default=10000)
     parser.add_argument("--retention-max-files", type=_count, default=8)
-    parser.add_argument("--max-buffer-bytes", type=_count, default=4 * 1024**2)
+    parser.add_argument(
+        "--max-buffer-bytes",
+        type=_buffer_bytes,
+        default=4 * 1024**2,
+        help="Telemetry write buffer in bytes; at least 65536 (64 KiB)",
+    )
     parser.add_argument("--oom-max-dumps", type=_count, default=5)
     parser.add_argument("--oom-max-total-mb", type=_count, default=256)
     parser.add_argument("--job-id")
@@ -104,7 +121,8 @@ def _emit(args: argparse.Namespace, payload: dict[str, Any]) -> None:
         print(payload.get("summary", "MLX allocator in this process"))
         if payload.get("artifact_dir"):
             print(f"Artifacts: {payload['artifact_dir']}")
-        if payload.get("error"):
+        # A failed command's summary is often its error; say it once.
+        if payload.get("error") and payload["error"] != payload.get("summary"):
             print(payload["error"], file=sys.stderr)
 
 

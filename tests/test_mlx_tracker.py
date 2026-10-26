@@ -1,5 +1,7 @@
 import threading
 import time
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -9,7 +11,7 @@ from stormlog.telemetry_sink import TelemetrySinkConfig
 from tests.mlx_fakes import FakeCore, make_runtime
 
 
-def test_lifecycle_retention_and_sink_rotation(tmp_path):
+def test_lifecycle_retention_and_sink_rotation(tmp_path: Path) -> None:
     core = FakeCore()
     tracker = MemoryTracker(
         runtime=make_runtime(core),
@@ -49,7 +51,7 @@ def test_lifecycle_retention_and_sink_rotation(tmp_path):
     assert not any(isinstance(c, tuple) and c[0] == "sync" for c in core.calls)
 
 
-def test_gap_health_backoff_recovery_and_zero():
+def test_gap_health_backoff_recovery_and_zero() -> None:
     core = FakeCore()
     tracker = MemoryTracker(runtime=make_runtime(core), sampling_interval=10)
     tracker.start_tracking()
@@ -69,10 +71,10 @@ def test_gap_health_backoff_recovery_and_zero():
     assert tracker.stop_tracking().session_summary.status == "completed"
 
 
-def test_interruptible_stop_and_phase_context():
+def test_interruptible_stop_and_phase_context() -> None:
     tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=100)
     tracker.start_tracking()
-    with tracker.phase("train", {"epoch": 1}):
+    with tracker.phase("train", metadata={"epoch": 1}):
         with tracker.phase("step"):
             pass
     start = time.monotonic()
@@ -90,12 +92,14 @@ def test_interruptible_stop_and_phase_context():
 
 
 @pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf"), True])
-def test_invalid_interval(value):
+def test_invalid_interval(value: Any) -> None:
     with pytest.raises(ValueError):
         MemoryTracker(runtime=make_runtime(), sampling_interval=value)
 
 
-def test_sink_failure_evidence_and_shutdown(monkeypatch, tmp_path):
+def test_sink_failure_evidence_and_shutdown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     tracker = MemoryTracker(
         runtime=make_runtime(),
         sampling_interval=10,
@@ -112,7 +116,7 @@ def test_sink_failure_evidence_and_shutdown(monkeypatch, tmp_path):
     assert not tracker.is_tracking
 
 
-def test_context_original_exception_and_no_thread_leak():
+def test_context_original_exception_and_no_thread_leak() -> None:
     tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=0.001)
     error = ValueError("workload")
     with pytest.raises(ValueError) as found:
@@ -123,7 +127,7 @@ def test_context_original_exception_and_no_thread_leak():
     assert tracker.session_summary.status == "incomplete"
 
 
-def test_no_sample_drift_or_sampler_thread_on_stop():
+def test_no_sample_drift_or_sampler_thread_on_stop() -> None:
     tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=0.002)
     tracker.start_tracking()
     time.sleep(0.02)
@@ -134,14 +138,14 @@ def test_no_sample_drift_or_sampler_thread_on_stop():
     )
 
 
-def test_phase_cannot_reopen_a_closed_sink(tmp_path):
+def test_phase_cannot_reopen_a_closed_sink(tmp_path: Path) -> None:
     tracker = MemoryTracker(
         runtime=make_runtime(),
         sampling_interval=10,
         telemetry_sink_config=TelemetrySinkConfig(tmp_path, write_rollups=False),
     )
     tracker.start_tracking()
-    phase = tracker.phase("unclosed")
+    phase = tracker.enter_phase("unclosed")
     result = tracker.stop_tracking()
     with pytest.raises(RuntimeError, match="tracking stops"):
         phase.close()
@@ -149,12 +153,14 @@ def test_phase_cannot_reopen_a_closed_sink(tmp_path):
     assert tracker._sink.current_session() is None
 
 
-def test_workload_exception_preserved_when_final_sampling_fails(monkeypatch):
+def test_workload_exception_preserved_when_final_sampling_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=10)
     original = KeyboardInterrupt()
     capture = tracker.collector.capture_snapshot
 
-    def final_failure(name="sample"):
+    def final_failure(name: str = "sample") -> Any:
         if name == "stop":
             raise RuntimeError("finalization failure")
         return capture(name)
@@ -168,7 +174,9 @@ def test_workload_exception_preserved_when_final_sampling_fails(monkeypatch):
     assert tracker.session_summary.status == "interrupted"
 
 
-def test_failed_sink_start_does_not_leave_running_session(monkeypatch, tmp_path):
+def test_failed_sink_start_does_not_leave_running_session(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from stormlog.telemetry_sink import AppendOnlyTelemetrySink
 
     monkeypatch.setattr(
@@ -185,9 +193,10 @@ def test_failed_sink_start_does_not_leave_running_session(monkeypatch, tmp_path)
         tracker.start_tracking()
     assert not tracker.is_tracking
     assert tracker.session_summary.status == "incomplete"
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
 
 
-def test_alerts_are_bounded_without_allocator_mutations():
+def test_alerts_are_bounded_without_allocator_mutations() -> None:
     core = FakeCore()
     tracker = MemoryTracker(
         runtime=make_runtime(core),
@@ -205,7 +214,9 @@ def test_alerts_are_bounded_without_allocator_mutations():
     assert "reset" not in core.calls and "eval" not in core.calls
 
 
-def test_identity_from_environment_without_distributed_init(monkeypatch):
+def test_identity_from_environment_without_distributed_init(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("RANK", "2")
     monkeypatch.setenv("LOCAL_RANK", "1")
     monkeypatch.setenv("WORLD_SIZE", "4")
@@ -222,7 +233,9 @@ def test_identity_from_environment_without_distributed_init(monkeypatch):
     assert result.telemetry_events[0]["rank"] == 2
 
 
-def test_sink_disk_failure_with_bounded_buffer(monkeypatch, tmp_path):
+def test_sink_disk_failure_with_bounded_buffer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     tracker = MemoryTracker(
         runtime=make_runtime(),
         sampling_interval=10,
@@ -232,7 +245,7 @@ def test_sink_disk_failure_with_bounded_buffer(monkeypatch, tmp_path):
     )
     tracker.start_tracking()
 
-    def fail_write(*args):
+    def fail_write(*args: Any) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(tracker._sink, "_write_payload_locked", fail_write)
@@ -246,12 +259,14 @@ def test_sink_disk_failure_with_bounded_buffer(monkeypatch, tmp_path):
     assert not tracker.is_tracking
 
 
-def test_sampler_failure_is_visible_and_restartable(monkeypatch):
+def test_sampler_failure_is_visible_and_restartable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=0.001)
     tracker.start_tracking()
     original = tracker._sampler.callback
 
-    def broken():
+    def broken() -> None:
         raise RuntimeError("sampler callback failed")
 
     tracker._sampler.callback = broken
@@ -264,3 +279,37 @@ def test_sampler_failure_is_visible_and_restartable(monkeypatch):
     tracker._sampler.callback = original
     tracker.start_tracking()
     assert tracker.stop_tracking().session_summary.status == "completed"
+
+
+def test_tracker_export_loads_with_the_shared_loader(tmp_path: Path) -> None:
+    tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=10)
+    with tracker.tracking():
+        tracker._sample()
+    path = tmp_path / "mlx-tracking.json"
+    tracker.export(path)
+    (session,) = load_telemetry_sessions(path)
+    assert session.summary.status == "completed"
+    assert len(session.events) == tracker.get_results().total_events
+
+
+def test_phase_keeps_the_callers_exception_after_tracking_stops() -> None:
+    tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=10)
+    tracker.start_tracking()
+    with pytest.raises(ValueError, match="user error"):
+        with tracker.phase("p"):
+            tracker.stop_tracking()
+            raise ValueError("user error")
+
+
+def test_phase_closed_after_tracking_stops_still_raises() -> None:
+    tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=10)
+    tracker.start_tracking()
+    with pytest.raises(RuntimeError, match="tracking stops"):
+        with tracker.phase("p"):
+            tracker.stop_tracking()
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), True])
+def test_invalid_alert_threshold_names_itself(value: Any) -> None:
+    with pytest.raises(ValueError, match="alert_threshold_mb must be positive"):
+        MemoryTracker(runtime=make_runtime(), alert_threshold_mb=value)

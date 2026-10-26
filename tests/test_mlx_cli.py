@@ -5,6 +5,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import jsonschema
 import pytest
@@ -15,7 +16,7 @@ from tests.mlx_fakes import make_runtime
 
 
 @pytest.fixture
-def fake_runtime(monkeypatch):
+def fake_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("stormlog.mlx.artifacts.MLXRuntime", make_runtime)
     monkeypatch.setattr("stormlog.mlx.runtime.MLXRuntime", make_runtime)
 
@@ -23,16 +24,20 @@ def fake_runtime(monkeypatch):
 @pytest.mark.parametrize(
     "args", [[], ["--help"], ["run", "--help"], ["analyze", "--help"]]
 )
-def test_help_is_lazy(args, monkeypatch):
-    monkeypatch.setattr(
-        "stormlog.mlx.runtime.MLXRuntime", lambda: pytest.fail("native discovery")
-    )
+def test_help_is_lazy(args: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_discovery() -> None:
+        pytest.fail("native discovery")
+
+    monkeypatch.setattr("stormlog.mlx.runtime.MLXRuntime", no_discovery)
     assert main(args) == (2 if not args else 0)
 
 
 def test_info_available_and_unavailable_json(
-    tmp_path, fake_runtime, capsys, monkeypatch
-):
+    tmp_path: Path,
+    fake_runtime: None,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     assert main(["info", "--json", "--output", str(tmp_path / "info")]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["available"] is True
@@ -40,7 +45,7 @@ def test_info_available_and_unavailable_json(
     assert not payload["memory_capabilities"]["supports_device_total"]
     from stormlog.mlx.runtime import MLXNotInstalledError
 
-    def fail():
+    def fail() -> None:
         raise MLXNotInstalledError("Install stormlog[mlx]")
 
     monkeypatch.setattr("stormlog.mlx.runtime.MLXRuntime", fail)
@@ -50,8 +55,8 @@ def test_info_available_and_unavailable_json(
 
 @pytest.mark.parametrize("command", ["monitor", "track", "diagnose"])
 def test_capture_commands_reports_and_roundtrip(
-    tmp_path, fake_runtime, capsys, command
-):
+    tmp_path: Path, fake_runtime: None, capsys: pytest.CaptureFixture[str], command: str
+) -> None:
     from stormlog import query
 
     assert (
@@ -64,7 +69,11 @@ def test_capture_commands_reports_and_roundtrip(
     directory = payload["artifact_dir"]
     report = load_report(tmp_path / command / "report.json")
     assert report["verdict"]["exit_code"] == 0
-    assert query.open([directory]).query_events()
+    store = query.open([directory])
+    sink_events = query.open([Path(directory) / "telemetry"]).query_events()
+    assert sink_events
+    assert len(store.query_events()) == len(sink_events)
+    assert len(store.list_sessions()) == 1
     assert (
         main(
             [
@@ -90,7 +99,9 @@ def test_capture_commands_reports_and_roundtrip(
     jsonschema.validate(load_report(tmp_path / "analysis/report.json"), schema)
 
 
-def test_monitor_prints_passive_live_labels(tmp_path, fake_runtime, capsys):
+def test_monitor_prints_passive_live_labels(
+    tmp_path: Path, fake_runtime: None, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert (
         main(["monitor", "--duration", "0", "--output", str(tmp_path / "monitor")]) == 0
     )
@@ -98,7 +109,9 @@ def test_monitor_prints_passive_live_labels(tmp_path, fake_runtime, capsys):
     assert "This process: active" in text and "lifetime peak" in text
 
 
-def test_run_workload_arguments_and_failures(tmp_path, fake_runtime, capsys):
+def test_run_workload_arguments_and_failures(
+    tmp_path: Path, fake_runtime: None, capsys: pytest.CaptureFixture[str]
+) -> None:
     script = tmp_path / "script.py"
     script.write_text(
         "import sys\nassert sys.argv[1:] == ['--duration', '999']\nraise SystemExit(12)"
@@ -133,15 +146,18 @@ def test_run_workload_arguments_and_failures(tmp_path, fake_runtime, capsys):
         ["track", "--max-history", "0"],
         ["track", "--rank", "-1"],
         ["track", "--world-size", "0"],
+        ["track", "--max-buffer-bytes", "1024"],
     ],
 )
-def test_usage_errors(args, fake_runtime, tmp_path):
+def test_usage_errors(args: list[str], fake_runtime: None, tmp_path: Path) -> None:
     if args == ["track", "--rank", "-1"]:
         args += ["--output", str(tmp_path / "capture")]
     assert main(args) == 2
 
 
-def test_invalid_input_writes_invalid_input_report(tmp_path, capsys):
+def test_invalid_input_writes_invalid_input_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert (
         main(
             [
@@ -162,7 +178,7 @@ def test_invalid_input_writes_invalid_input_report(tmp_path, capsys):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX signal contract")
-def test_real_sigint_finalizes_script_capture(tmp_path):
+def test_real_sigint_finalizes_script_capture(tmp_path: Path) -> None:
     script = tmp_path / "script.py"
     ready = tmp_path / "ready"
     script.write_text(
@@ -207,8 +223,8 @@ raise SystemExit(main(['run', '--json', '--output', sys.argv[1], '--', sys.argv[
 
 
 def test_analysis_output_failure_is_error_not_invalid_input(
-    tmp_path, monkeypatch, capsys
-):
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     from pathlib import Path
 
     from tests.test_mlx_analysis import write_events
@@ -217,7 +233,7 @@ def test_analysis_output_failure_is_error_not_invalid_input(
     write_events(source, [100, 100])
     original = Path.write_text
 
-    def write(self, *args, **kwargs):
+    def write(self: Path, *args: Any, **kwargs: Any) -> int:
         if self.name == "analysis.json":
             raise OSError("disk full")
         return original(self, *args, **kwargs)
@@ -232,3 +248,29 @@ def test_analysis_output_failure_is_error_not_invalid_input(
     assert report["verdict"]["exit_code"] == 1
     assert "disk full" in report["payload"]["error"]
     assert not report["artifacts"]
+
+
+def test_capture_options_refuse_a_buffer_smaller_than_a_record() -> None:
+    from stormlog.mlx.artifacts import MIN_BUFFER_BYTES, CaptureOptions
+
+    with pytest.raises(ValueError, match="max_buffer_bytes must be at least"):
+        CaptureOptions(max_buffer_bytes=MIN_BUFFER_BYTES - 1)
+    assert CaptureOptions(max_buffer_bytes=MIN_BUFFER_BYTES).max_buffer_bytes
+
+
+@pytest.mark.parametrize("name", ["interval", "alert_threshold_mb"])
+def test_capture_options_name_the_invalid_setting(name: str) -> None:
+    from stormlog.mlx.artifacts import CaptureOptions
+
+    options: dict[str, Any] = {name: -1.0}
+    with pytest.raises(ValueError, match=f"{name} must be positive"):
+        CaptureOptions(**options)
+
+
+def test_text_mode_prints_an_analyze_error_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "missing.json"
+    assert main(["analyze", str(missing), "--output", str(tmp_path / "out")]) == 5
+    captured = capsys.readouterr()
+    assert (captured.out + captured.err).count(str(missing)) == 1

@@ -16,9 +16,9 @@ section records the completed CLI/TUI rollout and comparative timing evidence.
   no PyTorch, TensorFlow or JAX installed. Package/class/offline imports were
   also tested with imports of all four frameworks explicitly blocked.
 - Qualification began at revision `2498e07` with the PR 1 tracking/packaging
-  changes in the working tree. Per-module SHA-256 digests are recorded in
-  `artifacts/mlx-pr1-qualification/qualification.json` to identify the exact
-  tested implementation. Generated artifacts are ignored by Git.
+  changes uncommitted in the working tree. Per-module SHA-256 digests were kept
+  in a local artifact that is not in the repository, so the exact tested source
+  can't be checked from here.
 
 The filesystem sandbox could not initialize a Metal device. The same native
 probe and tests succeeded with native device access outside that sandbox.
@@ -56,6 +56,13 @@ and counted 13 dropped in-memory samples. All 16 persisted events reloaded into
 the same completed session. Disk retention and in-memory retention are separate.
 
 ## Reproduction and gates
+
+The 2026-10-16 merge of `release/dev` revision `330f7fe` into
+`mlx-integration` passed 269 codec/capture/accounting/execution/docs regressions
+and 79 framework-independent MLX contracts. The merged import tests retain
+the upstream newer-hook cases and embedded/compact seed coverage. CI-pinned
+formatting, lint, mypy (257 source files) and the complexity gate passed.
+Native results below and above remain tied to their recorded qualification.
 
 ```bash
 python3 -m venv /tmp/stormlog-mlx-isolation
@@ -187,3 +194,14 @@ scoped server evidence; it is not implemented by this qualification. Owned
 Metal trace capture, array-buffer inspection, Linux MLX CPU/CUDA and distributed
 qualification remain optional follow-ups. Endpoint client profiling does not
 read an external server's process allocator.
+
+## Base-branch merge verification (2026-10-16)
+
+Merged `release/dev` at `330f7fe` into `mlx-integration2`. The execution-import
+test keeps the upstream newer-hook evidence cases and exercises repeat imports
+with both embedded and compact context seeds. The affected execution, codec,
+MLX, CLI/TUI, telemetry, query, session and documentation selection passed
+417 tests; the separate framework-independent MLX suite passed 140 tests.
+Repository-wide CI-pinned formatting, lint and mypy (264 source files), plus
+the complexity gate, passed. These are portable regression checks; native
+measurements above retain their recorded source revisions.
