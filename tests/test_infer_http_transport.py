@@ -273,3 +273,17 @@ def test_a_long_error_body_keeps_its_start() -> None:
             complete(client(url))
     assert raised.value.status == 500
     assert "model overloaded" in str(raised.value)
+
+
+def test_each_read_gets_the_whole_timeout_after_connecting() -> None:
+    from stormlog.infer.http_transport import _bounded_connection
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    try:
+        sock = _bounded_connection(listener.getsockname(), 1.0)
+        with sock:
+            assert sock.gettimeout() == 1.0
+    finally:
+        listener.close()

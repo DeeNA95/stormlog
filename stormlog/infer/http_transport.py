@@ -452,7 +452,9 @@ def _bounded_connection(
             if source_address is not None:
                 sock.bind(source_address)
             sock.connect(destination)
-            sock.settimeout(max(1e-9, deadline - time.perf_counter()))
+            # --timeout bounds each later read in full; an opt-in request
+            # deadline bounds the whole request separately.
+            sock.settimeout(timeout)
             return sock
         except OSError as exc:
             last = exc
