@@ -66,14 +66,18 @@ class AlertHistoryTable(DataTable):
         if not events:
             self.add_row("-", "-", "No alerts yet.")
             return
-        for event in events:
+        # Newest first; a kind seen more than once says how often.
+        for event in reversed(events):
             timestamp = event.get("timestamp")
             if isinstance(timestamp, (int, float)):
                 timestamp_str = datetime.fromtimestamp(timestamp).strftime("%H:%M:%S")
             else:
                 timestamp_str = str(timestamp or "-")
             event_type = str(event.get("type", "-")).upper()
-            message = event.get("message", "")
+            message = str(event.get("message", ""))
+            count = event.get("count", 1)
+            if isinstance(count, int) and count > 1:
+                message = f"{message} ({count} times)"
             self.add_row(timestamp_str, event_type, message)
 
 

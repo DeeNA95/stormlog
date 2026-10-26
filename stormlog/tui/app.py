@@ -1297,16 +1297,35 @@ class GPUMemoryProfilerTUI(App):
         self.alert_history_table.update_rows(self.recent_alerts)
 
     def _capture_alerts(self, events: list[TrackerEventView]) -> None:
+        """Keep one row per kind of alert, with its latest message and count.
+
+        The tracker raises an alert on every sample past a threshold, so a
+        sustained condition would otherwise fill the table with one message.
+        A kind is the alert's type and the text before its first colon.
+        """
         alert_types = {"warning", "critical", "error"}
         for event in events:
-            if event.event_type in alert_types:
-                self.recent_alerts.append(
-                    {
-                        "timestamp": event.timestamp,
-                        "type": event.event_type,
-                        "message": event.message or "",
-                    }
-                )
+            if event.event_type not in alert_types:
+                continue
+            message = event.message or ""
+            kind = f"{event.event_type}:{message.split(':', 1)[0]}"
+            previous = next(
+                (alert for alert in self.recent_alerts if alert.get("kind") == kind),
+                None,
+            )
+            count = 1
+            if previous is not None:
+                self.recent_alerts.remove(previous)
+                count += int(previous.get("count", 1))
+            self.recent_alerts.append(
+                {
+                    "timestamp": event.timestamp,
+                    "type": event.event_type,
+                    "message": message,
+                    "kind": kind,
+                    "count": count,
+                }
+            )
         self.recent_alerts = self.recent_alerts[-50:]
 
     def _event_color(self, event_type: str) -> str:

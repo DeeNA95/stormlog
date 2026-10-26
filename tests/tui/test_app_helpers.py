@@ -201,3 +201,28 @@ def test_legacy_timeline_rows_keep_their_order_and_placeholders(
     from stormlog.tui.builders import build_legacy_timeline_rows
 
     assert build_legacy_timeline_rows(timeline) == expected
+
+
+def test_repeated_alerts_share_one_row_with_their_count() -> None:
+    from stormlog.tui.monitor import TrackerEventView
+
+    def alert(at: float, kind: str, message: str) -> TrackerEventView:
+        return TrackerEventView(at, kind, message, "-", "-", "-")
+
+    app = appmod.GPUMemoryProfilerTUI()
+    app.recent_alerts = []
+    app._capture_alerts(
+        [
+            alert(1.0, "warning", "High fragmentation: 95.5%"),
+            alert(2.0, "warning", "WARNING: Memory usage at 81.0%"),
+            alert(3.0, "info", "Collected telemetry sample."),
+            alert(4.0, "warning", "High fragmentation: 96.0%"),
+        ]
+    )
+    app._capture_alerts([alert(5.0, "warning", "High fragmentation: 95.7%")])
+
+    assert [(a["message"], a["count"]) for a in app.recent_alerts] == [
+        ("WARNING: Memory usage at 81.0%", 1),
+        ("High fragmentation: 95.7%", 3),
+    ]
+    assert app.recent_alerts[-1]["timestamp"] == 5.0
