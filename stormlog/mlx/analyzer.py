@@ -16,7 +16,8 @@ from stormlog.telemetry import (
 from .profile_artifact import FORMAT as PROFILE_FORMAT
 from .profile_artifact import load_profiles
 
-_MEASUREMENTS = {"start", "sample", "stop", "phase_start", "phase_end"}
+# Tracker events that carry an allocator reading; phase boundaries sample too.
+_MEASUREMENTS = {"start", "sample", "stop", "phase_enter", "phase_exit"}
 
 
 def analyze(path: str | Path, *, session_id: str | None = None) -> dict[str, Any]:

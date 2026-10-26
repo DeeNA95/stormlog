@@ -1,5 +1,7 @@
 import json
 from dataclasses import replace
+from pathlib import Path
+from typing import Any, Sequence
 
 import pytest
 
@@ -8,16 +10,22 @@ from stormlog.mlx.collector import MLXCollector
 from stormlog.mlx.profile_artifact import write_profiles
 from stormlog.mlx.profiler import MLXMemoryProfiler
 from stormlog.mlx.tracker import MemoryTracker
-from stormlog.session import create_session_summary
+from stormlog.session import SessionSummary, create_session_summary
 from stormlog.telemetry import load_telemetry_sessions
 from tests.mlx_fakes import FakeCore, make_runtime
 
 
-def write_events(path, values, *, session=None, timestamps=None):
+def write_events(
+    path: Path,
+    values: Sequence[int | None],
+    *,
+    session: SessionSummary | None = None,
+    timestamps: Sequence[int] | None = None,
+) -> list[dict[str, Any]]:
     session = session or create_session_summary(source="test")
     collector = MLXCollector(make_runtime())
-    previous = None
-    records = []
+    previous: int | None = None
+    records: list[dict[str, Any]] = []
     for i, value in enumerate(values):
         snapshot = replace(
             collector.capture_snapshot(),
@@ -37,7 +45,7 @@ def write_events(path, values, *, session=None, timestamps=None):
     return records
 
 
-def test_nullable_metrics_growth_windows_and_cache(tmp_path):
+def test_nullable_metrics_growth_windows_and_cache(tmp_path: Path) -> None:
     source = tmp_path / "events.json"
     write_events(source, [0, 200, None, 1000, 1000, 1200])
     result = analyze(source)
@@ -57,7 +65,7 @@ def test_nullable_metrics_growth_windows_and_cache(tmp_path):
     assert all("leak" not in f["kind"] for f in result["findings"])
 
 
-def test_no_growth_across_missing_time_or_all_unavailable(tmp_path):
+def test_no_growth_across_missing_time_or_all_unavailable(tmp_path: Path) -> None:
     source = tmp_path / "events.json"
     write_events(
         source,
@@ -71,7 +79,7 @@ def test_no_growth_across_missing_time_or_all_unavailable(tmp_path):
     assert result["growth_windows"] == []
 
 
-def test_sessions_selected_without_merging(tmp_path):
+def test_sessions_selected_without_merging(tmp_path: Path) -> None:
     source = tmp_path / "events.json"
     a = create_session_summary(source="a")
     b = create_session_summary(source="b")
@@ -88,7 +96,7 @@ def test_sessions_selected_without_merging(tmp_path):
         analyze(source, session_id="missing")
 
 
-def test_profile_analysis_preserves_scope_and_completion(tmp_path):
+def test_profile_analysis_preserves_scope_and_completion(tmp_path: Path) -> None:
     profiler = MLXMemoryProfiler(runtime=make_runtime())
     with profiler.profile_context("host"):
         pass
@@ -99,7 +107,7 @@ def test_profile_analysis_preserves_scope_and_completion(tmp_path):
     assert result["findings"][0]["kind"] == "incomplete_compute"
 
 
-def test_query_sessions_events_and_unknown_metrics(tmp_path):
+def test_query_sessions_events_and_unknown_metrics(tmp_path: Path) -> None:
     from stormlog import query
 
     source = tmp_path / "events.json"
@@ -115,8 +123,8 @@ def test_query_sessions_events_and_unknown_metrics(tmp_path):
 @pytest.mark.parametrize("status", ["completed", "interrupted", "incomplete"])
 @pytest.mark.parametrize("max_history", [1, 10])
 def test_tracker_json_export_round_trips_through_offline_readers(
-    tmp_path, status, max_history
-):
+    tmp_path: Path, status: str, max_history: int
+) -> None:
     from stormlog import query
 
     core = FakeCore()
@@ -129,6 +137,7 @@ def test_tracker_json_export_round_trips_through_offline_readers(
     core.values["active_memory"] = 0
     tracker._sample()
     result = tracker.stop_tracking(status=status)
+    assert result is not None
     source = tmp_path / "tracking.json"
     tracker.export(source)
 
@@ -151,3 +160,16 @@ def test_tracker_json_export_round_trips_through_offline_readers(
     source.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="summary does not match"):
         load_telemetry_sessions(source, permissive_legacy=False)
+
+
+def test_phase_boundary_samples_count_as_observations(tmp_path: Path) -> None:
+    tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=10)
+    with tracker.tracking():
+        with tracker.phase("train"):
+            tracker._sample()
+    source = tmp_path / "tracking.json"
+    tracker.export(source)
+    events = json.loads(source.read_text())["telemetry_events"]
+    kinds = [event["event_type"] for event in events]
+    assert {"phase_enter", "phase_exit"} <= set(kinds)
+    assert len(analyze(source)["timeline"]) == len(events)

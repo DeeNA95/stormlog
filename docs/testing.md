@@ -69,6 +69,19 @@ python3 -m pytest tests/ -o "python_files=test_tf*.py" -v -m "not tui_pilot and 
 python3 -m pytest tests/ -o "python_files=test_jax*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty"
 ```
 
+### Receiver queue memory checks
+
+The span receiver's retained-memory checks wait for its HTTP handlers to finish
+before measuring the queue. Receiving HTTP 200 does not guarantee that the
+handler has released its request body; counting that temporary memory against
+the queue charge can produce a false failure. The request-ID/status regression
+runs with normal and deliberately delayed response cleanup, using the same
+`retained <= charged` assertion in both cases.
+
+```bash
+python3 -m pytest tests/test_infer_vllm_spans.py::TestReceiverAdmission -q
+```
+
 ## TUI test layers
 
 The TUI suite is intentionally split into three layers:

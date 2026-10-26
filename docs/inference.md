@@ -43,6 +43,15 @@ the span it emits per request, which is how
 the request's `trace_id` and `span_id` are recorded; see
 [Trace context](inference_export.md#trace-context).
 
+Each `infer.request` also records the `engine` adapter and `task` it used
+(`generic` and `chat` unless `--engine` or `--task` chose others), the
+completion ID the server returned as `response_id` (kept apart from the
+`X-Request-Id` that was sent), and `system_fingerprint` when the server gives
+one. `infer.workload` records the same `engine` and `task`, and the session
+config names its `engine_adapter`. oMLX statistics sampled with
+`--omlx-stats-url` are `infer.mlx.stats` records; see
+[MLX inference](mlx_inference.md).
+
 The profiler sends controlled traffic for each workload case in the matrix:
 
 - `concurrency`
@@ -207,7 +216,7 @@ Request outcomes:
 | `status` | Meaning |
 | --- | --- |
 | `ok` | The request completed |
-| `timeout` | The client gave up after `--timeout` while waiting for the response |
+| `timeout` | The client gave up: no response data arrived within `--timeout` of the last read, or the whole request outlasted `--request-deadline` |
 | `rejected` | The server answered HTTP 429 or 503; `http_status` says which |
 | `unreachable` | The connection failed before any byte of the request was sent: refused, DNS, a connect timeout or a TLS handshake. The server never saw the request |
 | `delivery_unknown` | The connection completed, but sending the request failed, or the server reset or closed the connection before the response's status line. A small request is handed to the operating system before the server reads it, so the server may or may not have received it |
@@ -375,8 +384,9 @@ value, so `0` and `0.0` count as the same. `spec_digest` covers the same
 but the seed: runs of one workload with different seeds share it, while
 their `workload_digest`s differ.
 
-The API key is never recorded, and the reset URL is recorded without its
-credentials or query string. The server applies the chat template, and the
+The API key is never recorded, and the endpoint and reset URL are recorded
+without their credentials or query string; a removed query is marked
+`<redacted>`, so an `api-version` parameter is not kept either. The server applies the chat template, and the
 record says so. When a local transformers tokenizer has a template, the
 record keeps that template's digest as a hint only.
 
@@ -1010,3 +1020,10 @@ to be appended to the same JSONL stream. New profiles include an artifact
 identity record naming their run and capture session. Correlation records use
 wire v4 context definitions/references on disk; loading restores complete
 embedded v2/v3 values.
+
+## MLX text and audio endpoints
+
+See [MLX inference profiling](mlx_inference.md) for oMLX/MLX-LM raw completions,
+MLX-Audio fixture manifests, audio duration metrics and qualification status.
+Endpoint profiles measure client HTTP observations. Server execution hooks
+and allocator ownership require separate evidence.

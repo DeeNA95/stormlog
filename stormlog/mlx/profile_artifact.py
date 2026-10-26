@@ -36,10 +36,9 @@ def _validate_profile(item: Any) -> None:
         raise ValueError("Profile must be an object with a nonempty name")
     _validate_keys(item, set(ProfileResult.__dataclass_fields__))
     _validate_session(item["session_summary"])
+    # Wall-clock stamps may step backwards (NTP); elapsed_ns is monotonic.
     for key in ("started_at_ns", "ended_at_ns", "elapsed_ns", "valid_sample_count"):
         validate_bytes(item.get(key), key)
-    if item["ended_at_ns"] < item["started_at_ns"]:
-        raise ValueError("Profile end precedes start")
     _validate_policy(item)
     for key in ("baseline", "final"):
         _validate_snapshot(item.get(key))

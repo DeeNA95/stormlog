@@ -62,8 +62,7 @@ class TimelineCanvas(Static):
     def _reserved_chart_lines(self, reserved: Any) -> list[str]:
         return (
             self._build_chart_lines(
-                "Reserved",
-                [None if value is None else float(value) for value in reserved],
+                "Reserved", [float(value) for value in reserved if value is not None]
             )
             if reserved and any(value is not None for value in reserved)
             else []

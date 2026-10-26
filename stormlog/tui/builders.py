@@ -316,22 +316,41 @@ def build_mlx_timeline_rows(timeline: dict[str, Any]) -> list[tuple[str, str]]:
 
 
 def build_legacy_timeline_rows(timeline: dict[str, Any]) -> list[tuple[str, str]]:
+    """PyTorch/TensorFlow timeline stats in the table's established order."""
     timestamps = timeline.get("timestamps") or []
     allocated = timeline.get("allocated") or []
     reserved = timeline.get("reserved") or []
+    if not allocated or not timestamps:
+        return [
+            ("Samples", "0"),
+            ("Duration (s)", "-"),
+            ("Allocated Max", "-"),
+            ("Reserved Max", "-"),
+            ("Allocated Latest", "-"),
+            ("Reserved Latest", "-"),
+        ]
     duration = max(0.0, timestamps[-1] - timestamps[0]) if len(timestamps) > 1 else 0.0
-    rows = [("Samples", str(len(allocated))), ("Duration (s)", f"{duration:.1f}")]
-    for label, values in (("Allocated", allocated), ("Reserved", reserved)):
-        rows.extend(_legacy_series_rows(label, values))
-    return rows
+    allocated_max, allocated_latest = _legacy_max_and_latest(allocated, "-")
+    # A timeline without a reserved series has always shown 0 B.
+    reserved_max, reserved_latest = _legacy_max_and_latest(reserved, "0 B")
+    return [
+        ("Samples", str(len(allocated))),
+        ("Duration (s)", f"{duration:.1f}"),
+        ("Allocated Max", allocated_max),
+        ("Reserved Max", reserved_max),
+        ("Allocated Latest", allocated_latest),
+        ("Reserved Latest", reserved_latest),
+    ]
 
 
-def _legacy_series_rows(label: str, values: list[Any]) -> list[tuple[str, str]]:
+def _legacy_max_and_latest(values: list[Any], empty: str) -> tuple[str, str]:
     from stormlog.formatting import format_bytes
 
+    if not values:
+        return empty, empty
     known = [v for v in values if v is not None]
-    latest = values[-1] if values else None
-    return [
-        (label + " Max", format_bytes(max(known)) if known else "-"),
-        (label + " Latest", format_bytes(latest) if latest is not None else "-"),
-    ]
+    latest = values[-1]
+    return (
+        format_bytes(int(max(known))) if known else "-",
+        format_bytes(int(latest)) if latest is not None else "-",
+    )
