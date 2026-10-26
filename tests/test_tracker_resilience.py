@@ -937,17 +937,14 @@ def test_memory_tracker_emits_structured_phase_boundaries(
 @pytest.mark.parametrize(
     ("allocated", "reserved", "inactive", "warned"),
     [
-        # Inactive split blocks reported: they are the fragmentation.
-        (128, 1024, 512, True),
+        (128, 1024, 512, True),  # half the reserved pool is split blocks
         (128, 1024, 0, False),  # a large cache with no split blocks
         (900, 1024, 64, False),
-        # Not reported: the reserved-allocated ratio stands in.
-        (128, 1024, None, True),
-        (900, 1024, None, False),
-        (0, 384 * 1024, None, False),  # nothing allocated: idle cache
+        (128, 1024, None, False),  # no inactive-split counter: no measure
+        (0, 0, 0, False),
     ],
 )
-def test_fragmentation_warns_on_split_blocks_or_the_cache_ratio(
+def test_fragmentation_warns_on_inactive_split_blocks_only(
     monkeypatch: pytest.MonkeyPatch,
     allocated: int,
     reserved: int,

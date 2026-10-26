@@ -903,26 +903,21 @@ class MemoryTracker:
         allocated: Optional[int],
         reserved: Optional[int],
     ) -> bool:
-        # Fragmentation warning. PyTorch's caching allocator keeps freed
-        # blocks reserved for reuse, so reserved minus allocated is mostly
-        # cache. Where the allocator reports its inactive split blocks (free
-        # space inside segments still in use), they are the fragmentation, as
-        # in check_memory_fragmentation; otherwise the reserved-allocated
-        # ratio stands in. With nothing allocated the pool is idle cache.
+        # Fragmentation warning: reserved memory held in inactive split blocks,
+        # as check_memory_fragmentation measures it. Reserved minus allocated
+        # is the caching allocator's free cache, kept for reuse, so a collector
+        # without an inactive-split counter has no fragmentation to warn about.
         capabilities = self.collector_capabilities
+        inactive = sample.inactive_bytes
         if (
             not capabilities.supports_fragmentation_analysis
+            or not capabilities.supports_allocator_inactive
+            or inactive is None
             or reserved is None
             or reserved <= 0
         ):
             return False
-        inactive = sample.inactive_bytes
-        if capabilities.supports_allocator_inactive and inactive is not None:
-            fragmentation = inactive / reserved
-        elif allocated is not None and allocated > 0:
-            fragmentation = (reserved - allocated) / reserved
-        else:
-            return False
+        fragmentation = inactive / reserved
         if fragmentation > self.thresholds["fragmentation_threshold"]:
             self._add_event(
                 "warning",
