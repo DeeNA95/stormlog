@@ -351,7 +351,7 @@ class MemoryTracker:
             handle.write("\n")
 
     def enter_phase(
-        self, name: str, attrs: Mapping[str, Any] | None = None
+        self, name: str, *, metadata: Mapping[str, Any] | None = None
     ) -> PhaseHandle:
         if not self.is_tracking or self._session is None:
             raise RuntimeError("Start tracking before entering a phase")
@@ -359,7 +359,7 @@ class MemoryTracker:
             session_id=self._session.session_id,
             rank=self._session.rank,
             name=name,
-            attrs=attrs,
+            attrs=metadata,
         )
         self._sample(boundary.event_type, boundary.context, boundary.metadata)
         return PhaseHandle(
@@ -377,8 +377,20 @@ class MemoryTracker:
         boundary = self._phase_recorder.exit(token)
         self._sample(boundary.event_type, boundary.context, boundary.metadata)
 
-    def phase(self, name: str, attrs: Mapping[str, Any] | None = None) -> PhaseHandle:
-        return self.enter_phase(name, attrs)
+    @contextmanager
+    def phase(
+        self, name: str, *, metadata: Mapping[str, Any] | None = None
+    ) -> Iterator[PhaseHandle]:
+        """Record a phase's enter and exit around the block."""
+        handle = self.enter_phase(name, metadata=metadata)
+        try:
+            yield handle
+        except BaseException:
+            # Closing fails once tracking has stopped; keep the caller's error.
+            with suppress(RuntimeError):
+                handle.close()
+            raise
+        handle.close()
 
     @contextmanager
     def tracking(self) -> Iterator[MemoryTracker]:

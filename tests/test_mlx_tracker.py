@@ -74,7 +74,7 @@ def test_gap_health_backoff_recovery_and_zero() -> None:
 def test_interruptible_stop_and_phase_context() -> None:
     tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=100)
     tracker.start_tracking()
-    with tracker.phase("train", {"epoch": 1}):
+    with tracker.phase("train", metadata={"epoch": 1}):
         with tracker.phase("step"):
             pass
     start = time.monotonic()
@@ -145,7 +145,7 @@ def test_phase_cannot_reopen_a_closed_sink(tmp_path: Path) -> None:
         telemetry_sink_config=TelemetrySinkConfig(tmp_path, write_rollups=False),
     )
     tracker.start_tracking()
-    phase = tracker.phase("unclosed")
+    phase = tracker.enter_phase("unclosed")
     result = tracker.stop_tracking()
     with pytest.raises(RuntimeError, match="tracking stops"):
         phase.close()
@@ -290,3 +290,20 @@ def test_tracker_export_loads_with_the_shared_loader(tmp_path: Path) -> None:
     (session,) = load_telemetry_sessions(path)
     assert session.summary.status == "completed"
     assert len(session.events) == tracker.get_results().total_events
+
+
+def test_phase_keeps_the_callers_exception_after_tracking_stops() -> None:
+    tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=10)
+    tracker.start_tracking()
+    with pytest.raises(ValueError, match="user error"):
+        with tracker.phase("p"):
+            tracker.stop_tracking()
+            raise ValueError("user error")
+
+
+def test_phase_closed_after_tracking_stops_still_raises() -> None:
+    tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=10)
+    tracker.start_tracking()
+    with pytest.raises(RuntimeError, match="tracking stops"):
+        with tracker.phase("p"):
+            tracker.stop_tracking()
