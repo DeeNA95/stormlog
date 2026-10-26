@@ -2422,6 +2422,9 @@ def test_a_run_that_fails_with_signals_pending_is_published(
     finally:
         for saved_signum, handler in saved.items():
             signal.signal(saved_signum, handler)
+        # If restoring the mask had failed, the signals would stay blocked and
+        # later signal tests would hang instead of failing.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, pending)
         pulser._HANDLED.clear()
     if sys.version_info < (3, 11):
         assert seen == {"failure": "interrupted", "received": list(pending[1:])}
