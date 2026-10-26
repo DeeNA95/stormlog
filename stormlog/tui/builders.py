@@ -207,6 +207,33 @@ def build_diagnostics_markdown() -> str:
     ).strip()
 
 
+def build_mlx_runtime_markdown(info: dict[str, Any]) -> str:
+    """One line on the MLX runtime and its device, for the MLX tab."""
+    from stormlog.formatting import format_bytes
+
+    device = info.get("raw_device_info") or {}
+    parts = []
+    name = device.get("device_name")
+    if name:
+        architecture = device.get("architecture")
+        parts.append(f"**{name}**" + (f" ({architecture})" if architecture else ""))
+    for key, label in (
+        ("memory_size", "unified memory"),
+        ("max_recommended_working_set_size", "recommended working set"),
+    ):
+        value = device.get(key)
+        if isinstance(value, (int, float)) and value > 0:
+            parts.append(f"{format_bytes(int(value))} {label}")
+    error = info.get("device_info_error")
+    if error:
+        parts.append(f"device details unavailable: {error}")
+    head = (
+        f"MLX {info.get('mlx_version', 'N/A')} on Metal, observing the allocator "
+        "of this TUI process."
+    )
+    return head + (" " + ", ".join(parts) + "." if parts else "")
+
+
 def build_mlx_stats_rows(stats: dict[str, Any]) -> list[tuple[str, str]]:
     from stormlog.formatting import format_bytes
 

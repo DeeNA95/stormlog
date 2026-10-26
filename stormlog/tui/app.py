@@ -333,9 +333,7 @@ class GPUMemoryProfilerTUI(App):
         status = self.query_one("#mlx-runtime-status", Markdown)
         try:
             info = await asyncio.to_thread(get_device_info)
-            status.update(
-                f"MLX {info['mlx_version']} / Metal, {info['memory_scope']} in this TUI process. Device: {info['raw_device_info']}"
-            )
+            status.update(tui_builders.build_mlx_runtime_markdown(info))
         except Exception as exc:
             status.update(f"MLX unavailable: {exc}")
 
