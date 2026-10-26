@@ -355,7 +355,17 @@ def test_a_ctrl_c_lost_in_a_finalizer_still_ends_the_run(
     # dropped. The press must still end the run as interrupted, with the
     # interrupted close's deadline and no linger.
     lost: list[Any] = []
-    monkeypatch.setattr(sys, "unraisablehook", lambda u: lost.append(u.exc_type))
+    others = sys.unraisablehook
+
+    def keep_the_lost_press(unraisable: Any) -> None:
+        # Garbage from an earlier test can be collected during this one; its
+        # error goes on to pytest, which reports it with its traceback.
+        if unraisable.exc_type is KeyboardInterrupt:
+            lost.append(unraisable.exc_type)
+        else:
+            others(unraisable)
+
+    monkeypatch.setattr(sys, "unraisablehook", keep_the_lost_press)
     real_append = JsonlEventWriter.append
     requests = 0
 
