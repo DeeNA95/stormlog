@@ -21,6 +21,7 @@ from stormlog.infer.openai_client import (
 )
 from stormlog.infer.profile import classify_failure
 from tests.infer_workload_helpers import run_profile_with_fake_client
+from tests.thread_helpers import start_running
 
 
 class _RedirectHandler(BaseHTTPRequestHandler):
@@ -119,8 +120,7 @@ def test_a_failure_while_sending_is_delivery_unknown() -> None:
         )
         connection.close()
 
-    thread = threading.Thread(target=accept_and_close, daemon=True)
-    thread.start()
+    thread = start_running(accept_and_close)
     client = _client(f"http://127.0.0.1:{port}/v1/chat/completions")
     try:
         with pytest.raises(urllib.error.URLError) as raised:
@@ -165,8 +165,7 @@ def test_a_close_before_any_response_byte_is_delivery_unknown(
             )
         connection.close()
 
-    thread = threading.Thread(target=accept_and_close, daemon=True)
-    thread.start()
+    thread = start_running(accept_and_close)
     client = _client(f"http://127.0.0.1:{port}/v1/chat/completions")
     try:
         with pytest.raises(OSError) as raised:

@@ -8,7 +8,11 @@ import pytest
 pytest.importorskip("textual")
 
 from stormlog.timeline_markers import TimelineMarker
-from stormlog.tui.widgets.timeline import DistributedTimelineCanvas, TimelineCanvas
+from stormlog.tui.widgets.timeline import (
+    SPARK_LEVELS,
+    DistributedTimelineCanvas,
+    TimelineCanvas,
+)
 
 
 def _marker(
@@ -85,12 +89,13 @@ def test_rank_timeline_rendering_preserves_focus_gaps_and_marker_lines(
         markers_by_rank={1: [_marker(start_ns=1, severity="warning", label="Spike")]},
     )
 
-    update.assert_called_once_with(
+    assert update.call_count == 1
+    assert str(update.call_args.args[0]) == (
         "*r01 alloc(max=3.0MB latest=3.0MB) gap_latest=1.0MB\n"
-        "    [-*@]\n"
+        "    [\u2583\u2585\u2588]\n"
         "    markers: ~ Spike\n"
         " r00 alloc(max=1.0MB latest=1.0MB) gap_latest=N/A\n"
-        "    [@]\n"
+        "    [\u2588]\n"
         "... showing 2/3 ranks (apply filter for more)."
     )
 
@@ -138,12 +143,12 @@ def test_rank_timeline_empty_rendering(
         ({}, "No timeline data yet. Start live tracking and press Refresh."),
         (
             {"allocated": [None], "device_used": [1048576], "reserved": [None]},
-            "Device Used (max 1.00 MB, latest 1.00 MB)\n[@]",
+            "Device Used (max 1.00 MB, latest 1.00 MB)\n[\u2588]",
         ),
         (
             {"allocated": [0], "device_used": [1048576], "reserved": [1048576]},
             "Allocated (max 0.00 MB, latest 0.00 MB)\n[ ]\n\n"
-            "Reserved (max 1.00 MB, latest 1.00 MB)\n[@]",
+            "Reserved (max 1.00 MB, latest 1.00 MB)\n[\u2588]",
         ),
         (
             {
@@ -151,8 +156,8 @@ def test_rank_timeline_empty_rendering(
                 "allocated": [1048576, 2097152, 3145728, 4194304],
                 "reserved": [2097152, None, 4194304, None],
             },
-            "Allocated (max 4.00 MB, latest 4.00 MB)\n[:=*@]\n\n"
-            "Reserved (max 4.00 MB, latest 4.00 MB)\n[=@]",
+            "Allocated (max 4.00 MB, latest 4.00 MB)\n[\u2582\u2584\u2586\u2588]\n\n"
+            "Reserved (max 4.00 MB, latest 4.00 MB)\n[\u2584\u2588]",
         ),
         ({"device_used": [None]}, "Device Used: no samples"),
         (
@@ -170,4 +175,68 @@ def test_timeline_rendering_preserves_nullable_series(
 
     canvas.render_timeline(timeline)
 
-    update.assert_called_once_with(expected)
+    assert update.call_count == 1
+    assert str(update.call_args.args[0]) == expected
+
+
+def test_mounted_timelines_span_their_width() -> None:
+    import asyncio
+
+    from textual.app import App, ComposeResult
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            yield TimelineCanvas(id="timeline")
+            yield DistributedTimelineCanvas(id="ranks")
+
+    async def scenario() -> None:
+        app = Host()
+        async with app.run_test(size=(60, 20)) as pilot:
+            await pilot.pause()
+            timeline = app.query_one("#timeline", TimelineCanvas)
+            ranks = app.query_one("#ranks", DistributedTimelineCanvas)
+            timeline_update, ranks_update = Mock(), Mock()
+            timeline.update = timeline_update
+            ranks.update = ranks_update
+            mb = 1024**2
+
+            timeline.render_timeline({"allocated": [mb, 2 * mb, 3 * mb]})
+            ranks.render_rank_timelines({0: {"allocated": [mb, 2 * mb, 3 * mb]}})
+
+            chart = str(timeline_update.call_args.args[0]).splitlines()[1]
+            rank_chart = str(ranks_update.call_args.args[0]).splitlines()[1]
+            assert len(chart) == timeline.content_size.width == 60
+            low, mid, high = SPARK_LEVELS[2], SPARK_LEVELS[4], SPARK_LEVELS[7]
+            assert chart == "[" + low * 20 + mid * 19 + high * 19 + "]"
+            assert len(rank_chart) == ranks.content_size.width
+            assert rank_chart.startswith("    [" + low)
+            assert rank_chart.endswith(high + "]")
+
+    asyncio.run(scenario())
+
+
+def test_charts_colour_each_series_and_marker_by_severity() -> None:
+    from stormlog.tui.widgets.timeline import MARKER_STYLES, SERIES_STYLES, styled_chart
+
+    text = styled_chart(
+        "Allocated (max 4.00 MB, latest 4.00 MB)\n"
+        "[\u2582?\u2588]\n"
+        "\n"
+        "Reserved (max 4.00 MB, latest 4.00 MB)\n"
+        "[\u2588]\n"
+        "    markers: ! OOM | ~ Spike | +2 more"
+    )
+
+    def styles_at(offset: int) -> set[str]:
+        return {
+            str(span.style) for span in text.spans if span.start <= offset < span.end
+        }
+
+    plain = str(text)
+    first_bar = plain.index("[") + 1
+    assert SERIES_STYLES["Allocated"] in styles_at(first_bar)
+    assert "dim" in styles_at(plain.index("?"))
+    assert SERIES_STYLES["Reserved"] in styles_at(plain.rindex("[") + 1)
+    assert MARKER_STYLES["!"] in styles_at(plain.index("! OOM"))
+    assert MARKER_STYLES["~"] in styles_at(plain.index("~ Spike"))
+    assert not styles_at(plain.index("+2 more"))

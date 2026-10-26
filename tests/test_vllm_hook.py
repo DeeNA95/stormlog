@@ -574,7 +574,7 @@ def test_a_request_entering_the_scheduler_is_stamped_once(vllm: dict[str, Any]) 
 
 
 def test_a_reservation_left_without_its_record_is_released(
-    vllm: dict[str, Any]
+    vllm: dict[str, Any],
 ) -> None:
     """A streaming-input request's next input and an add_request that raises
     write no enqueued record. Their reservations must still be released, or
@@ -599,7 +599,7 @@ def test_a_reservation_left_without_its_record_is_released(
 
 
 def test_a_cache_reset_records_who_was_running_and_how_it_ended(
-    vllm: dict[str, Any]
+    vllm: dict[str, Any],
 ) -> None:
     scheduler = vllm["Scheduler"](vllm_config())
     scheduler.running = [FakeRequest("a-1", 2), FakeRequest("b-1", 2)]
@@ -847,7 +847,7 @@ def test_hello_records_the_layout_the_profiler_and_the_process(
 
 
 def test_a_hello_without_these_settings_records_them_as_null(
-    vllm: dict[str, Any]
+    vllm: dict[str, Any],
 ) -> None:
     vllm["Scheduler"](vllm_config())
 
@@ -873,7 +873,7 @@ def test_process_start_is_read_like_psutil(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_vllm_errors_pass_through_and_telemetry_errors_do_not(
-    vllm: dict[str, Any]
+    vllm: dict[str, Any],
 ) -> None:
     scheduler = vllm["Scheduler"](vllm_config())
     scheduler.requests = {"a-1": FakeRequest("a-1", 2)}

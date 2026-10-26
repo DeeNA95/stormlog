@@ -109,16 +109,14 @@ def test_the_watchdog_continues_a_target_whose_harness_was_killed(
 ) -> None:
     # A harness that stops the target and is then killed outright: neither
     # its finally nor its atexit runs, so only the watchdog can continue it.
-    script = textwrap.dedent(
-        f"""
+    script = textwrap.dedent(f"""
         import time
         from examples.qualification.pulser import Pulser, Target
         pulser = Pulser(Target.of({server.pid}), max_pulse_seconds=2.0)
         time.sleep(1.5)  # let the watchdog start
         print("ready", flush=True)
         pulser.pulse(2.0, during=lambda: time.sleep(60))
-        """
-    )
+        """)
     harness = subprocess.Popen(
         [sys.executable, "-c", script],
         env=_environment(),
@@ -141,8 +139,7 @@ def test_the_watchdog_continues_a_target_whose_harness_was_killed(
     assert _answers(server, timeout=2)
 
 
-TITLED = textwrap.dedent(
-    """
+TITLED = textwrap.dedent("""
     import subprocess, sys, time
     # argv[1:]: titles of children to start, as "title" or "title/child-title".
     # A child's own sys.executable is '' on Linux once its argv[0] is a
@@ -157,8 +154,7 @@ TITLED = textwrap.dedent(
         subprocess.Popen([title, "-c", script], executable=sys.executable)
     print("ready", flush=True)
     time.sleep(30)
-    """
-)
+    """)
 
 
 @pytest.fixture
@@ -224,8 +220,7 @@ def test_a_missing_or_ambiguous_engine_is_refused(
 # ------------------------------------------------------------------ the harness dies
 
 LOOP = "import time\nwhile True:\n    time.sleep(0.01)\n"
-HARNESS = textwrap.dedent(
-    """
+HARNESS = textwrap.dedent("""
     import sys, time
     from examples.qualification.pulser import Pulser, Target
     pulser = Pulser(Target.of(int(sys.argv[1])), max_pulse_seconds=2.0)
@@ -241,8 +236,7 @@ HARNESS = textwrap.dedent(
             time.sleep(0.05)
 
     pulser.pulse(2.0, during=hold)
-    """
-)
+    """)
 
 
 @pytest.fixture
@@ -377,14 +371,12 @@ def test_close_and_exit_continue_a_target_stopped_outside_a_pulse(
     pulser.close()
     assert not target.is_stopped()
     # And at exit, through atexit, without a watchdog to fall back on.
-    script = textwrap.dedent(
-        f"""
+    script = textwrap.dedent(f"""
         import os, signal
         from examples.qualification.pulser import Pulser, Target
         pulser = Pulser(Target.of({loop.pid}), watchdog=False)
         os.kill({loop.pid}, signal.SIGSTOP)
-        """
-    )
+        """)
     subprocess.run([sys.executable, "-c", script], env=_environment(), check=True)
     assert _running_within(loop.pid, 1.0)
 
@@ -682,15 +674,13 @@ def test_a_stop_ends_at_once_when_its_watchdog_stops_watching(
                 os.kill(watchdog, signal.SIGKILL)
 
 
-HOLDING_HARNESS = textwrap.dedent(
-    """
+HOLDING_HARNESS = textwrap.dedent("""
     import sys
     from examples.qualification.pulser import Pulser, Target
     pulser = Pulser(Target.of(int(sys.argv[1])), max_pulse_seconds=2.0)
     print(pulser.watchdog_pid, flush=True)
     pulser.pulse(2.0, during=lambda: print("stopped", flush=True))
-    """
-)
+    """)
 
 
 def test_a_watchdog_killed_then_its_harness_killed_leaves_the_target_running(

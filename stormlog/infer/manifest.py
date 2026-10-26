@@ -140,7 +140,7 @@ def declared_record(
 
 
 def manifests(
-    records: Iterable[Mapping[str, Any]]
+    records: Iterable[Mapping[str, Any]],
 ) -> dict[str, list[Mapping[str, Any]]]:
     """The artifact's manifest records by role, in artifact order."""
     found: dict[str, list[Mapping[str, Any]]] = {role: [] for role in ROLES}

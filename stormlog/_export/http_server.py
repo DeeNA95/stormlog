@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, BinaryIO, cast
+from typing import Any, Protocol, cast
 
 from .renders import RenderCache
 from .watchdog import Watchdog
@@ -210,6 +210,12 @@ class _HeadTooLarge(http.client.HTTPException):
     """The request line and headers went past ``HEAD_LIMIT`` bytes."""
 
 
+class _LineSource(Protocol):
+    def readline(self, size: int = ..., /) -> bytes: ...
+
+    def close(self) -> None: ...
+
+
 class _HeadReader:
     """The connection's reader, refusing a request head past ``limit`` bytes.
 
@@ -217,7 +223,7 @@ class _HeadReader:
     refused once ``limit + 1`` bytes of it were read, wherever they fall.
     """
 
-    def __init__(self, raw: BinaryIO, limit: int) -> None:
+    def __init__(self, raw: _LineSource, limit: int) -> None:
         self._raw = raw
         self._left = limit
 
@@ -244,7 +250,9 @@ class _Handler(BaseHTTPRequestHandler):
         super().setup()
         self.connection.settimeout(self.server.owner.deadline + 1.0)
         # Only GET and HEAD are served, so the head is all that is read.
-        self.rfile = cast(BinaryIO, _HeadReader(self.rfile, HEAD_LIMIT))
+        # Typeshed types rfile as BinaryIO or BufferedIOBase by version;
+        # the server only calls readline and close on it.
+        self.rfile = cast(Any, _HeadReader(self.rfile, HEAD_LIMIT))
 
     def handle_one_request(self) -> None:
         try:
@@ -283,7 +291,9 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             owner.renders.release(generation)
 
-    def _respond(self, status: int, body: bytes, *, include_body: bool = True) -> None:
+    def _respond(
+        self, status: int, body: bytes | bytearray, *, include_body: bool = True
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", CONTENT_TYPE)
         self.send_header("Content-Length", str(len(body)))

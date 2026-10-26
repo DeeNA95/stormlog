@@ -89,9 +89,7 @@ _HOLD_A_PROFILER = """
 
 
 def test_capture_refuses_a_profiler_running_on_another_thread(tmp_path: Path) -> None:
-    out = _run_isolated(
-        _HOLD_A_PROFILER
-        + f"""
+    out = _run_isolated(_HOLD_A_PROFILER + f"""
     thread = threading.Thread(
         target=hold, args=(lambda: profile(activities=[ProfilerActivity.CPU]),)
     )
@@ -99,16 +97,13 @@ def test_capture_refuses_a_profiler_running_on_another_thread(tmp_path: Path) ->
     started.wait(10)
     attempt({str(tmp_path / "x.json")!r})
     thread.join(10)
-    """
-    )
+    """)
 
     assert out == ["refused"]
 
 
 def test_one_capture_at_a_time_per_process(tmp_path: Path) -> None:
-    out = _run_isolated(
-        _HOLD_A_PROFILER
-        + f"""
+    out = _run_isolated(_HOLD_A_PROFILER + f"""
     first = {str(tmp_path / "first.json")!r}
     thread = threading.Thread(
         target=hold, args=(lambda: capture_torch_trace(first, cuda=False),)
@@ -119,8 +114,7 @@ def test_one_capture_at_a_time_per_process(tmp_path: Path) -> None:
     thread.join(10)
     with capture_torch_trace({str(tmp_path / "third.json")!r}, cuda=False):
         print("third")
-    """
-    )
+    """)
 
     assert out == ["refused", "third"]
 

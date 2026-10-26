@@ -579,7 +579,7 @@ def test_forward_context_reference_is_not_buffered(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("context", [{}, {"run_id": None}, {"unexpected": "value"}])
 def test_invalid_definition_context_agrees_with_schema(
-    context: dict[str, object]
+    context: dict[str, object],
 ) -> None:
     rows = CorrelationRecordEncoder().encode(_event().to_record())
     rows[0]["context"] = context

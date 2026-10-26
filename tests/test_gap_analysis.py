@@ -28,6 +28,7 @@ def _make_event(
     allocator_reserved: int,
     device_used: int,
     device_total: int = 16 * 1024**3,
+    allocator_inactive: int | None = None,
 ) -> TelemetryEventV2:
     """Build a minimal valid TelemetryEventV2 for gap analysis tests."""
     return build_gap_event(
@@ -37,6 +38,7 @@ def _make_event(
         device_used=device_used,
         collector="stormlog.cuda_tracker",
         device_total=device_total,
+        allocator_inactive=allocator_inactive,
     )
 
 
@@ -316,16 +318,39 @@ class TestFragmentationLike:
         assert "empty_cache" not in str(report)
         assert "PYTORCH_CUDA_ALLOC_CONF" not in str(report)
 
+    def test_a_large_cache_without_split_blocks_is_not_fragmentation(self) -> None:
+        """Reserved far above allocated, nothing split: the allocator's cache."""
+        events = []
+        for i in range(20):
+            reserved = 3_000_000_000 + i * 50_000_000
+            events.append(
+                _make_event(
+                    i,
+                    1_000_000_000,
+                    reserved,
+                    reserved + 1_500_000_000,
+                    allocator_inactive=0,
+                )
+            )
+
+        findings = MemoryAnalyzer().analyze_memory_gaps(events)
+
+        assert not [f for f in findings if f.classification == "fragmentation_like"]
+
     def test_fragmentation_like_detected(self) -> None:
-        """High (reserved - allocated) / reserved ratio -> fragmentation_like."""
+        """Inactive split blocks above 30% of reserved -> fragmentation_like."""
         events = []
         for i in range(20):
             alloc = 1_000_000_000
-            # reserved grows much larger than allocated -> fragmentation
             reserved = 3_000_000_000 + i * 50_000_000
             # gap must exceed gap_ratio_threshold (5% of 16 GiB ≈ 858 MB)
             device_used = reserved + 1_500_000_000
-            events.append(_make_event(i, alloc, reserved, device_used))
+            inactive = int(reserved * 0.4)  # split blocks inside live segments
+            events.append(
+                _make_event(
+                    i, alloc, reserved, device_used, allocator_inactive=inactive
+                )
+            )
 
         analyzer = MemoryAnalyzer()
         findings = analyzer.analyze_memory_gaps(events)

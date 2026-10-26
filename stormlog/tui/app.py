@@ -23,7 +23,6 @@ from textual.widgets import (
     LoadingIndicator,
     Markdown,
     RichLog,
-    Rule,
     TabbedContent,
     TabPane,
 )
@@ -145,11 +144,8 @@ except ImportError:
     Figlet = None
 
 
-WELCOME_MESSAGES = [
-    "Stormlog",
-    "Live Monitoring & Watchdogs",
-    "CLI · Docs · Examples",
-]
+# One message: longer ones wrap to twice the banner's height.
+WELCOME_MESSAGES = ["Stormlog"]
 _VIZ_INSTALL_GUIDANCE = (
     "Visualization dependencies are unavailable. "
     "Install with `pip install 'stormlog[viz]'`."
@@ -301,6 +297,8 @@ class GPUMemoryProfilerTUI(App):
     recent_alerts: List[dict[str, Any]]
 
     CSS = TUI_APP_CSS
+    TITLE = "Stormlog"
+    SUB_TITLE = "Memory profiling for PyTorch, TensorFlow and MLX"
 
     BINDINGS = [
         ("q", "quit", "Quit"),
@@ -320,7 +318,14 @@ class GPUMemoryProfilerTUI(App):
     def _overview_markdown(self) -> str:
         if self.framework == "mlx":
             system = get_host_info()
-            return f"# System Overview\nPlatform: {system['platform']} / {system['architecture']}\nPython: {system['python_version']}\nMLX is initialized only by an explicit runtime action."
+            python = str(system["python_version"]).split()[0]
+            return (
+                "### System\n\n"
+                f"- **Platform**: {system['platform']} / {system['architecture']}\n"
+                f"- **Python**: {python}\n\n"
+                "MLX starts only when you ask for runtime info, a sample or "
+                "tracking in the MLX tab."
+            )
         return _build_system_markdown()
 
     async def refresh_mlx_info(self) -> None:
@@ -329,9 +334,7 @@ class GPUMemoryProfilerTUI(App):
         status = self.query_one("#mlx-runtime-status", Markdown)
         try:
             info = await asyncio.to_thread(get_device_info)
-            status.update(
-                f"MLX {info['mlx_version']} / Metal, {info['memory_scope']} in this TUI process. Device: {info['raw_device_info']}"
-            )
+            status.update(tui_builders.build_mlx_runtime_markdown(info))
         except Exception as exc:
             status.update(f"MLX unavailable: {exc}")
 
@@ -461,7 +464,7 @@ class GPUMemoryProfilerTUI(App):
             id="diagnostics-path-input",
         )
         self.diagnostics_session_input = Input(
-            placeholder="auto-select latest completed session",
+            placeholder="latest completed session",
             id="diagnostics-session-input",
         )
         self.diagnostics_rank_filter_input = Input(
@@ -485,8 +488,11 @@ class GPUMemoryProfilerTUI(App):
             with TabPane("Overview"):
                 yield VerticalScroll(
                     self.welcome_panel,
-                    self.welcome_info,
-                    self.overview_panel,
+                    Horizontal(
+                        self.overview_panel,
+                        self.welcome_info,
+                        id="overview-columns",
+                    ),
                 )
 
             with TabPane("PyTorch"):
@@ -504,6 +510,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="warning",
                         ),
                         id="pytorch-profile-controls",
+                        classes="controls",
                     ),
                     GPUStatsTable(
                         "pytorch",
@@ -529,6 +536,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="warning",
                         ),
                         id="tensorflow-profile-controls",
+                        classes="controls",
                     ),
                     GPUStatsTable(
                         "tensorflow",
@@ -549,23 +557,37 @@ class GPUMemoryProfilerTUI(App):
                         id="mlx-runtime-status",
                     ),
                     Horizontal(
-                        Button("Runtime Info", id="btn-mlx-info"),
-                        Button("MLX Sample", id="btn-run-mlx"),
-                        Button("Use MLX for Tracking", id="btn-select-mlx"),
-                        classes="mlx-controls",
+                        Button("Runtime Info", id="btn-mlx-info", variant="primary"),
+                        Button("MLX Sample", id="btn-run-mlx", variant="primary"),
+                        Button(
+                            "Use MLX for Tracking",
+                            id="btn-select-mlx",
+                            variant="success",
+                        ),
+                        Button(
+                            "Refresh Profiles",
+                            id="btn-refresh-mlx-profiles",
+                            variant="primary",
+                        ),
+                        Button(
+                            "Clear Profiles",
+                            id="btn-clear-mlx-profiles",
+                            variant="warning",
+                        ),
+                        classes="controls mlx-controls",
                     ),
                     Horizontal(
-                        Button("Refresh Profiles", id="btn-refresh-mlx-profiles"),
-                        Button("Clear Profiles", id="btn-clear-mlx-profiles"),
-                        classes="mlx-controls",
-                    ),
-                    Horizontal(
+                        Label("Artifact"),
                         Input(
                             placeholder="MLX profile JSON or telemetry/bundle directory",
                             id="mlx-artifact-path",
                         ),
-                        Button("Load Artifact", id="btn-load-mlx-artifact"),
-                        classes="mlx-controls",
+                        Button(
+                            "Load Artifact",
+                            id="btn-load-mlx-artifact",
+                            variant="success",
+                        ),
+                        classes="controls mlx-controls",
                     ),
                     self.mlx_profile_table,
                     self.mlx_timeline_canvas,
@@ -587,14 +609,6 @@ class GPUMemoryProfilerTUI(App):
                         ),
                         self.watchdog_button,
                         Button(
-                            "Apply Thresholds",
-                            id="btn-apply-thresholds",
-                            variant="primary",
-                        ),
-                        id="monitor-controls-row1",
-                    ),
-                    Horizontal(
-                        Button(
                             "Force Cleanup",
                             id="btn-force-cleanup",
                             variant="success",
@@ -603,6 +617,22 @@ class GPUMemoryProfilerTUI(App):
                             "Aggressive Cleanup",
                             id="btn-force-cleanup-aggressive",
                             variant="error",
+                        ),
+                        id="monitor-controls-row1",
+                        classes="controls",
+                    ),
+                    Horizontal(
+                        Horizontal(
+                            Label("Warning %"),
+                            self.warning_input,
+                            Label("Critical %"),
+                            self.critical_input,
+                            Button(
+                                "Apply Thresholds",
+                                id="btn-apply-thresholds",
+                                variant="primary",
+                            ),
+                            id="monitor-thresholds",
                         ),
                         Button(
                             "Export CSV",
@@ -614,21 +644,12 @@ class GPUMemoryProfilerTUI(App):
                             id="btn-export-json",
                             variant="success",
                         ),
-                        id="monitor-controls-row2",
-                    ),
-                    Horizontal(
                         Button(
                             "Clear Monitor Log",
                             id="btn-clear-monitor-log",
                         ),
-                        id="monitor-controls-row3",
-                    ),
-                    Horizontal(
-                        Label("Warning %"),
-                        self.warning_input,
-                        Label("Critical %"),
-                        self.critical_input,
-                        id="monitor-thresholds",
+                        id="monitor-controls-row2",
+                        classes="controls",
                     ),
                     self.monitor_stats_table,
                     self.alert_history_table,
@@ -655,6 +676,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="success",
                         ),
                         id="visual-buttons",
+                        classes="controls",
                     ),
                     self.timeline_stats_table,
                     self.timeline_canvas,
@@ -676,19 +698,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="success",
                         ),
                         Button("Refresh", id="btn-diag-refresh", variant="primary"),
-                        id="diagnostics-controls-row1",
-                    ),
-                    Horizontal(
-                        self.diagnostics_path_input,
-                        self.diagnostics_session_input,
-                        Button(
-                            "Apply Session",
-                            id="btn-diag-apply-session",
-                            variant="primary",
-                        ),
-                        id="diagnostics-controls-row2",
-                    ),
-                    Horizontal(
+                        Label("Ranks"),
                         self.diagnostics_rank_filter_input,
                         Button(
                             "Apply Filter",
@@ -700,7 +710,21 @@ class GPUMemoryProfilerTUI(App):
                             id="btn-diag-reset-filter",
                             variant="warning",
                         ),
-                        id="diagnostics-controls-row3",
+                        id="diagnostics-controls-row1",
+                        classes="controls",
+                    ),
+                    Horizontal(
+                        Label("Artifacts"),
+                        self.diagnostics_path_input,
+                        Label("Session"),
+                        self.diagnostics_session_input,
+                        Button(
+                            "Apply Session",
+                            id="btn-diag-apply-session",
+                            variant="primary",
+                        ),
+                        id="diagnostics-controls-row2",
+                        classes="controls",
                     ),
                     self.diagnostics_rank_table,
                     self.diagnostics_timeline_canvas,
@@ -711,7 +735,6 @@ class GPUMemoryProfilerTUI(App):
             with TabPane("CLI & Actions"):
                 yield VerticalScroll(
                     self.cli_panel,
-                    Rule(),
                     Horizontal(
                         Button(
                             "gpumemprof info", id="btn-log-system", variant="primary"
@@ -732,6 +755,7 @@ class GPUMemoryProfilerTUI(App):
                             variant="warning",
                         ),
                         id="cli-buttons-row1",
+                        classes="controls",
                     ),
                     Horizontal(
                         Button(
@@ -747,14 +771,17 @@ class GPUMemoryProfilerTUI(App):
                             variant="success",
                         ),
                         id="cli-buttons-row2",
+                        classes="controls",
                     ),
                     Horizontal(
+                        Label("Command"),
                         self.cli_command_input,
                         Button("Run Command", id="btn-cli-run", variant="primary"),
                         Button(
                             "Cancel Command", id="btn-cli-cancel", variant="warning"
                         ),
                         id="cli-runner",
+                        classes="controls",
                     ),
                     self.loader,
                     self.command_log,
@@ -1271,16 +1298,37 @@ class GPUMemoryProfilerTUI(App):
         self.alert_history_table.update_rows(self.recent_alerts)
 
     def _capture_alerts(self, events: list[TrackerEventView]) -> None:
+        """Keep one row per kind of alert, with its latest message and count.
+
+        The tracker raises an alert on every sample past a threshold, so a
+        sustained condition would otherwise fill the table with one message.
+        A kind is the alert's type and the text before its first colon; an
+        error's kind is its whole message, so different failures keep rows.
+        """
         alert_types = {"warning", "critical", "error"}
         for event in events:
-            if event.event_type in alert_types:
-                self.recent_alerts.append(
-                    {
-                        "timestamp": event.timestamp,
-                        "type": event.event_type,
-                        "message": event.message or "",
-                    }
-                )
+            if event.event_type not in alert_types:
+                continue
+            message = event.message or ""
+            label = message if event.event_type == "error" else message.split(":", 1)[0]
+            kind = f"{event.event_type}:{label}"
+            previous = next(
+                (alert for alert in self.recent_alerts if alert.get("kind") == kind),
+                None,
+            )
+            count = 1
+            if previous is not None:
+                self.recent_alerts.remove(previous)
+                count += int(previous.get("count", 1))
+            self.recent_alerts.append(
+                {
+                    "timestamp": event.timestamp,
+                    "type": event.event_type,
+                    "message": message,
+                    "kind": kind,
+                    "count": count,
+                }
+            )
         self.recent_alerts = self.recent_alerts[-50:]
 
     def _event_color(self, event_type: str) -> str:
@@ -2029,7 +2077,10 @@ class GPUMemoryProfilerTUI(App):
     def _pytorch_sample_workload() -> dict[str, Any]:
         if GPUMemoryProfiler is None or torch is None:
             raise RuntimeError("PyTorch profiler is unavailable.")
-        return run_pytorch_sample_workload(GPUMemoryProfiler, torch)
+        from stormlog.context_profiler import get_global_profiler
+
+        # The PyTorch tab lists the global profiler's results.
+        return run_pytorch_sample_workload(get_global_profiler, torch)
 
     @staticmethod
     def _tensorflow_sample_workload() -> Any:
@@ -2038,7 +2089,10 @@ class GPUMemoryProfilerTUI(App):
                 "TensorFlow profiler is unavailable. Install TensorFlow support with: "
                 "pip install 'stormlog[tf]'"
             )
-        return run_tensorflow_sample_workload(TFMemoryProfiler, tf)
+        from stormlog.tensorflow.context_profiler import get_global_profiler
+
+        # The TensorFlow tab lists the global profiler's profiles.
+        return run_tensorflow_sample_workload(get_global_profiler, tf)
 
     @staticmethod
     def _cpu_sample_workload() -> dict[str, Any]:

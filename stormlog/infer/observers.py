@@ -578,7 +578,7 @@ def _trace_names(traces: list[Any]) -> set[str]:
 
 
 def _execution_summary(
-    records: Sequence[Mapping[str, Any]]
+    records: Sequence[Mapping[str, Any]],
 ) -> Mapping[str, Any] | None:
     capability = _capability(records, "engine_adapter")
     if capability is None:

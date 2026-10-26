@@ -8,8 +8,7 @@ import pytest
 
 
 def test_jax_mlflow_fallback_preserves_requested_export() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import importlib.abc
         import sys
         from types import SimpleNamespace
@@ -33,8 +32,7 @@ def test_jax_mlflow_fallback_preserves_requested_export() -> None:
         assert callable(cli.export_diagnose_bundle_to_mlflow)
 
         print("ok")
-        """
-    )
+        """)
 
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -49,8 +47,7 @@ def test_jax_mlflow_fallback_preserves_requested_export() -> None:
 
 
 def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import builtins
 
         original_import = builtins.__import__
@@ -83,8 +80,7 @@ def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
                 )
 
         print("ok")
-        """
-    )
+        """)
 
     try:
         completed = subprocess.run(
@@ -102,8 +98,7 @@ def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
 
 
 def test_pprof_parser_defers_schema_import_and_preserves_failure_cause() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import importlib
         import importlib.abc
         import sys
@@ -129,8 +124,7 @@ def test_pprof_parser_defers_schema_import_and_preserves_failure_cause() -> None
             raise AssertionError("Expected the incompatible schema import to fail")
 
         print("ok")
-        """
-    )
+        """)
 
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -145,8 +139,7 @@ def test_pprof_parser_defers_schema_import_and_preserves_failure_cause() -> None
 
 
 def test_pprof_parser_wraps_protobuf_runtime_version_error() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import importlib
         import importlib.abc
         import sys
@@ -181,8 +174,7 @@ def test_pprof_parser_wraps_protobuf_runtime_version_error() -> None:
             raise AssertionError("Expected a wrapped protobuf VersionError")
 
         print("ok")
-        """
-    )
+        """)
 
     completed = subprocess.run(
         [sys.executable, "-c", code],

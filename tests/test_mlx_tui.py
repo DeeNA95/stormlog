@@ -1,6 +1,8 @@
 import asyncio
 import subprocess
 import sys
+from pathlib import Path
+from typing import Any, NoReturn
 from unittest.mock import Mock
 
 import pytest
@@ -16,20 +18,21 @@ from stormlog.mlx.context_profiler import (
 from stormlog.mlx.profile_artifact import write_profiles
 from stormlog.mlx.profiler import MLXMemoryProfiler
 from stormlog.tui.app import GPUMemoryProfilerTUI
-from stormlog.tui.builders import build_mlx_stats_rows
+from stormlog.tui.builders import build_mlx_runtime_markdown, build_mlx_stats_rows
 from stormlog.tui.monitor import TrackerSession, TrackerUnavailableError
 from stormlog.tui.profiles import clear_mlx_profiles, fetch_mlx_profiles
 from stormlog.tui.widgets.timeline import TimelineCanvas
 from tests.mlx_fakes import make_runtime
 
 
-def test_explicit_mlx_session_passive_counters_nulls_and_export(tmp_path):
+def test_explicit_mlx_session_passive_counters_nulls_and_export(tmp_path: Path) -> None:
     runtime = make_runtime()
     session = TrackerSession(framework="mlx", sampling_interval=10)
     session.start(runtime=runtime)
     try:
         assert session.backend == "mlx"
-        assert session.get_session_summary().pid
+        summary = session.get_session_summary()
+        assert summary is not None and summary.pid
         assert session.get_device_label() == "MLX Metal allocator (this process)"
         assert session.get_statistics()["cache_bytes"] == 20
         events = session.pull_events()
@@ -44,10 +47,7 @@ def test_explicit_mlx_session_passive_counters_nulls_and_export(tmp_path):
         assert not session.force_cleanup()
         assert session.export_events(str(tmp_path / "events.json"), format="json")
         exported = analyze(tmp_path / "events.json")
-        assert (
-            exported["session"]["session_id"]
-            == session.get_session_summary().session_id
-        )
+        assert exported["session"]["session_id"] == summary.session_id
         assert exported["metrics"]["sampled_peak_bytes"] == 100
         assert session.export_events(str(tmp_path / "events.csv"), format="csv")
         session.clear_events()
@@ -58,10 +58,12 @@ def test_explicit_mlx_session_passive_counters_nulls_and_export(tmp_path):
     assert "eval" not in runtime.core.calls and "reset" not in runtime.core.calls
 
 
-def test_unavailable_mlx_does_not_fall_back_to_cpu(monkeypatch):
+def test_unavailable_mlx_does_not_fall_back_to_cpu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from stormlog.mlx.runtime import MLXMetalUnavailableError
 
-    def fail(*args, **kwargs):
+    def fail(*args: Any, **kwargs: Any) -> NoReturn:
         raise MLXMetalUnavailableError("Metal unavailable")
 
     monkeypatch.setattr("stormlog.tui.mlx_adapter.MemoryTracker", fail)
@@ -71,7 +73,7 @@ def test_unavailable_mlx_does_not_fall_back_to_cpu(monkeypatch):
     assert not session.is_active
 
 
-def test_profile_adapter_no_runtime_for_empty_or_saved_profiles(tmp_path):
+def test_profile_adapter_no_runtime_for_empty_or_saved_profiles(tmp_path: Path) -> None:
     clear_global_profiler()
     assert get_profile_summaries() == []
     assert fetch_mlx_profiles() == []
@@ -88,7 +90,9 @@ def test_profile_adapter_no_runtime_for_empty_or_saved_profiles(tmp_path):
     clear_global_profiler()
 
 
-def test_mlx_timeline_retains_gaps_and_distinct_cache_series(monkeypatch):
+def test_mlx_timeline_retains_gaps_and_distinct_cache_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     canvas = TimelineCanvas()
     update = Mock()
     monkeypatch.setattr(canvas, "update", update)
@@ -113,23 +117,28 @@ def test_mlx_timeline_retains_gaps_and_distinct_cache_series(monkeypatch):
     assert active == [0, None, 1] and cache == [2, None, 0]
 
 
-def test_mlx_app_actions_tracking_and_cleanup(tmp_path, monkeypatch):
-    async def scenario():
+def test_mlx_app_actions_tracking_and_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
         monkeypatch.setattr("stormlog.mlx.tracker.MLXRuntime", make_runtime)
         app = GPUMemoryProfilerTUI(framework="mlx")
         async with app.run_test(size=(160, 55)):
             await app.start_live_tracking()
-            assert app.tracker_session.is_active
+            session = app.tracker_session
+            assert session is not None and session.is_active
             app.refresh_monitoring_panel()
             assert app.watchdog_button.disabled
-            assert app.tracker_session.backend == "mlx"
+            assert session.backend == "mlx"
             app.stop_live_tracking()
             await app.refresh_mlx_profiles()
 
     asyncio.run(scenario())
 
 
-def test_mlx_only_startup_and_saved_artifact_browsing_block_all_frameworks(tmp_path):
+def test_mlx_only_startup_and_saved_artifact_browsing_block_all_frameworks(
+    tmp_path: Path,
+) -> None:
     from tests.test_mlx_analysis import write_events
 
     events = tmp_path / "events.json"
@@ -163,3 +172,30 @@ asyncio.run(check())
         timeout=20,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_runtime_line_names_the_device_in_words() -> None:
+    line = build_mlx_runtime_markdown(
+        {
+            "mlx_version": "0.32.4",
+            "raw_device_info": {
+                "device_name": "Apple M1 Pro",
+                "architecture": "applegpu_g13s",
+                "memory_size": 16 * 1024**3,
+                "max_recommended_working_set_size": 11453251584,
+                "resource_limit": 499000,
+            },
+            "device_info_error": None,
+        }
+    )
+    assert line.startswith("MLX 0.32.4 on Metal")
+    assert "**Apple M1 Pro** (applegpu_g13s)" in line
+    assert "16.00 GB unified memory" in line
+    assert "{" not in line and "resource_limit" not in line
+
+
+def test_the_runtime_line_says_when_device_details_failed() -> None:
+    line = build_mlx_runtime_markdown(
+        {"mlx_version": "0.32.4", "raw_device_info": {}, "device_info_error": "boom"}
+    )
+    assert line.endswith("device details unavailable: boom.")

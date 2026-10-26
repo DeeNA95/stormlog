@@ -40,25 +40,31 @@ The current TUI surface contains eight tabs:
 
 ### Overview
 
-- shows current platform and runtime information
-- links you to the recommended sample commands
+- shows the platform, Python, GPU and TensorFlow device details
+- lists the first commands to run and what each tab is for
+- lists the keyboard shortcuts
+- points to `stormlog infer` for inference profiling, which runs from the shell
 - is the fastest place to confirm that the app launched with the expected environment
 
 ![Overview tab](tui-overview-current.png)
 
 ### PyTorch
 
-- shows current PyTorch stats
-- runs a sample PyTorch workload
-- refreshes or clears collected profile summaries
+- shows each device's current, peak and reserved memory
+- lists the profiles recorded in this process, including the PyTorch sample
+  run from `CLI & Actions`
+- refreshes or clears those profiles
 
 If CUDA is unavailable, the sample workload falls back to the CPU profiler path when possible.
 
+![PyTorch tab](tui-pytorch-current.png)
+
 ### TensorFlow
 
-- shows TensorFlow environment details
-- runs a sample TensorFlow workload
-- refreshes or clears collected TensorFlow profile summaries
+- shows TensorFlow environment and device details
+- lists the TensorFlow profiles recorded in this process, including the
+  TensorFlow sample run from `CLI & Actions`
+- refreshes or clears those profiles
 
 ### MLX
 
@@ -74,14 +80,15 @@ native lifetime peak labels. GPU percentages, fragmentation and cleanup controls
 are unavailable. Capture external workloads with `mlxmemprof run` and load their
 artifacts instead. See the [MLX guide](mlx_testing_guide.md).
 
-![MLX tab with a native evaluated sample](tui-mlx-current.svg)
+![MLX tab with a native evaluated sample](tui-mlx-current.png)
 
 ### Monitoring
 
 - starts or stops a live tracker session
 - shows rolling memory stats
 - exports current tracker events to `./exports`
-- lets you tune warning and critical thresholds when using the GPU tracker
+- lets you tune the `Warning %` and `Critical %` thresholds (80 and 95 by
+  default) when using the GPU tracker
 - exposes watchdog controls for supported GPU environments
 
 ![Monitoring tab](tui-monitoring-current.png)
@@ -116,14 +123,15 @@ The export buttons only work after timeline samples exist. If you have not start
 
 ![Diagnostics tab](tui-diagnostics-current.png)
 
-The artifact input field accepts comma-separated paths. Use `Load Artifacts`
+The `Artifacts` field accepts comma-separated paths. Use `Load Artifacts`
 first, then `Refresh` after changing the path set. When multiple sessions are
 found, the Diagnostics tab defaults to the newest `completed` session and lets
-you switch to another one by entering its session id.
+you switch to another one by entering its id in `Session` and applying it.
+Filter ranks in `Ranks`.
 
-If the loaded telemetry contains `phase_enter` / `phase_exit` records, rank rows
-and earliest-indicator details show the resolved phase path directly in the
-Diagnostics model.
+If the loaded telemetry contains `phase_enter` / `phase_exit` records, the
+indicator table's Phase column shows each indicator's resolved phase path,
+for example `epoch 1 / train`, and rank rows carry it in the Diagnostics model.
 
 When the product is choosing a useful winner from an otherwise ambiguous phase
 set, the TUI surfaces that with a `(likely)` marker instead of flattening it
@@ -138,7 +146,7 @@ the canonical phase attribution separate from any heuristic winner.
 - runs sample workloads
 - runs the OOM scenario helper
 - runs the capability matrix smoke path
-- lets you enter any shell command into the inline runner
+- lets you enter any shell command in the `Command` field of the inline runner
 
 ![CLI & Actions tab](tui-cli-actions-current.png)
 
@@ -172,9 +180,12 @@ Use this tab when you want to kick off a CLI flow and keep the output attached t
 3. Review the inline log output.
 4. If you need more detail, rerun the same command in a normal shell and archive the artifacts.
 
-The screenshot above reflects the shipped Diagnostics tab. Older distributed
-diagnostics mockups have been removed from the docs because they no longer
-match the current product surface.
+The screenshots on this page come from the shipped TUI on an NVIDIA L4 while
+ResNet-18 trained on CIFAR-10 for six epochs in the same process, each epoch's
+training and evaluation marked as tracker phases, except the MLX tab, which
+was taken on Apple Silicon. `examples/scenarios/tui_screenshots.py` takes them
+on any machine, and `examples/scenarios/modal_readme_media.py` reruns the L4
+capture on Modal.
 
 For incident playbooks and rank-aware operational workflows that start in the
 TUI Diagnostics tab, use

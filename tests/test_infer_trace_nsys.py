@@ -41,8 +41,7 @@ def _export(path: Path) -> Path:
     also replays a CUDA graph (two kernels) and copies outside any range.
     """
     with closing(sqlite3.connect(path)) as db:
-        db.executescript(
-            """
+        db.executescript("""
             create table StringIds (id integer, value text);
             create table TARGET_INFO_SESSION_START_TIME (utcEpochNs integer, utcTime text, localTime text);
             create table META_DATA_CAPTURE (name text, value text);
@@ -56,8 +55,7 @@ def _export(path: Path) -> Path:
                 correlationId integer, nameId integer);
             create table NVTX_EVENTS (start integer, end integer, eventType integer, text text,
                 textId integer, globalTid integer);
-            """
-        )
+            """)
         db.executemany(
             "insert into StringIds values (?, ?)",
             [
@@ -712,7 +710,9 @@ def test_a_driver_api_graph_launch_marks_graph_work(tmp_path: Path) -> None:
     assert capture.summary["traces"][0]["graph_gpu_events"] == 2
 
 
-def test_compact_capture_preserves_process_device_identity_and_accounting(tmp_path):
+def test_compact_capture_preserves_process_device_identity_and_accounting(
+    tmp_path: Path,
+) -> None:
     from stormlog.infer.correlation_accounting import (
         account_gpu_time,
         resolve_inference_events,

@@ -559,7 +559,7 @@ class MemoryTracker:
             )
         return False
 
-    def _run_tracking_iteration(self, last_allocated: int) -> int:
+    def _run_tracking_iteration(self, last_allocated: Optional[int]) -> Optional[int]:
         """Run one collection iteration, preserving health state across failures."""
         now = time.time()
         if not self._retry_collection_due(now):
@@ -589,9 +589,13 @@ class MemoryTracker:
         self._last_observed_sample = sample
         current_allocated = sample.allocated_bytes
         has_allocator = self.collector_capabilities.supports_allocator_allocated
+        # The first sample sets the baseline: what was allocated before
+        # tracking started is no allocation of this session.
         memory_change = (
             current_allocated - last_allocated
-            if has_allocator and current_allocated is not None
+            if has_allocator
+            and current_allocated is not None
+            and last_allocated is not None
             else None
         )
         is_partial = self._transition_to_sampled_state(result, sample=sample)
@@ -713,7 +717,7 @@ class MemoryTracker:
 
     def _tracking_loop(self) -> None:
         """Main tracking loop running in background thread."""
-        last_allocated = 0
+        last_allocated: Optional[int] = None
 
         while not self._stop_event.wait(self.sampling_interval):
             try:
@@ -903,24 +907,30 @@ class MemoryTracker:
         allocated: Optional[int],
         reserved: Optional[int],
     ) -> bool:
-        # Fragmentation warning
+        # Fragmentation warning: reserved memory held in inactive split blocks,
+        # as check_memory_fragmentation measures it. Reserved minus allocated
+        # is the caching allocator's free cache, kept for reuse, so a collector
+        # without an inactive-split counter has no fragmentation to warn about.
+        capabilities = self.collector_capabilities
+        inactive = sample.inactive_bytes
         if (
-            self.collector_capabilities.supports_fragmentation_analysis
-            and reserved is not None
-            and allocated is not None
-            and reserved > 0
+            not capabilities.supports_fragmentation_analysis
+            or not capabilities.supports_allocator_inactive
+            or inactive is None
+            or reserved is None
+            or reserved <= 0
         ):
-            fragmentation = (reserved - allocated) / reserved
-            if fragmentation > self.thresholds["fragmentation_threshold"]:
-                self._add_event(
-                    "warning",
-                    change,
-                    f"High fragmentation: {fragmentation:.1%}",
-                    {"fragmentation": fragmentation},
-                    sample=sample,
-                )
-                return True
-
+            return False
+        fragmentation = inactive / reserved
+        if fragmentation > self.thresholds["fragmentation_threshold"]:
+            self._add_event(
+                "warning",
+                change,
+                f"High fragmentation: {fragmentation:.1%}",
+                {"fragmentation": fragmentation},
+                sample=sample,
+            )
+            return True
         return False
 
     @staticmethod

@@ -153,6 +153,34 @@ def _make_event(rank: int, timestamp_s: float = 1.0) -> Any:
     )
 
 
+def test_the_app_is_titled_stormlog() -> None:
+    async def scenario() -> None:
+        app = GPUMemoryProfilerTUI()
+        async with app.run_test(headless=True, size=(140, 44)) as pilot:
+            await pilot.pause()
+            screenshot = app.export_screenshot()
+            assert app.title == "Stormlog"
+            assert "Stormlog" in screenshot
+            assert "GPUMemoryProfilerTUI" not in screenshot
+
+    asyncio.run(scenario())
+
+
+def test_every_markdown_panel_shows_its_document() -> None:
+    from stormlog.tui.widgets import MarkdownPanel
+
+    async def scenario() -> None:
+        app = GPUMemoryProfilerTUI()
+        async with app.run_test(headless=True, size=(140, 44)) as pilot:
+            await pilot.pause()
+            panels = list(app.query(MarkdownPanel))
+            assert len(panels) >= 6
+            for panel in panels:
+                assert panel.source.strip(), panel.id
+
+    asyncio.run(scenario())
+
+
 def test_tab_rendering_and_key_bindings_r_f_g_t(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

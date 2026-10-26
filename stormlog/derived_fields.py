@@ -1,7 +1,7 @@
 """Registry-driven derived-field layer for Stormlog telemetry.
 
 Centralises the common investigation formulas (allocator gap, utilisation %,
-fragmentation ratio, degraded-collector state) so that ``diagnose.py``,
+fragmentation and cache ratios, degraded-collector state) so that ``diagnose.py``,
 ``gap_analysis.py``, and future TUI surfaces all use a single, tested source
 of truth instead of copy-pasting the same arithmetic.
 
@@ -41,6 +41,7 @@ class DerivedFields(TypedDict, total=False):
     allocator_gap_bytes: int | None
     utilization_ratio: None | float
     fragmentation_ratio: None | float
+    allocator_cache_ratio: None | float
     is_degraded_collector: bool
 
 
@@ -108,13 +109,34 @@ def _compute_utilization_ratio(
 
 
 def _compute_fragmentation_ratio(
+    allocator_inactive_bytes: int | None,
+    allocator_reserved_bytes: int | None,
+) -> None | float:
+    """Fraction of reserved memory in inactive split blocks.
+
+    A caching allocator (PyTorch's on CUDA and ROCm) splits a reserved segment
+    to serve smaller requests; a freed split stays inside a segment that is
+    still in use, so it can neither go back to the device nor serve a larger
+    request. That is fragmentation, as ``check_memory_fragmentation`` and
+    ``gpumemprof diagnose`` measure it. Reserved minus allocated is not: most
+    of it is whole free blocks the allocator keeps for reuse (see
+    ``allocator_cache_ratio``). ``None`` without an inactive-split counter or
+    with nothing reserved.
+    """
+    if allocator_inactive_bytes is None or not allocator_reserved_bytes:
+        return None
+    return allocator_inactive_bytes / allocator_reserved_bytes
+
+
+def _compute_allocator_cache_ratio(
     allocator_allocated_bytes: int | None,
     allocator_reserved_bytes: int | None,
 ) -> None | float:
-    """Fraction of reserved memory that is fragmented (unused gap / reserved).
+    """Fraction of reserved memory not allocated: the allocator's free cache.
 
-    Returns ``None`` when ``allocator_reserved_bytes`` is zero to avoid
-    division-by-zero.
+    A high value is normal for a caching allocator and is not fragmentation;
+    it says how much the process holds beyond its live tensors. ``None`` with
+    nothing reserved.
     """
     if allocator_allocated_bytes is None or not allocator_reserved_bytes:
         return None
@@ -182,9 +204,16 @@ def compute_event_fields(event: Any) -> DerivedFields:
     """
     raw_allocated = _event_get(event, "allocator_allocated_bytes")
     raw_reserved = _event_get(event, "allocator_reserved_bytes")
+    raw_inactive = _event_get(event, "allocator_inactive_bytes")
     raw_device_used = _event_get(event, "device_used_bytes")
     allocated = int(raw_allocated) if raw_allocated is not None else None
     reserved = int(raw_reserved) if raw_reserved is not None else None
+    inactive = (
+        int(raw_inactive)
+        if raw_inactive is not None
+        and memory_feature_enabled(event, "supports_allocator_inactive")
+        else None
+    )
     device_used = int(raw_device_used) if raw_device_used is not None else allocated
     use_device_utilization = allocated is None or not memory_feature_enabled(
         event, "supports_allocator_allocated"
@@ -199,10 +228,11 @@ def compute_event_fields(event: Any) -> DerivedFields:
             device_total,
         ),
         "fragmentation_ratio": (
-            _compute_fragmentation_ratio(allocated, reserved)
+            _compute_fragmentation_ratio(inactive, reserved)
             if memory_feature_enabled(event, "supports_fragmentation_analysis")
             else None
         ),
+        "allocator_cache_ratio": _compute_allocator_cache_ratio(allocated, reserved),
         "is_degraded_collector": _collector_is_degraded(collector),
     }
     return result
@@ -219,8 +249,9 @@ def compute_session_fields(events: Sequence[Any]) -> SessionDerivedFields:
 
         * ``peak_utilization_ratio`` - highest per-event utilization seen; or
           ``None`` if ``device_total_bytes`` was unavailable in every event.
-        * ``avg_fragmentation_ratio`` - mean fragmentation ratio across events
-          where ``allocator_reserved_bytes > 0``; ``None`` if none qualify.
+        * ``avg_fragmentation_ratio`` - mean fragmentation ratio (inactive
+          split blocks over reserved) across events that report inactive
+          splits with ``allocator_reserved_bytes > 0``; ``None`` if none do.
         * ``is_session_interrupted`` - ``True`` when the last event is not a
           ``"stop"`` event.
     """
