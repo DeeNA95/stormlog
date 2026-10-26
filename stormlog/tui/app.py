@@ -318,10 +318,11 @@ class GPUMemoryProfilerTUI(App):
     def _overview_markdown(self) -> str:
         if self.framework == "mlx":
             system = get_host_info()
+            python = str(system["python_version"]).split()[0]
             return (
                 "### System\n\n"
                 f"- **Platform**: {system['platform']} / {system['architecture']}\n"
-                f"- **Python**: {system['python_version']}\n\n"
+                f"- **Python**: {python}\n\n"
                 "MLX starts only when you ask for runtime info, a sample or "
                 "tracking in the MLX tab."
             )
