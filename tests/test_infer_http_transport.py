@@ -287,3 +287,77 @@ def test_each_read_gets_the_whole_timeout_after_connecting() -> None:
             assert sock.gettimeout() == 1.0
     finally:
         listener.close()
+
+
+def test_a_request_deadline_bounds_a_stalled_dns_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real = socket.getaddrinfo
+
+    def stalled(*args: Any) -> Any:
+        time.sleep(0.3)
+        return real(*args)
+
+    monkeypatch.setattr(socket, "getaddrinfo", stalled)
+    started = time.perf_counter()
+    with pytest.raises(urllib.error.URLError) as raised:
+        complete(
+            OpenAIChatCompletionsClient(
+                endpoint="http://localhost:9/v1/chat/completions",
+                model="opaque",
+                timeout_seconds=0.5,
+                request_deadline_seconds=0.05,
+            )
+        )
+    assert time.perf_counter() - started < 0.2
+    assert classify_failure(raised.value) == ("unreachable", None)
+
+
+@pytest.mark.parametrize(
+    ("timeout", "deadline"),
+    [(2.0, 0.15), (0.15, 5.0)],
+    ids=["deadline-first", "timeout-first"],
+)
+def test_a_silent_tls_handshake_stops_at_the_sooner_bound(
+    timeout: float, deadline: float
+) -> None:
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    try:
+        started = time.perf_counter()
+        with pytest.raises(urllib.error.URLError) as raised:
+            complete(
+                OpenAIChatCompletionsClient(
+                    endpoint=f"https://127.0.0.1:{port}/v1/chat/completions",
+                    model="opaque",
+                    timeout_seconds=timeout,
+                    request_deadline_seconds=deadline,
+                )
+            )
+        assert time.perf_counter() - started < 0.6
+        assert classify_failure(raised.value) == ("unreachable", None)
+    finally:
+        listener.close()
+
+
+def test_reads_get_the_whole_timeout_after_connecting_under_a_deadline() -> None:
+    from stormlog.infer.http_transport import _TrackedHTTPConnection
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    connection = _TrackedHTTPConnection(
+        "127.0.0.1",
+        listener.getsockname()[1],
+        timeout=1.0,
+        request_deadline_seconds=5.0,
+    )
+    try:
+        connection.connect()
+        assert connection.sock is not None
+        assert connection.sock.gettimeout() == 1.0
+    finally:
+        connection.close()
+        listener.close()
