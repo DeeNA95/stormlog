@@ -1,6 +1,8 @@
 import copy
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
@@ -73,3 +75,24 @@ def test_nested_artifact_validation_matches_schema(tmp_path: Path) -> None:
             validate_profiles(invalid)
         with pytest.raises(jsonschema.ValidationError):
             jsonschema.validate(invalid, schema)
+
+
+def test_a_wall_clock_step_back_still_exports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import stormlog.mlx.profiler as profiler_module
+
+    profiler = MLXMemoryProfiler(runtime=make_runtime(), sampling_interval=100)
+    stepped_back = SimpleNamespace(
+        perf_counter_ns=time.perf_counter_ns,
+        time_ns=lambda: time.time_ns() - 5_000_000_000,
+    )
+    monkeypatch.setattr(profiler_module, "time", stepped_back)
+    with profiler.profile_context("clock", already_evaluated=True):
+        pass
+    monkeypatch.undo()
+    (result,) = profiler.get_results()
+    assert result.ended_at_ns < result.started_at_ns
+    path = tmp_path / "profile.json"
+    profiler.export(str(path))
+    assert [item["name"] for item in load_profiles(path)["profiles"]] == ["clock"]
