@@ -2,22 +2,23 @@
 
 Two parts, each in its own L4 container:
 
-- ``tui``: the TUI tabs, driven by ``tui_screenshots`` while a PyTorch
-  training loop runs on the GPU in the same process.
+- ``tui``: the TUI tabs, driven by ``tui_screenshots`` while ResNet-18
+  trains on CIFAR-10 on the GPU in the same process, with per-epoch phases.
 - ``inference``: vLLM 0.30.0 serving Qwen3-0.6B with Stormlog's execution
   hook. A replayed arrival trace runs calm, then overloads the server, then
   calms again; ``stormlog infer analyze`` and ``stormlog infer diagnose`` read
   the artifact, and their output is rendered as terminal SVGs.
 
-The SVGs land in ``docs/`` (``--png`` also renders PNGs with a local Chrome),
-with the run's provenance in ``docs/benchmarks/readme-media.json``. Run with
-the separately installed Modal CLI (not a Stormlog dependency)::
+PNGs land in ``docs/``, rendered from the SVG captures with a local Chrome
+and reduced to a 256-colour palette; the run's provenance goes to
+``docs/benchmarks/readme-media.json``. Run with the separately installed Modal
+CLI (not a Stormlog dependency)::
 
     MODAL_IMAGE_BUILDER_VERSION=2025.06 modal run \\
-        examples/scenarios/modal_readme_media.py --part all --png
+        examples/scenarios/modal_readme_media.py --part all
 
 The source checkout is copied into the image, so the screenshots show the
-working tree. One run of both parts used about ten minutes of L4 time.
+working tree. One run of both parts used about fifteen minutes of L4 time.
 """
 
 from __future__ import annotations
@@ -68,7 +69,20 @@ image = (
         f"ln -s lib {CUDA_HOME}/lib64",
         f"ln -s libcudart.so.13 {CUDA_HOME}/lib/libcudart.so",
     )
-    .pip_install("rich")
+    .pip_install("rich", "pyarrow")
+    # CIFAR-10 from its Hugging Face mirror, decoded once into uint8 tensors.
+    .run_commands(
+        'python -c "import io, numpy as np, pandas as pd, torch; '
+        "from pathlib import Path; from PIL import Image; "
+        "from huggingface_hub import hf_hub_download; "
+        "root = Path('/data/cifar10'); root.mkdir(parents=True); "
+        "[torch.save({'images': torch.from_numpy(np.stack([np.asarray("
+        "Image.open(io.BytesIO(c['bytes'])).convert('RGB')) for c in f['img']])), "
+        "'labels': torch.from_numpy(f['label'].to_numpy().astype(np.int64))}, "
+        "root / (s + '.pt')) for s in ('train', 'test') for f in [pd.read_parquet("
+        "hf_hub_download('uoft-cs/cifar10', 'plain_text/' + s + "
+        "'-00000-of-00001.parquet', repo_type='dataset'))]]\""
+    )
     .env({"CUDA_HOME": CUDA_HOME, "SETUPTOOLS_SCM_PRETEND_VERSION": "0.5.0.dev0"})
     .add_local_dir(
         str(REPO),
@@ -104,13 +118,13 @@ def _gpu() -> str:
     ).strip()
 
 
-@app.function(image=image, gpu="L4", cpu=4, memory=16384, timeout=900)  # type: ignore[misc]
-def tui(track_seconds: float) -> dict[str, Any]:
+@app.function(image=image, gpu="L4", cpu=4, memory=16384, timeout=1800)  # type: ignore[misc]
+def tui(epochs: int) -> dict[str, Any]:
     sys.path.insert(0, "/src")
     from examples.scenarios.tui_screenshots import capture
 
     out = Path("/tmp/shots")
-    paths = capture(out, track_seconds)
+    paths = capture(out, data=Path("/data/cifar10"), epochs=epochs)
     return {
         "gpu": _gpu(),
         "svgs": {path.name: path.read_text() for path in paths},
@@ -354,13 +368,34 @@ def _diagnosis_excerpt(text: str) -> str:
     return "\n".join(kept)
 
 
+HIGHLIGHTS = (
+    (r"^(Diagnosis|Outcome):", "bold #e2e8f0"),
+    (r"(?<=\] )(WARNING|INFO) [a-z_@]+ at [a-z_]+:", "bold #e2e8f0"),
+    (r"\bWARNING\b", "bold #ffa62b"),
+    (r"\bINFO\b", "bold #4ea8ff"),
+    (r"\bruled_out\b", "#4ebf71"),
+    (r"\bnot_ruled_out\b", "#ffa62b"),
+    (r"\bcompetitor [a-z_@]+", "#9aa5ce"),
+    (r"^\s+experiment:", "bold #c678dd"),
+    (r"^\s+confidence \w+", "bold #56b6c2"),
+    # A record ID is one token, not numbers and addresses inside it.
+    (r"(?<=infer\.jsonl:)\d+ \S+", "not bold #8b95a7"),
+    (r"(?<=infer\.jsonl:)\d+", "#56b6c2"),
+)
+
+
 def _terminal_svg(command: str, output: str, title: str, width: int = 120) -> str:
     """Render output as a terminal window: wrapped lines keep their indent,
     blank runs collapse to one line, and finding labels are coloured."""
     import textwrap
 
     from rich.console import Console
+    from rich.highlighter import ReprHighlighter
     from rich.text import Text
+
+    # Numbers, IDs and paths as Rich colours them in a terminal, then the
+    # diagnosis's own vocabulary; later rules win where they overlap.
+    highlighter = ReprHighlighter()
 
     console = Console(
         record=True,
@@ -382,10 +417,9 @@ def _terminal_svg(command: str, output: str, title: str, width: int = 120) -> st
         wrapped = textwrap.fill(
             line, width=width, subsequent_indent=indent + "  ", break_on_hyphens=False
         )
-        text = Text(wrapped)
-        text.highlight_regex(r"\bWARNING\b", "bold #e5a50a")
-        text.highlight_regex(r"\bINFO\b", "bold #3584e4")
-        text.highlight_regex(r"^(Diagnosis|Outcome):", "bold")
+        text = highlighter(Text(wrapped))
+        for pattern, style in HIGHLIGHTS:
+            text.highlight_regex(pattern, style)
         console.print(text, soft_wrap=True)
     return str(console.export_svg(title=title))
 
@@ -447,14 +481,12 @@ def _shrink(png: Path) -> None:
 
 
 @app.local_entrypoint()  # type: ignore[misc]
-def main(
-    part: str = "all",
-    output: str = "docs",
-    png: bool = False,
-    track_seconds: float = 40.0,
-) -> None:
+def main(part: str = "all", output: str = "docs", epochs: int = 6) -> None:
+    import tempfile
+
     docs = Path(output)
     (docs / "benchmarks").mkdir(parents=True, exist_ok=True)
+    captures = Path(tempfile.mkdtemp(prefix="stormlog-media-"))
     written: list[Path] = []
     record_path = docs / "benchmarks" / "readme-media.json"
     record: dict[str, Any] = (
@@ -462,14 +494,17 @@ def main(
     )
     record["captured_at_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     if part in ("all", "tui"):
-        shots = tui.remote(track_seconds)
+        shots = tui.remote(epochs)
         for name, text in shots["svgs"].items():
-            path = docs / name
+            path = captures / name
             path.write_text(text)
             written.append(path)
         record["tui"] = {
             "gpu": shots["gpu"],
-            "files": sorted(shots["svgs"]),
+            "workload": f"ResNet-18 on CIFAR-10, {epochs} epochs",
+            "files": sorted(
+                Path(name).with_suffix(".png").name for name in shots["svgs"]
+            ),
             "readme_checks": [
                 {"argv": check["argv"], "exit": check["exit"]}
                 for check in shots["readme_checks"]
@@ -484,7 +519,7 @@ def main(
         texts = {" ".join(step["argv"][:3]): step["stdout"] for step in result["steps"]}
         diagnosis = texts["stormlog infer diagnose"]
         command = "stormlog infer diagnose infer.jsonl"
-        path = docs / "infer-diagnose-current.svg"
+        path = captures / "infer-diagnose-current.svg"
         path.write_text(_terminal_svg(command, _diagnosis_excerpt(diagnosis), command))
         written.append(path)
         record["inference"] = {
@@ -508,5 +543,9 @@ def main(
         }
     record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
     for path in written:
-        rendered = _png(path) if png else None
-        print(path, rendered or "")
+        rendered = _png(path)
+        if rendered is None:
+            raise SystemExit("PNG rendering needs Google Chrome or Chromium")
+        target = docs / rendered.name
+        shutil.move(str(rendered), target)
+        print(target)
