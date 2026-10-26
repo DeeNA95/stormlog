@@ -2302,11 +2302,12 @@ def test_a_signal_at_the_last_check_before_the_runs_except_still_publishes(
 
 # Instructions that run no Python code and don't check for pending signals
 # (POP_TOP drops the caught exception, which the handler still holds;
-# NOT_TAKEN, from 3.14, only marks a branch not taken, for sys.monitoring).
+# NOT_TAKEN, from 3.14, only marks a branch not taken, for sys.monitoring;
+# LOAD_COMMON_CONSTANT, from 3.15, only loads an interpreter constant).
 _NO_HANDLER_RUNS = {
     "PUSH_EXC_INFO", "LOAD_GLOBAL", "CHECK_EXC_MATCH", "POP_JUMP_IF_FALSE",
     "POP_JUMP_FORWARD_IF_FALSE", "POP_TOP", "STORE_FAST", "LOAD_CONST",
-    "LOAD_FAST", "STORE_ATTR", "NOP", "CACHE", "NOT_TAKEN",
+    "LOAD_FAST", "STORE_ATTR", "NOP", "CACHE", "NOT_TAKEN", "LOAD_COMMON_CONSTANT",
 }  # fmt: skip
 
 
@@ -2345,31 +2346,35 @@ def test_no_signal_handler_can_run_between_the_runs_except_and_holding() -> None
 
 
 def _fail_with_signals_pending(*signums: int) -> None:
-    """Raise TypeError from one C call that has just set ``signums``
-    pending, with no Python code run and no check made in between: ctypes
-    calls PyErr_SetInterruptEx for the first, each errcheck (a C partial of
-    the next such call) sets the next, and the last errcheck, the C builtin
-    pow, raises. CPython runs their handlers at its next checks, which on
-    3.10 include the entry to an except block."""
+    """Unblock queued signals and raise TypeError from one C call.
+
+    Queue on the main thread while blocked, then restore its mask through
+    PyDLL (which keeps the GIL) with the C builtin pow as errcheck. No
+    nested ctypes call can handle the first signal before queuing the
+    second. CPython runs their handlers at its next checks, which on 3.10
+    include the entry to an except block.
+    """
     import ctypes
-    import functools
+    import threading
 
-    pointer: Any = type(ctypes.pythonapi.PyErr_SetInterruptEx)
-
-    def setter(extra: int) -> Any:
-        function = pointer(("PyErr_SetInterruptEx", ctypes.pythonapi))
-        function.argtypes = [ctypes.c_int] + [ctypes.py_object] * extra
-        function.restype = ctypes.c_int
-        return function
-
-    errcheck: Any = pow
-    for signum in reversed(signums[1:]):
-        chained = setter(3)  # called as errcheck: (signum, result, func, args)
-        chained.errcheck = errcheck
-        errcheck = functools.partial(chained, signum)
-    first = setter(0)
-    first.errcheck = errcheck
-    first(signums[0])
+    libc = ctypes.PyDLL(None)
+    # Opaque, aligned storage: sigset_t is 128 bytes on Linux and 4 on macOS.
+    saved_mask = (ctypes.c_uint64 * 16)()
+    change_mask: Any = libc.pthread_sigmask
+    change_mask.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+    change_mask.restype = ctypes.c_int
+    assert change_mask(signal.SIG_SETMASK, None, saved_mask) == 0
+    change_mask.errcheck = pow
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, signums)
+    try:
+        for signum in signums:
+            signal.pthread_kill(threading.get_ident(), signum)
+    except BaseException:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        raise
+    # This C call restores the mask before pow raises. A Python finally
+    # here would itself provide a signal checkpoint before execute's except.
+    change_mask(signal.SIG_SETMASK, saved_mask, None)
 
 
 @pytest.mark.parametrize(
@@ -2417,6 +2422,9 @@ def test_a_run_that_fails_with_signals_pending_is_published(
     finally:
         for saved_signum, handler in saved.items():
             signal.signal(saved_signum, handler)
+        # If restoring the mask had failed, the signals would stay blocked and
+        # later signal tests would hang instead of failing.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, pending)
         pulser._HANDLED.clear()
     if sys.version_info < (3, 11):
         assert seen == {"failure": "interrupted", "received": list(pending[1:])}

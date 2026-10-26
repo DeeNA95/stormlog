@@ -1204,9 +1204,15 @@ def test_a_record_json_cannot_serialize_is_an_error_and_takes_no_number(
 ) -> None:
     circular: list[Any] = []
     circular.append(circular)
-    # Python 3.14 JSON can encode deep lists iteratively. Invalid mapping
-    # keys are a deterministic serialization failure on every supported version.
+    # Invalid mapping keys fail deterministically on every supported version.
     invalid_keys = {("not", "a JSON key"): 1}
+    # A deeply nested empty list is valid JSON: from 3.14 the C recursion
+    # limit follows the real stack, so a large stack encodes it. Keep an
+    # unsupported leaf so this case fails whether the encoder reaches it or
+    # runs out of stack first.
+    deep: list[Any] = [object()]
+    for _ in range(100_000):
+        deep = [deep]
 
     class Changing(dict[str, Any]):
         """A value another thread changes while json reads it."""
@@ -1215,7 +1221,7 @@ def test_a_record_json_cannot_serialize_is_an_error_and_takes_no_number(
             raise RuntimeError("dictionary changed size during iteration")
 
     writer = EpochWriter(tmp_path, "engine")
-    for value in (object(), circular, invalid_keys, Changing(a=1)):
+    for value in (object(), circular, invalid_keys, deep, Changing(a=1)):
         writer.emit("alias", {"internal": value})  # never raises
     writer.emit("alias", {"internal": "x"})
     writer.close()
@@ -1223,7 +1229,7 @@ def test_a_record_json_cannot_serialize_is_an_error_and_takes_no_number(
     records = _epoch_records(writer.directory)
     assert [(r["kind"], r["seq"]) for r in records] == [("alias", 0), ("goodbye", 1)]
     status = json.loads((writer.directory / "status.json").read_text())
-    assert (status["errors"], status["dropped"]) == (4, {})
+    assert (status["errors"], status["dropped"]) == (5, {})
 
 
 def test_fields_that_are_not_one_object_are_an_error(tmp_path: Path) -> None:
