@@ -1,3 +1,5 @@
+import functools
+
 from stormlog.mlx import MLXMemoryProfiler
 from stormlog.mlx.context_profiler import (
     clear_global_profiler,
@@ -33,3 +35,14 @@ def test_global_helpers_lifecycle() -> None:
         assert profiler.get_results()[0].name == "global"
     finally:
         clear_global_profiler()
+
+
+def test_decorator_accepts_a_callable_without_a_name() -> None:
+    profiler = MLXMemoryProfiler(runtime=make_runtime())
+
+    def add(a: int, b: int) -> int:
+        return a + b
+
+    wrapped = profile_function(functools.partial(add, 1), profiler=profiler)
+    assert wrapped(2) == 3
+    assert profiler.get_results()[0].name == "function"

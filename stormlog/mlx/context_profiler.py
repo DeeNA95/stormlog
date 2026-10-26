@@ -76,7 +76,7 @@ def profile_function(
                 R,
                 selected.profile_function(
                     lambda: target(*args, **kwargs),
-                    name=name or target.__name__,
+                    name=name or str(getattr(target, "__name__", "function")),
                     state_getter=state_getter,
                     root_extractor=root_extractor,
                     streams=streams,
