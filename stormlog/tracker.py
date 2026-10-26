@@ -559,7 +559,7 @@ class MemoryTracker:
             )
         return False
 
-    def _run_tracking_iteration(self, last_allocated: int) -> int:
+    def _run_tracking_iteration(self, last_allocated: Optional[int]) -> Optional[int]:
         """Run one collection iteration, preserving health state across failures."""
         now = time.time()
         if not self._retry_collection_due(now):
@@ -589,9 +589,13 @@ class MemoryTracker:
         self._last_observed_sample = sample
         current_allocated = sample.allocated_bytes
         has_allocator = self.collector_capabilities.supports_allocator_allocated
+        # The first sample sets the baseline: what was allocated before
+        # tracking started is no allocation of this session.
         memory_change = (
             current_allocated - last_allocated
-            if has_allocator and current_allocated is not None
+            if has_allocator
+            and current_allocated is not None
+            and last_allocated is not None
             else None
         )
         is_partial = self._transition_to_sampled_state(result, sample=sample)
@@ -713,7 +717,7 @@ class MemoryTracker:
 
     def _tracking_loop(self) -> None:
         """Main tracking loop running in background thread."""
-        last_allocated = 0
+        last_allocated: Optional[int] = None
 
         while not self._stop_event.wait(self.sampling_interval):
             try:
