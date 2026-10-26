@@ -337,7 +337,7 @@ The test therefore checks error accounting and sequence continuity with an
 actually unserializable value, while retaining its assertions for circular
 values and changing dictionaries.
 
-Framework jobs have a 60-minute limit. PyTorch's broad test selection dumps all
+Framework jobs have a 90-minute limit. PyTorch's broad test selection dumps all
 thread stacks if a test runs for 120 seconds, so stalled interruption or cleanup
 tests leave diagnostics before the job limit stops the runner.
 
