@@ -54,6 +54,10 @@ class ChatCompletionResult:
     http_status: int | None = None
 
 
+# How much of an HTTP error's body to read for its message.
+_ERROR_BODY_BYTES = 64 * 1024
+
+
 class OpenAIChatCompletionsClient:
     """Minimal OpenAI-compatible Chat Completions HTTP client."""
 
@@ -158,10 +162,15 @@ class OpenAIChatCompletionsClient:
         except urllib.error.HTTPError as exc:
             try:
                 with BoundedResponse(
-                    exc, deadline=self._deadline(started_perf), max_bytes=65536
+                    exc,
+                    deadline=self._deadline(started_perf),
+                    max_bytes=_ERROR_BODY_BYTES + 1,
                 ) as response:
+                    # Keep the start of a long error body rather than none of it.
                     message = safe_error(
-                        response.read().decode("utf-8", errors="replace"),
+                        response.read(_ERROR_BODY_BYTES).decode(
+                            "utf-8", errors="replace"
+                        ),
                         secrets=(self.api_key,),
                     )
             except Exception:

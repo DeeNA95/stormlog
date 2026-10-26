@@ -261,3 +261,15 @@ def test_invalid_utf8_in_a_stream_is_replaced() -> None:
     with served(wire) as url:
         result = stream(client(url))
     assert result.text == "ok\ufffd"
+
+
+def test_a_long_error_body_keeps_its_start() -> None:
+    body = b"model overloaded; " + b"x" * 100_000
+    wire = (
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: %d\r\n\r\n" % len(body)
+    ) + body
+    with served(wire) as url:
+        with pytest.raises(EndpointHTTPError) as raised:
+            complete(client(url))
+    assert raised.value.status == 500
+    assert "model overloaded" in str(raised.value)
