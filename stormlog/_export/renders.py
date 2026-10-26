@@ -24,7 +24,7 @@ MAX_GENERATIONS = 3
 class Generation:
     """One rendered exposition and the readers still holding it."""
 
-    body: bytes
+    body: bytes | bytearray
     number: int
     created_at: float
     readers: int = 0
@@ -62,7 +62,7 @@ class RenderCache:
 
     def __init__(
         self,
-        render: Callable[[], bytes],
+        render: Callable[[], bytes | bytearray],
         *,
         min_interval: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
@@ -159,7 +159,7 @@ class RenderCache:
             self.stats.alive_high_water, self._alive_locked()
         )
 
-    def _publish(self, body: bytes, epoch: int) -> Generation:
+    def _publish(self, body: bytes | bytearray, epoch: int) -> Generation:
         with self._cond:
             self._numbers += 1
             generation = Generation(

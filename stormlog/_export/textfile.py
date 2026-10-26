@@ -249,7 +249,7 @@ class TextfileWriter:
         finally:
             self.renders.release(generation)
 
-    def _write_file(self, body: bytes) -> None:
+    def _write_file(self, body: bytes | bytearray) -> None:
         temporary = self.directory / f".stormlog-{self.slot}.prom.{os.getpid()}.tmp"
         try:
             with open(temporary, "wb", opener=_plain_opener) as handle:
