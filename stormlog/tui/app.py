@@ -1301,14 +1301,16 @@ class GPUMemoryProfilerTUI(App):
 
         The tracker raises an alert on every sample past a threshold, so a
         sustained condition would otherwise fill the table with one message.
-        A kind is the alert's type and the text before its first colon.
+        A kind is the alert's type and the text before its first colon; an
+        error's kind is its whole message, so different failures keep rows.
         """
         alert_types = {"warning", "critical", "error"}
         for event in events:
             if event.event_type not in alert_types:
                 continue
             message = event.message or ""
-            kind = f"{event.event_type}:{message.split(':', 1)[0]}"
+            label = message if event.event_type == "error" else message.split(":", 1)[0]
+            kind = f"{event.event_type}:{label}"
             previous = next(
                 (alert for alert in self.recent_alerts if alert.get("kind") == kind),
                 None,

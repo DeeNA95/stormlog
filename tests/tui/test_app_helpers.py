@@ -262,3 +262,24 @@ def test_the_indicator_table_names_the_phase() -> None:
             assert table.get_row_at(0)[5] == "No anomaly indicators detected."
 
     asyncio.run(scenario())
+
+
+def test_different_errors_keep_their_own_rows() -> None:
+    from stormlog.tui.monitor import TrackerEventView
+
+    app = appmod.GPUMemoryProfilerTUI()
+    app.recent_alerts = []
+    app._capture_alerts(
+        [
+            TrackerEventView(1.0, "error", "Tracking error: CUDA busy", "-", "-", "-"),
+            TrackerEventView(
+                2.0, "error", "Tracking error: device lost", "-", "-", "-"
+            ),
+            TrackerEventView(3.0, "error", "Tracking error: CUDA busy", "-", "-", "-"),
+        ]
+    )
+
+    assert [(a["message"], a["count"]) for a in app.recent_alerts] == [
+        ("Tracking error: device lost", 1),
+        ("Tracking error: CUDA busy", 2),
+    ]
