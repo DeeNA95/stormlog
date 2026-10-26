@@ -8,9 +8,9 @@ black==26.10.1
     # via -r requirements-ci-lint.in
 click==8.3.1
     # via black
-flake8==7.3.0
+flake8==7.4.1
     # via -r requirements-ci-lint.in
-isort==8.0.1
+isort==9.0.2
     # via -r requirements-ci-lint.in
 markdown-it-py==4.0.0
     # via rich
@@ -23,6 +23,7 @@ mypy==1.8.0
 mypy-extensions==1.1.0
     # via
     #   black
+    #   isort
     #   mypy
 packaging==26.0
     # via black
@@ -30,9 +31,9 @@ pathspec==1.0.4
     # via black
 platformdirs==4.9.2
     # via black
-pycodestyle==2.14.0
+pycodestyle==2.15.0
     # via flake8
-pyflakes==3.4.0
+pyflakes==4.0.3
     # via flake8
 pygments==2.20.0
     # via rich
