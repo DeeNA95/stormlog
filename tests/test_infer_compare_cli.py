@@ -56,7 +56,7 @@ def _resolve(document: Any, pointer: str) -> Any:
 
 
 def test_a_comparison_without_gates_reports_and_exits_0(
-    arms: dict[str, list[str]]
+    arms: dict[str, list[str]],
 ) -> None:
     code, out, _err = _compare(
         "--baseline", *arms["baseline"], "--candidate", *arms["slower"]
@@ -226,7 +226,7 @@ def test_an_unreadable_slo_file_exits_5_and_still_leaves_a_report(
 
 
 def test_allowed_gates_that_could_not_be_evaluated_are_not_called_passed(
-    arms: dict[str, list[str]]
+    arms: dict[str, list[str]],
 ) -> None:
     code, out, _err = _compare(
         "--baseline",
@@ -246,7 +246,7 @@ def test_allowed_gates_that_could_not_be_evaluated_are_not_called_passed(
 
 
 def test_a_fallback_that_no_gate_reaches_is_a_usage_error(
-    arms: dict[str, list[str]]
+    arms: dict[str, list[str]],
 ) -> None:
     # A fallback that no gated metric matches would be ignored without a word.
     code, _out, err = _compare(
@@ -264,7 +264,7 @@ def test_a_fallback_that_no_gate_reaches_is_a_usage_error(
 
 
 def test_overlap_segments_are_compared_but_never_gated(
-    arms: dict[str, list[str]]
+    arms: dict[str, list[str]],
 ) -> None:
     code, out, _err = _compare(
         "--baseline",
@@ -312,7 +312,7 @@ def test_overlap_segments_are_compared_but_never_gated(
 
 
 def test_gates_on_overlap_segments_alone_point_at_why(
-    arms: dict[str, list[str]]
+    arms: dict[str, list[str]],
 ) -> None:
     # Only the overlap segment is compared: each requested gate is
     # not_evaluable, exit 4, and its finding points at where it is recorded.
@@ -430,7 +430,7 @@ def test_shares_outside_their_range_are_usage_errors(
 
 
 def test_a_gate_on_a_metric_the_runs_lack_points_at_its_absence(
-    arms: dict[str, list[str]]
+    arms: dict[str, list[str]],
 ) -> None:
     code, out, _err = _compare(
         "--baseline",

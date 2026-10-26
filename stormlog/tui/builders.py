@@ -8,8 +8,7 @@ from typing import Any
 
 def build_welcome_info() -> str:
     """Build the overview's guide to the tabs and keys."""
-    return dedent(
-        """
+    return dedent("""
         ### Tabs
 
         - **PyTorch**, **TensorFlow**: device memory now, and the profiles
@@ -32,8 +31,7 @@ def build_welcome_info() -> str:
         Profiling an LLM server? `stormlog infer profile` measures it and
         `stormlog infer diagnose` explains its slow requests. Both run from
         the shell; see `stormlog infer --help`.
-        """
-    ).strip()
+        """).strip()
 
 
 def build_system_markdown(
@@ -133,8 +131,7 @@ def build_tensorflow_stats_rows(gpu_info: dict[str, Any]) -> list[dict[str, Any]
 
 def build_framework_markdown(framework: str) -> str:
     if framework == "mlx":
-        return dedent(
-            """
+        return dedent("""
             **MLX** on native Apple Silicon: install `stormlog[mlx,tui]` (MLX
             0.32.3 or newer). Active allocations, reusable cache, the native
             lifetime peak and process RSS have different scopes; device
@@ -144,11 +141,9 @@ def build_framework_markdown(framework: str) -> str:
             For another process, capture it with
             `mlxmemprof run --output artifacts/mlx-run -- script.py`, then load
             the bundle below or run `mlxmemprof analyze artifacts/mlx-run`.
-            """
-        ).strip()
+            """).strip()
     if framework == "pytorch":
-        return dedent(
-            """
+        return dedent("""
             **PyTorch** device memory as PyTorch reports it, and the profiles
             recorded in this process with `profile_function` or
             `profile_context`. **PyTorch Sample** in CLI & Actions records one.
@@ -157,11 +152,9 @@ def build_framework_markdown(framework: str) -> str:
             tracking.json` and `gpumemprof diagnose --duration 0 --output
             artifacts/diag`. Guide:
             https://stormlog.readthedocs.io/en/latest/pytorch_testing_guide.html
-            """
-        ).strip()
+            """).strip()
 
-    return dedent(
-        """
+    return dedent("""
         **TensorFlow** device memory as TensorFlow reports it, and the
         profiles recorded in this process. **TensorFlow Sample** in CLI &
         Actions records one.
@@ -169,42 +162,35 @@ def build_framework_markdown(framework: str) -> str:
         From the shell: `tfmemprof track --output tf_results.json` and
         `tfmemprof diagnose --duration 0 --output artifacts/tf-diag`. Guide:
         https://stormlog.readthedocs.io/en/latest/tensorflow_testing_guide.html
-        """
-    ).strip()
+        """).strip()
 
 
 def build_cli_markdown() -> str:
-    return dedent(
-        """
+    return dedent("""
         Run a command and read its output below: `gpumemprof` for PyTorch,
         `tfmemprof` for TensorFlow, `mlxmemprof` for MLX, and
         `stormlog infer` for inference servers. **OOM Scenario** and
         **Capability Matrix** run examples from a source checkout.
-        """
-    ).strip()
+        """).strip()
 
 
 def build_visual_markdown() -> str:
-    return dedent(
-        """
+    return dedent("""
         The live tracking session's timeline. **Refresh Timeline** redraws
         it; **Generate PNG Plot** (Matplotlib) and **Generate HTML Plot**
         (interactive Plotly) save it under `./visualizations` and need
         `stormlog[viz]`.
-        """
-    ).strip()
+        """).strip()
 
 
 def build_diagnostics_markdown() -> str:
-    return dedent(
-        """
+    return dedent("""
         Compare the ranks of one run. **Load Live** reads the tracking
         session; **Load Artifacts** merges JSON or CSV exports and diagnose
         directories, given as comma-separated paths. Filter ranks with `all`
         or `0,2,4-7`, select a rank to focus its timeline, and read the
         earliest and most severe first-cause indicators below.
-        """
-    ).strip()
+        """).strip()
 
 
 def build_mlx_runtime_markdown(info: dict[str, Any]) -> str:

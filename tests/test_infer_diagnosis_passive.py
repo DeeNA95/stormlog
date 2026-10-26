@@ -66,7 +66,7 @@ def test_the_queue_is_found_from_the_engine_alone(report: dict[str, Any]) -> Non
 
 
 def test_client_classes_say_there_are_no_client_requests(
-    report: dict[str, Any]
+    report: dict[str, Any],
 ) -> None:
     coverage = report["payload"]["coverage"]
 

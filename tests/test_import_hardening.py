@@ -4,8 +4,7 @@ import textwrap
 
 
 def test_imports_are_hardened_when_torch_is_missing() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import builtins
         from types import SimpleNamespace
 
@@ -71,8 +70,7 @@ def test_imports_are_hardened_when_torch_is_missing() -> None:
             raise AssertionError("Expected GPUMemoryProfiler symbol load to fail lazily without torch")
 
         print("ok")
-        """
-    )
+        """)
 
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -86,8 +84,7 @@ def test_imports_are_hardened_when_torch_is_missing() -> None:
 
 
 def test_tui_entrypoint_reports_tui_install_guidance_when_textual_is_missing() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import builtins
 
         original_import = builtins.__import__
@@ -109,8 +106,7 @@ def test_tui_entrypoint_reports_tui_install_guidance_when_textual_is_missing() -
             raise AssertionError("Expected TUI entrypoint to fail with install guidance")
 
         print("ok")
-        """
-    )
+        """)
 
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -124,8 +120,7 @@ def test_tui_entrypoint_reports_tui_install_guidance_when_textual_is_missing() -
 
 
 def test_tui_monitor_import_is_hardened_when_torch_is_missing() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import builtins
 
         original_import = builtins.__import__
@@ -143,8 +138,7 @@ def test_tui_monitor_import_is_hardened_when_torch_is_missing() -> None:
         assert monitor.torch is None
 
         print("ok")
-        """
-    )
+        """)
 
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -158,8 +152,7 @@ def test_tui_monitor_import_is_hardened_when_torch_is_missing() -> None:
 
 
 def test_tui_profiles_import_is_hardened_when_torch_is_missing() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import builtins
 
         original_import = builtins.__import__
@@ -177,8 +170,7 @@ def test_tui_profiles_import_is_hardened_when_torch_is_missing() -> None:
         assert profiles.clear_pytorch_profiles() is False
 
         print("ok")
-        """
-    )
+        """)
 
     completed = subprocess.run(
         [sys.executable, "-c", code],
@@ -192,8 +184,7 @@ def test_tui_profiles_import_is_hardened_when_torch_is_missing() -> None:
 
 
 def test_pytorch_demo_import_is_hardened_when_torch_is_missing() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import builtins
 
         original_import = builtins.__import__
@@ -210,8 +201,7 @@ def test_pytorch_demo_import_is_hardened_when_torch_is_missing() -> None:
         pytorch_demo.main()
 
         print("ok")
-        """
-    )
+        """)
 
     completed = subprocess.run(
         [sys.executable, "-c", code],

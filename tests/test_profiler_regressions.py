@@ -23,8 +23,7 @@ class _CapabilityCollector:
 
 
 def test_stormlog_import_and_star_import_succeed_when_viz_imports_blocked() -> None:
-    code = textwrap.dedent(
-        """
+    code = textwrap.dedent("""
         import builtins
 
         blocked_roots = {"matplotlib", "seaborn", "plotly"}
@@ -52,8 +51,7 @@ def test_stormlog_import_and_star_import_succeed_when_viz_imports_blocked() -> N
             raise AssertionError("Expected ImportError when constructing MemoryVisualizer")
 
         print("ok")
-        """
-    )
+        """)
 
     completed = subprocess.run(
         [sys.executable, "-c", code],

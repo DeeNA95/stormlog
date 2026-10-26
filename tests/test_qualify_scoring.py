@@ -298,7 +298,7 @@ def test_duplicates_are_counted() -> None:
     ids=["cause", "severity", "role"],
 )
 def test_a_mismatched_finding_of_the_right_kind_does_not_match(
-    wrong: dict[str, Any]
+    wrong: dict[str, Any],
 ) -> None:
     score = score_episode(episode(), diagnosis(finding("a", KV, 1, **wrong)), CONFIG)
     assert not score.correct(TOP3, 1)

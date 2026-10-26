@@ -595,7 +595,7 @@ def test_a_request_sent_during_a_hang_is_in_flight_until_now(tmp_path: Path) -> 
     )
     channel.poll(scrape=False)
     before = time.time_ns()
-    (done, (start, end)) = channel.signals().in_flight or []
+    done, (start, end) = channel.signals().in_flight or []
     assert done == (0, 500) and start == 600 and end >= before
 
 
