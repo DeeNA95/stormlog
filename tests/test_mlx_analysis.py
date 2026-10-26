@@ -160,3 +160,16 @@ def test_tracker_json_export_round_trips_through_offline_readers(
     source.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="summary does not match"):
         load_telemetry_sessions(source, permissive_legacy=False)
+
+
+def test_phase_boundary_samples_count_as_observations(tmp_path: Path) -> None:
+    tracker = MemoryTracker(runtime=make_runtime(), sampling_interval=10)
+    with tracker.tracking():
+        with tracker.phase("train"):
+            tracker._sample()
+    source = tmp_path / "tracking.json"
+    tracker.export(source)
+    events = json.loads(source.read_text())["telemetry_events"]
+    kinds = [event["event_type"] for event in events]
+    assert {"phase_enter", "phase_exit"} <= set(kinds)
+    assert len(analyze(source)["timeline"]) == len(events)
