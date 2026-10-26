@@ -509,7 +509,9 @@ class MPSDeviceCollector(DeviceMemoryCollector):
             supports_device_used=True,
             supports_device_free=supports_total,
             supports_device_total=supports_total,
-            supports_fragmentation_analysis=True,
+            # MPS reports no inactive split blocks, and driver-allocated minus
+            # current-allocated is the MPS allocator's cache, not fragmentation.
+            supports_fragmentation_analysis=False,
         )
 
 

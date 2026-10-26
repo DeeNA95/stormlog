@@ -50,7 +50,8 @@ _CPU_MEMORY_CAPABILITIES: Dict[str, Any] = {
     "supports_device_free": False,
     "supports_device_total": False,
     "supports_native_allocator_history": False,
-    "supports_fragmentation_analysis": True,
+    # Allocated and reserved are both RSS here: no allocator, no fragmentation.
+    "supports_fragmentation_analysis": False,
     "supports_allocator_attribution": True,
     "supports_bounded_profiling": False,
 }
