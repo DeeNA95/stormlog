@@ -198,6 +198,7 @@ class AnomalySummaryTable(DataTable):
                 "Rank",
                 "Severity",
                 "Time (UTC)",
+                "Phase",
                 "Signal",
                 "Confidence",
                 "Reason Codes",
@@ -207,7 +208,7 @@ class AnomalySummaryTable(DataTable):
         self.clear()
         if not indicators:
             self.add_row(
-                "-", "-", "-", "-", "No anomaly indicators detected.", "-", "-"
+                "-", "-", "-", "-", "-", "No anomaly indicators detected.", "-", "-"
             )
             return
 
@@ -228,6 +229,7 @@ class AnomalySummaryTable(DataTable):
                 str(indicator.rank),
                 indicator.severity,
                 time_label,
+                indicator.phase_path or "-",
                 indicator.signal,
                 confidence_label,
                 reason_codes_label,

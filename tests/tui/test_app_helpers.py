@@ -226,3 +226,39 @@ def test_repeated_alerts_share_one_row_with_their_count() -> None:
         ("High fragmentation: 95.7%", 3),
     ]
     assert app.recent_alerts[-1]["timestamp"] == 5.0
+
+
+def test_the_indicator_table_names_the_phase() -> None:
+    from textual.app import App, ComposeResult
+
+    from stormlog.tui.distributed_diagnostics import AnomalyIndicator
+    from stormlog.tui.widgets.tables import AnomalySummaryTable
+
+    class _App(App[None]):
+        def compose(self) -> ComposeResult:
+            yield AnomalySummaryTable()
+
+    async def scenario() -> None:
+        app = _App()
+        async with app.run_test() as pilot:
+            table = app.query_one(AnomalySummaryTable)
+            table.update_rows(
+                [
+                    AnomalyIndicator(
+                        kind="earliest",
+                        rank=0,
+                        severity="warning",
+                        timestamp_ns=0,
+                        signal="alert:warning",
+                        details="Large allocation detected",
+                        phase_path="epoch 2 > train",
+                    )
+                ]
+            )
+            await pilot.pause()
+            assert table.get_row_at(0)[4] == "epoch 2 > train"
+            table.update_rows([])
+            await pilot.pause()
+            assert table.get_row_at(0)[5] == "No anomaly indicators detected."
+
+    asyncio.run(scenario())
