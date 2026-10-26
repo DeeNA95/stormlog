@@ -121,6 +121,14 @@ def main(argv: Sequence[str] | None = None, *, restore_signals: bool = True) -> 
 def _run_command(
     parser: argparse.ArgumentParser, args: argparse.Namespace, restore_signals: bool
 ) -> int:
+    if args.infer_command == "profile-audio":
+        from .audio_cli import cmd_profile_audio
+
+        return cmd_profile_audio(args)
+    if args.infer_command == "mlx-serve":
+        from .mlx_server_cli import cmd_mlx_serve
+
+        return cmd_mlx_serve(args)
     if args.infer_command == "watch":
         return cmd_watch(args, restore_signals=restore_signals)
     handler = _handlers().get(args.infer_command)
@@ -177,6 +185,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--base-url",
         help="OpenAI-compatible /v1 base URL",
     )
+    profile_parser.add_argument(
+        "--engine", choices=("generic", "vllm", "omlx", "mlx-lm"), default="generic"
+    )
+    profile_parser.add_argument(
+        "--task", choices=("chat", "completion"), default="chat"
+    )
+    profile_parser.add_argument(
+        "--server-version",
+        help="User-declared server version; not independently verified",
+    )
+    profile_parser.add_argument("--max-response-bytes", type=int, default=16 * 1024**2)
+    profile_parser.add_argument(
+        "--omlx-stats-url", help="Explicit read-only oMLX stats endpoint"
+    )
+    profile_parser.add_argument(
+        "--omlx-stats-api-key-env",
+        help="Separate admin credential environment variable",
+    )
+    profile_parser.add_argument("--omlx-stats-interval", type=float, default=1.0)
+    profile_parser.add_argument(
+        "--omlx-stats-cookie-env",
+        help="Environment variable containing a separate omlx_admin_session token",
+    )
     profile_parser.add_argument("--model", required=True, help="Model name")
     profile_parser.add_argument(
         "--run-id", default=None, help="Shared run ID for an on-host collector"
@@ -221,7 +252,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--timeout",
         type=float,
         default=60.0,
-        help="Per-request timeout in seconds (default: 60)",
+        help="Longest wait in seconds for each response read (default: 60)",
+    )
+    profile_parser.add_argument(
+        "--request-deadline",
+        type=float,
+        help=(
+            "Cap each request's total time in seconds, including a response "
+            "still arriving (default: none)"
+        ),
     )
     profile_parser.add_argument(
         "--warmup-requests",
@@ -393,11 +432,21 @@ def build_parser() -> argparse.ArgumentParser:
     add_export_arguments(profile_parser)
     add_trace_context_arguments(profile_parser)
 
+    from .mlx_server_cli import add_mlx_serve_parser
+
+    add_mlx_serve_parser(subparsers)
     analyze_parser = subparsers.add_parser(
         "analyze",
         help="Analyze an inference profiling JSONL artifact",
     )
     analyze_parser.add_argument("input_file", help="Input inference JSONL artifact")
+    analyze_parser.add_argument(
+        "--mlx-server-evidence",
+        action="append",
+        default=[],
+        metavar="DIR",
+        help="Offline same-process MLX evidence directory; repeat for separate captures",
+    )
     analyze_parser.add_argument(
         "--output",
         default=None,
@@ -514,6 +563,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_compare_parser(subparsers)
     _add_import_trace_parser(subparsers)
     _add_import_execution_parser(subparsers)
+    from .audio_cli import add_audio_parser
+
+    add_audio_parser(subparsers, _add_arrival_arguments)
     add_watch_parser(subparsers)
     add_diagnose_parser(subparsers)
     return parser
@@ -1024,9 +1076,19 @@ def _manifest_inputs(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _profile_config(args: argparse.Namespace) -> ProfileConfig:
-    endpoint = resolve_endpoint(endpoint=args.endpoint, base_url=args.base_url)
+    endpoint = resolve_endpoint(
+        endpoint=args.endpoint, base_url=args.base_url, task=args.task
+    )
     slo, slo_source = _slo_policy(args)
     return ProfileConfig(
+        engine=args.engine,
+        task=args.task,
+        server_version=args.server_version,
+        max_response_bytes=args.max_response_bytes,
+        omlx_stats_url=args.omlx_stats_url,
+        omlx_stats_api_key=_admin_credential(args.omlx_stats_api_key_env),
+        omlx_stats_cookie=_admin_credential(args.omlx_stats_cookie_env),
+        omlx_stats_interval_seconds=args.omlx_stats_interval,
         endpoint=endpoint,
         model=args.model,
         concurrency=tuple(
@@ -1046,6 +1108,7 @@ def _profile_config(args: argparse.Namespace) -> ProfileConfig:
         stream=bool(args.stream),
         stream_include_usage=bool(args.stream_usage),
         timeout_seconds=float(args.timeout),
+        request_deadline_seconds=args.request_deadline,
         warmup_requests=int(args.warmup_requests),
         output_path=args.output,
         api_key=args.api_key or os.environ.get("OPENAI_API_KEY"),
@@ -1098,6 +1161,15 @@ def _profile_config(args: argparse.Namespace) -> ProfileConfig:
     )
 
 
+def _admin_credential(name: str | None) -> str | None:
+    if name is None:
+        return None
+    value = os.environ.get(name)
+    if not value:
+        raise ValueError(f"Admin credential environment variable {name} is unset")
+    return value
+
+
 def _extra_body(raw: str | None) -> dict[str, Any] | None:
     if raw is None:
         return None
@@ -1148,6 +1220,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         clock_offset_ns=args.clock_offset_ns,
         clock_uncertainty_ns=args.clock_uncertainty_ns,
         vllm_span_paths=args.vllm_spans,
+        mlx_server_evidence_paths=args.mlx_server_evidence,
         slo=slo,
         slo_source=slo_source,
     )
@@ -1600,8 +1673,7 @@ def _validate_profile_arguments(args: argparse.Namespace) -> None:
     _validate_prompt_arguments(args)
     _validate_cache_arguments(args)
     _validate_trace_arguments(args)
-    if args.timeout <= 0:
-        raise ValueError("--timeout must be > 0")
+    _validate_timeout_arguments(args)
     if args.warmup_requests < 0:
         raise ValueError("--warmup-requests must be >= 0")
     if args.sample_interval <= 0:
@@ -1609,6 +1681,13 @@ def _validate_profile_arguments(args: argparse.Namespace) -> None:
     _validate_vllm_metrics_arguments(args)
     _validate_vllm_span_arguments(args)
     _validate_execution_dir_argument(args)
+
+
+def _validate_timeout_arguments(args: argparse.Namespace) -> None:
+    if args.timeout <= 0:
+        raise ValueError("--timeout must be > 0")
+    if args.request_deadline is not None and not 0 < args.request_deadline < math.inf:
+        raise ValueError("--request-deadline must be > 0")
 
 
 def _validate_execution_dir_argument(args: argparse.Namespace) -> None:

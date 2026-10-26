@@ -78,6 +78,10 @@ class InferenceRequestEvent:
     prompt_digest: str | None = None
     # The X-Request-Id header sent, as recorded; None for a request never sent.
     x_request_id: str | None = None
+    engine: str = "generic"
+    task: str = "chat"
+    response_id: str | None = None
+    system_fingerprint: str | None = None
     # The traceparent IDs it was sent with, as hex; None without --trace-context.
     trace_id: str | None = None
     span_id: str | None = None

@@ -114,6 +114,7 @@ jobs:
               run: |
                   python3 -m pytest tests/ -o 'python_files=test_mlx*.py' -m 'not mlx_hardware' -q
                   python3 -m pytest tests/test_packaging_contracts.py -q
+                  python3 -m pytest tests/test_infer_mlx_text.py tests/test_infer_http_transport.py tests/test_infer_audio.py tests/test_infer_omlx_stats.py tests/test_infer_mlx_server.py tests/test_infer_mlx_qualification_helpers.py tests/test_infer_mlx_evidence.py tests/test_infer_mlx_report.py tests/test_infer_cli_portability.py -q
                   python3 -m examples.scenarios.mlx_memory_scenario --output /tmp/mlx-contract-qualification
 
     tui-pr-gate:

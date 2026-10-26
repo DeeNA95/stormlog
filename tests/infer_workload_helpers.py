@@ -96,7 +96,7 @@ def run_profile_with_fake_client(
     values.update(changes)
     profiler = InferenceProfiler(ProfileConfig(**values))
     client = SleepingClient(latency_seconds, first_latencies)
-    profiler.client = client  # type: ignore[assignment]
+    profiler.client = client
     report = profiler.run()
     records = [json.loads(line) for line in output.read_text().splitlines()]
     requests = [r for r in records if r.get("event_type") == "infer.request"]

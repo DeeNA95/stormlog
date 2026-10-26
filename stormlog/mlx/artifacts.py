@@ -8,7 +8,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from stormlog.diagnose_report import (
     DIAGNOSE_MANIFEST_SCHEMA_VERSION,
@@ -104,11 +104,20 @@ class CaptureBundle:
     """One capture; native discovery is deferred until ``start``."""
 
     def __init__(
-        self, output: str | Path | None, command: str, options: CaptureOptions
+        self,
+        output: str | Path | None,
+        command: str,
+        options: CaptureOptions,
+        *,
+        identity: Mapping[str, Any] | None = None,
+        command_line: str | None = None,
     ) -> None:
         self.directory = create_artifact_dir(output, command)
         self.command = command
         self.options = options
+        # Caller-declared, already redacted identity; recorded verbatim.
+        self.identity = dict(identity) if identity is not None else None
+        self.command_line = command_line or f"mlxmemprof {command}"
         self.tracker: MemoryTracker | None = None
         self.session = create_session_summary(source=f"stormlog.mlx.{command}")
         self.environment: dict[str, Any] = {
@@ -116,6 +125,8 @@ class CaptureBundle:
             "framework": "mlx",
             "memory_scope": "process_allocator",
         }
+        if self.identity is not None:
+            self.environment["capture_identity"] = self.identity
 
     def start(self, runtime: Runtime | None = None) -> None:
         adapter = runtime if runtime is not None else MLXRuntime()
@@ -260,7 +271,7 @@ class CaptureBundle:
         manifest = {
             "schema_version": DIAGNOSE_MANIFEST_SCHEMA_VERSION,
             "version": DIAGNOSE_MANIFEST_SCHEMA_VERSION,
-            "command_line": f"mlxmemprof {self.command}",
+            "command_line": self.command_line,
             "files": [*files, "manifest.json"]
             + (["report.json"] if (self.directory / "report.json").exists() else []),
             "exit_code": outcome.exit_code,
@@ -325,6 +336,8 @@ class CaptureBundle:
             "final_lazy_work": "application_responsibility",
             "capture_options": self.options.__dict__,
         }
+        if self.identity is not None:
+            report["payload"]["capture_identity"] = self.identity
         return report
 
 
