@@ -25,6 +25,9 @@ from pathlib import Path
 from typing import Any, Callable, ContextManager, Iterator, Sequence, cast
 
 SIZE = (140, 44)
+# Diagnostics is the README's training image: taller, so the timeline, its
+# markers, the indicators and the log all fit below the controls.
+TALL = (140, 58)
 DATA = Path.home() / ".cache" / "stormlog" / "cifar10"
 CIFAR10_MIRROR = "uoft-cs/cifar10"
 MEAN = (0.4914, 0.4822, 0.4465)
@@ -340,8 +343,13 @@ async def _capture(
 
         await _show(app, pilot, "Diagnostics")
         await _press(app, pilot, "btn-diag-load-live", 2.0)
+        await pilot.resize_terminal(*TALL)
+        await pilot.pause(1.0)
+        # The timeline takes its width when drawn, so redraw it at this size.
         await _press(app, pilot, "btn-diag-refresh", 2.0)
         save("Diagnostics")
+        await pilot.resize_terminal(*SIZE)
+        await pilot.pause(1.0)
 
         await _show(app, pilot, "PyTorch")
         await _press(app, pilot, "btn-refresh-pt-profiles", 1.5)
