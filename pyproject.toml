@@ -152,7 +152,7 @@ docs = [
 
 [project.urls]
 Homepage = "https://github.com/Silas-Asamoah/stormlog"
-Documentation = "https://github.com/Silas-Asamoah/stormlog/tree/main/docs"
+Documentation = "https://stormlog.readthedocs.io/en/latest/"
 Repository = "https://github.com/Silas-Asamoah/stormlog.git"
 "Bug Tracker" = "https://github.com/Silas-Asamoah/stormlog/issues"
 "Release Notes" = "https://github.com/Silas-Asamoah/stormlog/blob/main/CHANGELOG.md"
