@@ -8,7 +8,11 @@ import pytest
 pytest.importorskip("textual")
 
 from stormlog.timeline_markers import TimelineMarker
-from stormlog.tui.widgets.timeline import DistributedTimelineCanvas, TimelineCanvas
+from stormlog.tui.widgets.timeline import (
+    SPARK_LEVELS,
+    DistributedTimelineCanvas,
+    TimelineCanvas,
+)
 
 
 def _marker(
@@ -87,10 +91,10 @@ def test_rank_timeline_rendering_preserves_focus_gaps_and_marker_lines(
 
     update.assert_called_once_with(
         "*r01 alloc(max=3.0MB latest=3.0MB) gap_latest=1.0MB\n"
-        "    [-*@]\n"
+        "    [\u2583\u2585\u2588]\n"
         "    markers: ~ Spike\n"
         " r00 alloc(max=1.0MB latest=1.0MB) gap_latest=N/A\n"
-        "    [@]\n"
+        "    [\u2588]\n"
         "... showing 2/3 ranks (apply filter for more)."
     )
 
@@ -138,12 +142,12 @@ def test_rank_timeline_empty_rendering(
         ({}, "No timeline data yet. Start live tracking and press Refresh."),
         (
             {"allocated": [None], "device_used": [1048576], "reserved": [None]},
-            "Device Used (max 1.00 MB, latest 1.00 MB)\n[@]",
+            "Device Used (max 1.00 MB, latest 1.00 MB)\n[\u2588]",
         ),
         (
             {"allocated": [0], "device_used": [1048576], "reserved": [1048576]},
             "Allocated (max 0.00 MB, latest 0.00 MB)\n[ ]\n\n"
-            "Reserved (max 1.00 MB, latest 1.00 MB)\n[@]",
+            "Reserved (max 1.00 MB, latest 1.00 MB)\n[\u2588]",
         ),
         (
             {
@@ -151,8 +155,8 @@ def test_rank_timeline_empty_rendering(
                 "allocated": [1048576, 2097152, 3145728, 4194304],
                 "reserved": [2097152, None, 4194304, None],
             },
-            "Allocated (max 4.00 MB, latest 4.00 MB)\n[:=*@]\n\n"
-            "Reserved (max 4.00 MB, latest 4.00 MB)\n[=@]",
+            "Allocated (max 4.00 MB, latest 4.00 MB)\n[\u2582\u2584\u2586\u2588]\n\n"
+            "Reserved (max 4.00 MB, latest 4.00 MB)\n[\u2584\u2588]",
         ),
         ({"device_used": [None]}, "Device Used: no samples"),
         (
@@ -200,8 +204,10 @@ def test_mounted_timelines_span_their_width() -> None:
             chart = timeline_update.call_args.args[0].splitlines()[1]
             rank_chart = ranks_update.call_args.args[0].splitlines()[1]
             assert len(chart) == timeline.content_size.width == 60
-            assert chart == "[" + "-" * 20 + "*" * 19 + "@" * 19 + "]"
+            low, mid, high = SPARK_LEVELS[2], SPARK_LEVELS[4], SPARK_LEVELS[7]
+            assert chart == "[" + low * 20 + mid * 19 + high * 19 + "]"
             assert len(rank_chart) == ranks.content_size.width
-            assert rank_chart.startswith("    [-") and rank_chart.endswith("@]")
+            assert rank_chart.startswith("    [" + low)
+            assert rank_chart.endswith(high + "]")
 
     asyncio.run(scenario())

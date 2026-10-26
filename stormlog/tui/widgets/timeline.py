@@ -21,6 +21,11 @@ def _stretch(values: Sequence[Any], width: int) -> list[Any]:
     return [values[index * count // width] for index in range(width)]
 
 
+# Eight levels of Unicode block elements, lowest to highest. Zero is a
+# space and a gap is "?".
+SPARK_LEVELS = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588"
+
+
 class TimelineCanvas(Static):
     """ASCII timeline renderer for quick visual feedback."""
 
@@ -128,12 +133,15 @@ class TimelineCanvas(Static):
             return ""
         known = [v for v in values if v is not None]
         max_val = max(known, default=0) or 1.0
-        palette = " .:-=+*#%@"
+        palette = SPARK_LEVELS
         last_index = len(palette) - 1
         chars = []
         for value in values:
             if value is None:
                 chars.append("?")
+                continue
+            if value <= 0:
+                chars.append(" ")
                 continue
             ratio = min(value / max_val, 1.0)
             idx = int(ratio * last_index)
@@ -255,12 +263,15 @@ class DistributedTimelineCanvas(Static):
         if not values:
             return ""
         max_value = max(values) or 1.0
-        palette = " .:-=+*#%@"
+        palette = SPARK_LEVELS
         max_index = len(palette) - 1
 
         rendered: list[str] = []
         for value in values:
-            ratio = min(max(value / max_value, 0.0), 1.0)
+            if value <= 0:
+                rendered.append(" ")
+                continue
+            ratio = min(value / max_value, 1.0)
             rendered.append(palette[int(ratio * max_index)])
         return "".join(rendered)
 
