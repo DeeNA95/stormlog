@@ -149,7 +149,7 @@ def test_snapshot_monitoring_tab() -> None:
         visible_selectors=(
             "#monitor-controls-row1",
             "#monitor-controls-row2",
-            "#monitor-controls-row3",
+            "#monitor-thresholds",
         ),
     )
 

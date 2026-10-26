@@ -255,9 +255,7 @@ identity = ArtifactIdentityEvent(
 """
 
 # The baseline's own import, seeded exactly as the scenario seeds its file.
-BASELINE_CHECK = (
-    SEED
-    + """
+BASELINE_CHECK = SEED + """
 import json
 import sys
 import time
@@ -303,7 +301,6 @@ print(json.dumps({
     "load_s": round(load_s, 2),
 }))
 """
-)
 
 # Load times with the revision under test, on the scenario's paired files.
 LOAD_TIMING = """

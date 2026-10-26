@@ -38,7 +38,7 @@ This matrix reflects the current behavior of the repository and is versioned for
 | --- | --- | --- | --- | --- |
 | `cuda` | `stormlog.cuda_tracker` | ✅ | ✅ | history, fragmentation, attribution, bounded profiling |
 | `rocm` | `stormlog.rocm_tracker` | ✅ | ✅ | history, fragmentation, attribution, bounded profiling |
-| `mps` | `stormlog.mps_tracker` | allocated/reserved | used; free/total when `recommended_max_memory()` is available | fragmentation |
+| `mps` | `stormlog.mps_tracker` | allocated/reserved | used; free/total when `recommended_max_memory()` is available | none: MPS reports no inactive split blocks |
 | injected device-only | collector-defined | N/A | capability-defined | explicitly unavailable |
 | `cpu` | `stormlog.cpu_tracker` | N/A | process/system memory contract | dedicated CPU profiler/tracker |
 

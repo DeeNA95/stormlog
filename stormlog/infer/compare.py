@@ -740,7 +740,7 @@ def _across_arms(
 
 
 def _cross_pairs(
-    usable: Mapping[str, list[RunSummary]]
+    usable: Mapping[str, list[RunSummary]],
 ) -> list[tuple[RunSummary, RunSummary]]:
     """The first runs, then each other run against the other arm's first."""
     baseline, candidate = usable[BASELINE], usable[CANDIDATE]

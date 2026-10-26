@@ -475,7 +475,7 @@ def test_a_description_alone_never_verifies_its_weights() -> None:
     ids=["another_pid", "a_restarted_server", "another_boot", "not_verified"],
 )
 def test_the_runners_record_verifies_only_the_server_it_launched(
-    record: dict[str, Any]
+    record: dict[str, Any],
 ) -> None:
     fields = run_fields([*_records(), record])
     assert not fields["model.weights_digest"].known

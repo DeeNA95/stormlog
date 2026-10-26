@@ -225,7 +225,12 @@ def _detect_gap_fragmentation_pattern(
     remediation: List[str],
     phase_resolver: PhaseReplayIndex | None,
 ) -> List[GapFinding]:
-    """Detect fragmentation-like behaviour: high reserved-allocated ratio."""
+    """Detect fragmentation: reserved memory held in inactive split blocks.
+
+    Uses the derived ``fragmentation_ratio``, which needs the allocator's
+    inactive-split counter; reserved memory that is merely cached for reuse is
+    not fragmentation, so collectors without that counter never classify it.
+    """
     frag_ratios: List[float] = []
     frag_events: List[TelemetryEventLike] = []
     for event in events:
@@ -259,8 +264,9 @@ def _detect_gap_fragmentation_pattern(
                 "sample_count": len(frag_ratios),
             },
             description=(
-                f"Allocator fragmentation averaging {avg_frag:.0%} suggests "
-                f"reserved-but-unused memory is inflating the device footprint."
+                f"Inactive split blocks average {avg_frag:.0%} of reserved memory: "
+                "freed space inside segments still in use, which can neither "
+                "return to the device nor serve a larger request."
             ),
             remediation=list(remediation),
             evidence_timestamp_ns=phase_event.timestamp_ns,

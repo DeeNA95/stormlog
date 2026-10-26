@@ -463,7 +463,7 @@ class Registry:
             return True
 
 
-def render(snapshot: Snapshot) -> bytes:
+def render(snapshot: Snapshot) -> bytearray:
     """The text exposition (format 0.0.4) of a snapshot.
 
     A render is the largest object an exporter holds, so it is built in a

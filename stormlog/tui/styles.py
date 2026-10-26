@@ -4,295 +4,121 @@ from __future__ import annotations
 
 TUI_APP_CSS = """
     TabbedContent {
-        padding: 1;
+        padding: 1 1 0 1;
     }
 
-    RichLog {
-        height: 1fr;
-        border: solid gray;
+    TabPane {
+        padding: 1 0 0 0;
+    }
+
+    Markdown {
+        margin: 0 0 1 0;
+        padding: 0 1;
     }
 
     Button {
-        margin: 0 1 1 0;
-        height: 5;
+        margin: 0 1 0 0;
+        min-width: 10;
         width: auto;
-        min-width: 16;
-        max-width: 30;
-        padding: 1 3;
-        content-align: center middle;
         text-style: bold;
-        color: #ffffff;
-        background: $panel;
     }
 
-    Button.-primary {
-        color: #ffffff;
-        background: $primary;
-        border: solid $primary-lighten-1;
-    }
-
-    Button.-success {
-        color: #ffffff;
-        background: $success;
-        border: solid $success-lighten-1;
-    }
-
-    Button.-warning {
-        color: #000000;
-        background: $warning;
-        border: solid $warning-lighten-1;
-    }
-
-    Button.-error {
-        color: #ffffff;
-        background: $error;
-        border: solid $error-lighten-1;
-    }
-
-    Button:hover {
-        opacity: 0.9;
-    }
-
-    .mlx-controls {
-        height: 6;
-    }
-
-    #mlx-artifact-path {
-        width: 1fr;
-        height: 5;
-    }
-
-    #mlx-docs, #mlx-runtime-status {
-        height: auto;
-    }
-
-    #mlx-profile-table {
-        height: 10;
-        border: solid gray;
-    }
-
-    #mlx-timeline-canvas {
-        height: auto;
-        min-height: 4;
-    }
-
-    #table-pytorch,
-    #table-tensorflow {
-        height: 12;
-        border: solid gray;
-    }
-
-    #pytorch-tab,
-    #tensorflow-tab {
-        layout: vertical;
-    }
-
-    #cli-tab {
-        layout: vertical;
-        height: 1fr;
-        border: solid gray;
-        padding: 0 1;
-    }
-
-    #cli-buttons-row1,
-    #cli-buttons-row2 {
+    /* A row of buttons, inputs and their labels. */
+    .controls {
         layout: horizontal;
-        content-align: left middle;
         height: auto;
-        min-height: 6;
+        margin: 0 0 1 0;
     }
 
-    #cli-buttons-row2 {
-        margin-top: 0;
-        margin-bottom: 1;
-    }
-
-    #cli-runner {
-        layout: horizontal;
-        content-align: left middle;
-        margin: 1 0;
-    }
-
-    #cli-command-input {
-        width: 1fr;
-        padding: 0 1;
-        height: 5;
-    }
-
-    #cli-loader {
+    .controls Label {
         height: 3;
-    }
-
-    #monitoring-tab {
-        layout: vertical;
-        height: 1fr;
-        border: solid gray;
-        padding: 0 1;
-    }
-
-    #monitor-status {
-        margin-bottom: 1;
-    }
-
-    #monitor-controls-row1,
-    #monitor-controls-row2,
-    #monitor-controls-row3 {
-        layout: horizontal;
+        width: auto;
         content-align: left middle;
-        margin-bottom: 1;
-        height: auto;
-        min-height: 6;
+        padding: 0 1 0 0;
     }
 
-    #monitor-thresholds {
-        layout: horizontal;
-        content-align: left middle;
-        margin-bottom: 1;
-    }
-
-    #monitor-thresholds Label {
-        width: 12;
-    }
-
-    #monitor-thresholds Input {
-        width: 12;
-        margin-right: 1;
-    }
-
-    #monitor-alerts-table {
-        height: 8;
-        border: solid gray;
-        margin-top: 1;
-    }
-
-    #monitor-stats {
-        height: 10;
-        border: solid gray;
-    }
-
-    #monitor-log {
-        height: 1fr;
-        border: solid gray;
-        margin-top: 1;
-    }
-
-    #visualizations-tab {
-        layout: vertical;
-        height: 1fr;
-        border: solid gray;
-        padding: 0 1;
-    }
-
-    #visual-buttons {
-        layout: horizontal;
-        content-align: left middle;
-        margin-bottom: 1;
-        height: auto;
-        min-height: 6;
-        overflow: hidden;
-    }
-
-    #timeline-stats {
-        height: 8;
-        border: solid gray;
-        margin-bottom: 1;
-    }
-
-    #timeline-canvas {
-        border: solid gray;
-        padding: 1;
-    }
-
-    #visual-log {
-        height: 8;
-        border: solid gray;
-        margin-top: 1;
-    }
-
-    #diagnostics-tab {
-        layout: vertical;
-        height: 1fr;
-        border: solid gray;
-        padding: 0 1;
-    }
-
-    #diagnostics-controls-row1,
-    #diagnostics-controls-row2 {
-        layout: horizontal;
-        content-align: left middle;
-        margin-bottom: 1;
-        height: auto;
-        min-height: 6;
-    }
-
-    #diagnostics-path-input,
-    #diagnostics-rank-filter {
+    .controls Input {
         width: 1fr;
-        margin-right: 1;
+        margin: 0 1 0 0;
     }
 
-    #diagnostics-rank-table {
+    DataTable {
+        height: auto;
+        max-height: 14;
+        border: solid $panel-lighten-2;
+        margin: 0 0 1 0;
+    }
+
+    RichLog {
         height: 12;
-        border: solid gray;
-    }
-
-    #diagnostics-timeline-canvas {
-        height: 12;
-        border: solid gray;
-        padding: 1;
-        margin-top: 1;
-    }
-
-    #diagnostics-anomaly-table {
-        height: 8;
-        border: solid gray;
-        margin-top: 1;
-    }
-
-    #diagnostics-log {
-        height: 8;
-        border: solid gray;
-        margin-top: 1;
+        border: solid $panel-lighten-2;
     }
 
     #overview-welcome {
         border: round $primary;
-        padding: 1;
+        padding: 0 1;
         margin: 0 0 1 0;
         background: $panel;
         text-align: center;
         text-style: bold;
         color: $accent;
-        min-height: 10;
+        height: auto;
         content-align: center middle;
     }
 
+    #overview-columns {
+        height: auto;
+    }
+
+    #overview MarkdownH3,
+    #welcome-info MarkdownH3 {
+        margin: 1 0 0 0;
+        color: $accent;
+    }
+
+    #overview,
     #welcome-info {
+        width: 1fr;
+        height: auto;
         border: solid $primary;
-        padding: 2;
-        margin: 0 0 1 0;
-        background: $surface;
-        height: auto;
-        min-height: 15;
+        padding: 0 1;
+        margin: 0 1 1 0;
     }
 
-    #welcome-info Markdown {
-        color: $text;
-    }
-
-    #pytorch-profile-controls,
-    #tensorflow-profile-controls {
+    #monitor-thresholds {
         layout: horizontal;
-        content-align: left middle;
-        margin-top: 1;
+        width: auto;
         height: auto;
-        min-height: 6;
     }
 
-    #pytorch-profile-table,
-    #tensorflow-profile-table {
-        height: 12;
-        border: solid gray;
-        margin-top: 1;
+    #monitor-thresholds Input {
+        width: 9;
+    }
+
+    #diagnostics-session-input {
+        width: 30;
+    }
+
+    #diagnostics-rank-filter {
+        width: 20;
+    }
+
+    #timeline-canvas,
+    #diagnostics-timeline-canvas,
+    #mlx-timeline-canvas {
+        height: auto;
+        min-height: 4;
+        border: solid $panel-lighten-2;
+        padding: 0 1;
+        margin: 0 0 1 0;
+    }
+
+    #command-log {
+        height: 1fr;
+        min-height: 10;
+    }
+
+    #cli-loader {
+        height: 3;
     }
 """

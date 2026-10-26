@@ -764,18 +764,19 @@ def test_memory_tracker_disables_failing_sink_and_keeps_tracking(
     sink = _FailingFlushSink()
     tracker._telemetry_sink = cast(Any, sink)
     tracker._stop_event = cast(Any, _SequencedStopEvent([False, False, True]))
-    iteration_inputs: list[int] = []
+    iteration_inputs: list[int | None] = []
 
-    def _run_iteration(last_allocated: int) -> int:
+    def _run_iteration(last_allocated: int | None) -> int:
         iteration_inputs.append(last_allocated)
-        return last_allocated + 1
+        return (last_allocated or 0) + 1
 
     monkeypatch.setattr(tracker, "_run_tracking_iteration", _run_iteration)
     monkeypatch.setattr(tracker_mod.time, "sleep", lambda _: None)
 
     tracker._tracking_loop()
 
-    assert iteration_inputs == [0, 1]
+    # The first iteration has no baseline yet.
+    assert iteration_inputs == [None, 1]
     assert sink.flush_calls == 1
     assert sink.close_calls == 1
     assert tracker._telemetry_sink is None
@@ -932,3 +933,60 @@ def test_memory_tracker_emits_structured_phase_boundaries(
     assert enter_scope.attributes == {"microbatch": 4}
     assert exit_scope.scope_id == enter_scope.scope_id
     assert exit_scope.path == enter_scope.path
+
+
+@pytest.mark.parametrize(
+    ("allocated", "reserved", "inactive", "warned"),
+    [
+        (128, 1024, 512, True),  # half the reserved pool is split blocks
+        (128, 1024, 0, False),  # a large cache with no split blocks
+        (900, 1024, 64, False),
+        (128, 1024, None, False),  # no inactive-split counter: no measure
+        (0, 0, 0, False),
+    ],
+)
+def test_fragmentation_warns_on_inactive_split_blocks_only(
+    monkeypatch: pytest.MonkeyPatch,
+    allocated: int,
+    reserved: int,
+    inactive: int | None,
+    warned: bool,
+) -> None:
+    sample = _sample(allocated=allocated, reserved=reserved, inactive=inactive)
+    collector = _SequencedCollector([DeviceMemorySampleResult(sample=sample)])
+    tracker = _build_tracker(monkeypatch, collector)
+
+    emitted = tracker._check_fragmentation_alert(
+        None, sample=sample, allocated=allocated, reserved=reserved
+    )
+
+    contexts = [event.context or "" for event in tracker.get_events()]
+    assert emitted is warned
+    assert any(c.startswith("High fragmentation") for c in contexts) is warned
+
+
+def test_memory_allocated_before_tracking_is_no_large_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A model already on the device when tracking starts: the first sample
+    # sets the baseline, and only growth after it is an allocation.
+    loaded = 300 * 1024**2
+    first = _sample(allocated=loaded, reserved=loaded, total=16 * 1024**3)
+    second = _sample(allocated=loaded + 1024, reserved=loaded, total=16 * 1024**3)
+    collector = _SequencedCollector([DeviceMemorySampleResult(sample=first)])
+    tracker = _build_tracker(monkeypatch, collector)
+    # Building the tracker takes a sample; queue the session's two after it.
+    collector._results.extend(
+        [
+            DeviceMemorySampleResult(sample=first),
+            DeviceMemorySampleResult(sample=second),
+        ]
+    )
+
+    baseline = tracker._run_tracking_iteration(None)
+    tracker._run_tracking_iteration(baseline)
+
+    contexts = [event.context or "" for event in tracker.get_events()]
+    assert baseline == loaded
+    assert not any(c.startswith("Large allocation") for c in contexts)
+    assert tracker.stats["total_allocation_bytes"] == 1024

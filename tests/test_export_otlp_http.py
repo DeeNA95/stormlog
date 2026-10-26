@@ -53,6 +53,7 @@ from tests.fake_otlp_collector import (
     Reply,
     running,
 )
+from tests.thread_helpers import start_running
 
 pb2 = pytest.importorskip("opentelemetry.proto.collector.trace.v1.trace_service_pb2")
 
@@ -411,8 +412,7 @@ def _silent_tcp() -> Iterator[int]:
             with contextlib.suppress(OSError):
                 held.append(server.accept()[0])
 
-    thread = threading.Thread(target=accept, daemon=True)
-    thread.start()
+    thread = start_running(accept)
     try:
         yield int(server.getsockname()[1])
     finally:

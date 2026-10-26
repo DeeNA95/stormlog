@@ -124,6 +124,14 @@ Every v4 event includes the complete capability contract under
   `supports_fragmentation_analysis`, `supports_allocator_attribution`, and
   `supports_bounded_profiling`
 
+Fragmentation is the share of reserved memory in inactive split blocks
+(`allocator_inactive_bytes / allocator_reserved_bytes`): freed space inside
+segments still in use, which can neither return to the device nor serve a
+larger request. Reserved minus allocated is the allocator's cache of free
+blocks, kept for reuse, and is not fragmentation; the derived
+`allocator_cache_ratio` reports it. Only collectors that report inactive split
+blocks (CUDA, ROCm) support fragmentation analysis.
+
 The older flat `backend`, `supports_device_total`, `supports_device_free`, and
 `sampling_source` metadata keys remain in tracker exports for compatibility.
 Unsupported counters remain `null`. A supported counter that is temporarily

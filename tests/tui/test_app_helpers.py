@@ -201,3 +201,85 @@ def test_legacy_timeline_rows_keep_their_order_and_placeholders(
     from stormlog.tui.builders import build_legacy_timeline_rows
 
     assert build_legacy_timeline_rows(timeline) == expected
+
+
+def test_repeated_alerts_share_one_row_with_their_count() -> None:
+    from stormlog.tui.monitor import TrackerEventView
+
+    def alert(at: float, kind: str, message: str) -> TrackerEventView:
+        return TrackerEventView(at, kind, message, "-", "-", "-")
+
+    app = appmod.GPUMemoryProfilerTUI()
+    app.recent_alerts = []
+    app._capture_alerts(
+        [
+            alert(1.0, "warning", "High fragmentation: 95.5%"),
+            alert(2.0, "warning", "WARNING: Memory usage at 81.0%"),
+            alert(3.0, "info", "Collected telemetry sample."),
+            alert(4.0, "warning", "High fragmentation: 96.0%"),
+        ]
+    )
+    app._capture_alerts([alert(5.0, "warning", "High fragmentation: 95.7%")])
+
+    assert [(a["message"], a["count"]) for a in app.recent_alerts] == [
+        ("WARNING: Memory usage at 81.0%", 1),
+        ("High fragmentation: 95.7%", 3),
+    ]
+    assert app.recent_alerts[-1]["timestamp"] == 5.0
+
+
+def test_the_indicator_table_names_the_phase() -> None:
+    from textual.app import App, ComposeResult
+
+    from stormlog.tui.distributed_diagnostics import AnomalyIndicator
+    from stormlog.tui.widgets.tables import AnomalySummaryTable
+
+    class _App(App[None]):
+        def compose(self) -> ComposeResult:
+            yield AnomalySummaryTable()
+
+    async def scenario() -> None:
+        app = _App()
+        async with app.run_test() as pilot:
+            table = app.query_one(AnomalySummaryTable)
+            table.update_rows(
+                [
+                    AnomalyIndicator(
+                        kind="earliest",
+                        rank=0,
+                        severity="warning",
+                        timestamp_ns=0,
+                        signal="alert:warning",
+                        details="Large allocation detected",
+                        phase_path="epoch 2 > train",
+                    )
+                ]
+            )
+            await pilot.pause()
+            assert table.get_row_at(0)[4] == "epoch 2 > train"
+            table.update_rows([])
+            await pilot.pause()
+            assert table.get_row_at(0)[5] == "No anomaly indicators detected."
+
+    asyncio.run(scenario())
+
+
+def test_different_errors_keep_their_own_rows() -> None:
+    from stormlog.tui.monitor import TrackerEventView
+
+    app = appmod.GPUMemoryProfilerTUI()
+    app.recent_alerts = []
+    app._capture_alerts(
+        [
+            TrackerEventView(1.0, "error", "Tracking error: CUDA busy", "-", "-", "-"),
+            TrackerEventView(
+                2.0, "error", "Tracking error: device lost", "-", "-", "-"
+            ),
+            TrackerEventView(3.0, "error", "Tracking error: CUDA busy", "-", "-", "-"),
+        ]
+    )
+
+    assert [(a["message"], a["count"]) for a in app.recent_alerts] == [
+        ("Tracking error: device lost", 1),
+        ("Tracking error: CUDA busy", 2),
+    ]

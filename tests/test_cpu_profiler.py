@@ -594,7 +594,7 @@ class TestCPUMemoryTracker:
             "supports_device_free": False,
             "supports_device_total": False,
             "supports_native_allocator_history": False,
-            "supports_fragmentation_analysis": True,
+            "supports_fragmentation_analysis": False,
             "supports_allocator_attribution": True,
             "supports_bounded_profiling": False,
         }

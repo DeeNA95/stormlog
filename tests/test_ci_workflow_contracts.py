@@ -2,6 +2,9 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# An action pinned to a commit, with the release it is in a comment. Any
+# release: the contract is the pin, and Dependabot moves the version.
+PINNED = r"@[0-9a-f]{40}\s+# v\d+(?:\.\d+)*"
 
 
 def _ci_workflow_content() -> str:
@@ -15,7 +18,7 @@ def test_ci_uses_built_wheel_for_cli_smoke() -> None:
     job_block = content[start:end]
 
     assert re.search(
-        r"uses: actions/download-artifact@[0-9a-f]{40}\s+# v4\.",
+        rf"uses: actions/download-artifact{PINNED}",
         job_block,
     )
     assert "python3 -m venv .venv-wheel-smoke" in job_block
@@ -77,7 +80,7 @@ def test_ci_wires_memory_regression_gate_job() -> None:
     # stays out of runtime_overhead_pct.
     assert "--overhead-scratch-root /dev/shm/stormlog-benchmark" in job_block
     assert re.search(
-        r"uses: actions/upload-artifact@[0-9a-f]{40}\s+# v4\.",
+        rf"uses: actions/upload-artifact{PINNED}",
         job_block,
     )
 
@@ -97,7 +100,7 @@ def test_ci_wires_memory_operability_budget_job() -> None:
     assert "--iterations 5000" in job_block
     assert "--overhead-scratch-root /dev/shm/stormlog-benchmark" in job_block
     assert re.search(
-        r"uses: actions/upload-artifact@[0-9a-f]{40}\s+# v4\.",
+        rf"uses: actions/upload-artifact{PINNED}",
         job_block,
     )
 
@@ -107,7 +110,7 @@ def test_ci_uses_supported_python_and_actions_pins() -> None:
 
     assert not re.search(r"uses:\s+\S+@v\d", content)
     assert re.search(
-        r"uses: actions/setup-python@[0-9a-f]{40}\s+# v6\.",
+        rf"uses: actions/setup-python{PINNED}",
         content,
     )
     assert "actions/cache@" not in content

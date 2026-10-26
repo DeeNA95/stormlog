@@ -25,6 +25,7 @@ def _make_event(
     *,
     allocated: int = 4 * 1024**3,
     reserved: int = 6 * 1024**3,
+    inactive: int | None = None,
     device_total: int | None = _DEVICE_TOTAL,
     collector: str = "stormlog.cuda_tracker",
     event_type: str = "sample",
@@ -46,7 +47,7 @@ def _make_event(
         allocator_allocated_bytes=allocated,
         allocator_reserved_bytes=reserved,
         allocator_active_bytes=None,
-        allocator_inactive_bytes=None,
+        allocator_inactive_bytes=inactive,
         allocator_change_bytes=0,
         device_used_bytes=device_used,
         device_free_bytes=device_free,
@@ -117,27 +118,43 @@ def test_utilization_ratio_is_none_when_device_total_is_zero() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fragmentation_ratio_normal_case() -> None:
-    allocated = 2 * 1024**3
-    reserved = 4 * 1024**3
-    event = _make_event(allocated=allocated, reserved=reserved)
+def test_fragmentation_ratio_is_inactive_splits_over_reserved() -> None:
+    gib = 1024**3
+    event = _make_event(allocated=2 * gib, reserved=4 * gib, inactive=gib)
     fields = compute_event_fields(event)
-    # gap = 2 GiB, reserved = 4 GiB → ratio = 0.5
-    assert fields["fragmentation_ratio"] == pytest.approx(0.5)
+    # 1 GiB of split blocks in 4 GiB reserved; the other GiB free is cache.
+    assert fields["fragmentation_ratio"] == pytest.approx(0.25)
+    assert fields["allocator_cache_ratio"] == pytest.approx(0.5)
+
+
+def test_fragmentation_ratio_is_none_without_an_inactive_counter() -> None:
+    """Reserved minus allocated is the allocator's cache, not fragmentation."""
+    event = _make_event(allocated=2 * 1024**3, reserved=4 * 1024**3)
+    fields = compute_event_fields(event)
+    assert fields["fragmentation_ratio"] is None
+    assert fields["allocator_cache_ratio"] == pytest.approx(0.5)
 
 
 def test_fragmentation_ratio_is_none_when_reserved_is_zero() -> None:
     """Must not divide by zero."""
-    event = _make_event(allocated=0, reserved=0)
+    event = _make_event(allocated=0, reserved=0, inactive=0)
     fields = compute_event_fields(event)
     assert fields["fragmentation_ratio"] is None
+    assert fields["allocator_cache_ratio"] is None
 
 
-def test_fragmentation_ratio_is_zero_when_fully_allocated() -> None:
-    n = 4 * 1024**3
-    event = _make_event(allocated=n, reserved=n)
+def test_fragmentation_ratio_is_zero_with_no_split_blocks() -> None:
+    gib = 1024**3
+    event = _make_event(allocated=gib, reserved=8 * gib, inactive=0)
     fields = compute_event_fields(event)
     assert fields["fragmentation_ratio"] == pytest.approx(0.0)
+    assert fields["allocator_cache_ratio"] == pytest.approx(7 / 8)
+
+
+def test_fragmentation_ratio_honors_an_inactive_capability_of_false() -> None:
+    event = _make_event(allocated=100, reserved=1000, inactive=300)
+    event.metadata["memory_capabilities"] = {"supports_allocator_inactive": False}
+    assert compute_event_fields(event)["fragmentation_ratio"] is None
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -145,16 +162,16 @@ def test_fragmentation_ratio_is_zero_when_fully_allocated() -> None:
 def test_fragmentation_ratio_honors_explicit_capability(
     enabled: bool, as_mapping: bool
 ) -> None:
-    event = _make_event(allocated=100, reserved=1000)
+    event = _make_event(allocated=100, reserved=1000, inactive=300)
     event.metadata["memory_capabilities"] = {"supports_fragmentation_analysis": enabled}
     source = event.__dict__ if as_mapping else event
 
     fields = compute_event_fields(source)
 
-    assert fields["fragmentation_ratio"] == (0.9 if enabled else None)
+    assert fields["fragmentation_ratio"] == (pytest.approx(0.3) if enabled else None)
     assert fields["allocator_gap_bytes"] == 900
     assert compute_session_fields([source])["avg_fragmentation_ratio"] == (
-        0.9 if enabled else None
+        pytest.approx(0.3) if enabled else None
     )
 
 
@@ -207,13 +224,15 @@ def test_compute_event_fields_accepts_plain_dict() -> None:
     event_dict = {
         "allocator_allocated_bytes": 1024,
         "allocator_reserved_bytes": 2048,
+        "allocator_inactive_bytes": 512,
         "device_total_bytes": 8192,
         "collector": "stormlog.cuda_tracker",
     }
     fields = compute_event_fields(event_dict)
     assert fields["allocator_gap_bytes"] == 1024
     assert fields["utilization_ratio"] == pytest.approx(1024 / 8192)
-    assert fields["fragmentation_ratio"] == pytest.approx(0.5)
+    assert fields["fragmentation_ratio"] == pytest.approx(0.25)
+    assert fields["allocator_cache_ratio"] == pytest.approx(0.5)
     assert fields["is_degraded_collector"] is False
 
 
@@ -222,6 +241,7 @@ def test_derived_field_helpers_accept_read_only_mapping() -> None:
         {
             "allocator_allocated_bytes": 1024,
             "allocator_reserved_bytes": 2048,
+            "allocator_inactive_bytes": 512,
             "device_total_bytes": 8192,
             "collector": "stormlog.cuda_tracker",
             "event_type": "stop",
@@ -234,7 +254,7 @@ def test_derived_field_helpers_accept_read_only_mapping() -> None:
 
     assert fields["allocator_gap_bytes"] == 1024
     assert fields["utilization_ratio"] == pytest.approx(1024 / 8192)
-    assert fields["fragmentation_ratio"] == pytest.approx(0.5)
+    assert fields["fragmentation_ratio"] == pytest.approx(0.25)
     assert session["is_session_interrupted"] is False
     assert enriched["derived"] == fields
 
@@ -254,7 +274,8 @@ def test_tensorflow_synthetic_event_gap_is_zero() -> None:
     }
     fields = compute_event_fields(tf_event)
     assert fields["allocator_gap_bytes"] == 0
-    assert fields["fragmentation_ratio"] == 0.0
+    assert fields["fragmentation_ratio"] is None  # TF reports no split blocks
+    assert fields["allocator_cache_ratio"] == 0.0
     assert fields["utilization_ratio"] == pytest.approx(0.25)
 
 
@@ -290,7 +311,7 @@ def test_tensorflow_session_no_spurious_gap_or_frag() -> None:
         },
     ]
     session = compute_session_fields(tf_events)
-    assert session["avg_fragmentation_ratio"] == 0.0
+    assert session["avg_fragmentation_ratio"] is None
     assert session["peak_utilization_ratio"] == pytest.approx(0.5)
     assert session["is_session_interrupted"] is False
 
@@ -304,9 +325,15 @@ def _build_session_events() -> list[TelemetryEventV2]:
     """Three-event session: two samples, then a stop."""
     gb = 1024**3
     return [
-        _make_event(allocated=2 * gb, reserved=4 * gb, event_type="sample", index=0),
-        _make_event(allocated=6 * gb, reserved=8 * gb, event_type="sample", index=1),
-        _make_event(allocated=6 * gb, reserved=8 * gb, event_type="stop", index=2),
+        _make_event(
+            allocated=2 * gb, reserved=4 * gb, inactive=gb, event_type="sample", index=0
+        ),
+        _make_event(
+            allocated=6 * gb, reserved=8 * gb, inactive=gb, event_type="sample", index=1
+        ),
+        _make_event(
+            allocated=6 * gb, reserved=8 * gb, inactive=gb, event_type="stop", index=2
+        ),
     ]
 
 
@@ -321,9 +348,9 @@ def test_compute_session_fields_peak_utilization() -> None:
 def test_compute_session_fields_avg_fragmentation() -> None:
     events = _build_session_events()
     session = compute_session_fields(events)
-    # Event 0: gap=2 GiB, reserved=4 GiB → 0.5
-    # Event 1 & 2: gap=2 GiB, reserved=8 GiB → 0.25 each
-    expected_avg = (0.5 + 0.25 + 0.25) / 3
+    # Event 0: 1 GiB of split blocks in 4 GiB reserved → 0.25
+    # Event 1 & 2: 1 GiB in 8 GiB → 0.125 each
+    expected_avg = (0.25 + 0.125 + 0.125) / 3
     assert session["avg_fragmentation_ratio"] == pytest.approx(expected_avg)
 
 
@@ -386,6 +413,7 @@ def test_enrich_event_derived_contains_expected_fields() -> None:
     assert "allocator_gap_bytes" in derived
     assert "utilization_ratio" in derived
     assert "fragmentation_ratio" in derived
+    assert "allocator_cache_ratio" in derived
     assert "is_degraded_collector" in derived
 
 
