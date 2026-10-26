@@ -351,9 +351,10 @@ wheels used by their new legs. Wheel availability is the installation
 prerequisite; passing GitHub Actions results establish tested compatibility.
 
 Server-probe responses enforce a 100-container JSON nesting limit across
-interpreters. The iterative JSON decoder in Python 3.14 can accept structures
-that older decoders reject with `RecursionError`, so the probe enforces this
-limit explicitly before retaining a response.
+interpreters. From Python 3.14, CPython bounds C recursion by the stack actually
+available, so with a large stack the decoder accepts nesting that older
+interpreters reject with `RecursionError`; the probe enforces the limit
+explicitly before retaining a response.
 
 ## Documentation checks
 
