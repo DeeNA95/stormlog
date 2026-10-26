@@ -69,7 +69,11 @@ def test_capture_commands_reports_and_roundtrip(
     directory = payload["artifact_dir"]
     report = load_report(tmp_path / command / "report.json")
     assert report["verdict"]["exit_code"] == 0
-    assert query.open([directory]).query_events()
+    store = query.open([directory])
+    sink_events = query.open([Path(directory) / "telemetry"]).query_events()
+    assert sink_events
+    assert len(store.query_events()) == len(sink_events)
+    assert len(store.list_sessions()) == 1
     assert (
         main(
             [

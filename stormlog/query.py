@@ -446,7 +446,7 @@ class ArtifactCatalog:
             self._add_oom_bundle(path.parent, path, payload)
             return True
         if _is_diagnose_manifest(payload):
-            self._add_diagnose_source(path)
+            self._add_diagnose_source(path, payload)
         if _is_sink_manifest(payload):
             self._add_sink_source(path)
         return False
@@ -461,19 +461,42 @@ class ArtifactCatalog:
         if _is_oom_manifest(payload):
             self._add_oom_bundle(path.parent, path, payload)
         elif _is_diagnose_manifest(payload):
-            self._add_diagnose_source(path)
+            self._add_diagnose_source(path, payload)
         elif _is_sink_manifest(payload):
             self._add_sink_source(path)
         elif warn:
             self._warn(path, "unrecognized manifest shape")
 
-    def _add_diagnose_source(self, manifest_path: Path) -> None:
+    def _add_diagnose_source(
+        self, manifest_path: Path, payload: Mapping[str, Any]
+    ) -> None:
+        self._cover_files_beside_sink(manifest_path.parent, payload)
         self._add_source(
             CatalogSource(
                 path=manifest_path.parent,
                 source_kind="diagnose_bundle",
                 manifest_path=manifest_path,
             )
+        )
+
+    def _cover_files_beside_sink(
+        self, directory: Path, payload: Mapping[str, Any]
+    ) -> None:
+        """A bundle that lists its own telemetry sink keeps its events there, so
+        the other JSON files it lists (an MLX ``tracking.json``) repeat them."""
+        files = payload.get("files")
+        if not isinstance(files, list):
+            return
+        listed = [directory / name for name in files if isinstance(name, str)]
+        if not any(
+            path.name == MANIFEST_FILENAME and path.parent != directory
+            for path in listed
+        ):
+            return
+        self._covered_event_paths.update(
+            path
+            for path in listed
+            if path.suffix.lower() == ".json" and path.name != MANIFEST_FILENAME
         )
 
     def _add_sink_source(self, manifest_path: Path) -> None:
@@ -945,6 +968,17 @@ class QueryStore:
                 rows.extend(flat_telemetry_attachment_rows(source, contexts))
         return rows
 
+    def _sink_sessions_inside(self, directory: Path) -> set[str]:
+        """Session IDs reported by the sinks stored inside ``directory``."""
+        session_ids: set[str] = set()
+        for source in self.catalog.sources:
+            if source.source_kind != "sink" or directory not in source.path.parents:
+                continue
+            manifest = read_telemetry_sink_manifest(source.path)
+            if manifest is not None:
+                session_ids.update(summary.session_id for summary in manifest.sessions)
+        return session_ids
+
     def _session_rows_for_source(
         self,
         source: CatalogSource,
@@ -965,7 +999,10 @@ class QueryStore:
 
         if source.source_kind == "diagnose_bundle":
             summary = _diagnose_session_summary(source.manifest_path)
-            if summary is None:
+            # A bundle with its own sink is listed once, through the sink.
+            if summary is None or summary.session_id in self._sink_sessions_inside(
+                source.path
+            ):
                 return []
             return [
                 _session_row_from_summary(
