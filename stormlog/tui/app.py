@@ -301,6 +301,8 @@ class GPUMemoryProfilerTUI(App):
     recent_alerts: List[dict[str, Any]]
 
     CSS = TUI_APP_CSS
+    TITLE = "Stormlog"
+    SUB_TITLE = "Memory profiling for PyTorch, TensorFlow and MLX"
 
     BINDINGS = [
         ("q", "quit", "Quit"),
