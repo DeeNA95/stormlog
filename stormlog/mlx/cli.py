@@ -59,7 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--format", choices=("json", "txt"), default="txt")
         command.add_argument(
             "--output",
-            help="New bundle directory; an existing directory receives a unique child",
+            help=(
+                "New bundle directory; an existing directory receives a unique "
+                "child. Default: mlx-<command>-<time>-N in the current directory"
+            ),
         )
         if name in ("monitor", "track", "run", "diagnose"):
             _capture_arguments(command)
