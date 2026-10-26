@@ -146,6 +146,7 @@ def test_run_workload_arguments_and_failures(
         ["track", "--max-history", "0"],
         ["track", "--rank", "-1"],
         ["track", "--world-size", "0"],
+        ["track", "--max-buffer-bytes", "1024"],
     ],
 )
 def test_usage_errors(args: list[str], fake_runtime: None, tmp_path: Path) -> None:
@@ -247,3 +248,11 @@ def test_analysis_output_failure_is_error_not_invalid_input(
     assert report["verdict"]["exit_code"] == 1
     assert "disk full" in report["payload"]["error"]
     assert not report["artifacts"]
+
+
+def test_capture_options_refuse_a_buffer_smaller_than_a_record() -> None:
+    from stormlog.mlx.artifacts import MIN_BUFFER_BYTES, CaptureOptions
+
+    with pytest.raises(ValueError, match="max_buffer_bytes must be at least"):
+        CaptureOptions(max_buffer_bytes=MIN_BUFFER_BYTES - 1)
+    assert CaptureOptions(max_buffer_bytes=MIN_BUFFER_BYTES).max_buffer_bytes

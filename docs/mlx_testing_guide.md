@@ -244,7 +244,8 @@ as a confirmed leak.
 
 Capture options include `--interval`, `--max-history`, `--rollover-max-events`,
 `--retention-max-files`, `--max-buffer-bytes`, `--job-id`, `--rank`,
-`--local-rank` and `--world-size`. The first two history/retention limits apply
+`--local-rank` and `--world-size`. `--max-buffer-bytes` must be at least 64 KiB,
+since one telemetry record is about 2 KB. The first two history/retention limits apply
 independently to memory and disk. Disk retention can remove old segments.
 `--alert-threshold-mb` is an opt-in active allocation alert in MiB. Flight
 recording limits are `--oom-max-dumps` and `--oom-max-total-mb`. No cleanup,

@@ -31,6 +31,9 @@ from .sampling import positive_interval
 from .tracker import MemoryTracker
 from .utils import get_device_info
 
+# One telemetry record is about 2 KB; a smaller buffer drops every record.
+MIN_BUFFER_BYTES = 64 * 1024
+
 
 @dataclass(frozen=True)
 class CaptureOptions:
@@ -61,6 +64,8 @@ class CaptureOptions:
         ):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if self.max_buffer_bytes < MIN_BUFFER_BYTES:
+            raise ValueError(f"max_buffer_bytes must be at least {MIN_BUFFER_BYTES}")
 
 
 @dataclass

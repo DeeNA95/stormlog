@@ -36,6 +36,15 @@ def _count(value: str) -> int:
     return result
 
 
+def _buffer_bytes(value: str) -> int:
+    from .artifacts import MIN_BUFFER_BYTES
+
+    result = _count(value)
+    if result < MIN_BUFFER_BYTES:
+        raise argparse.ArgumentTypeError(f"must be at least {MIN_BUFFER_BYTES}")
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mlxmemprof",
@@ -88,7 +97,12 @@ def _capture_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--rollover-max-events", type=_count, default=10000)
     parser.add_argument("--retention-max-files", type=_count, default=8)
-    parser.add_argument("--max-buffer-bytes", type=_count, default=4 * 1024**2)
+    parser.add_argument(
+        "--max-buffer-bytes",
+        type=_buffer_bytes,
+        default=4 * 1024**2,
+        help="Telemetry write buffer in bytes; at least 65536 (64 KiB)",
+    )
     parser.add_argument("--oom-max-dumps", type=_count, default=5)
     parser.add_argument("--oom-max-total-mb", type=_count, default=256)
     parser.add_argument("--job-id")
