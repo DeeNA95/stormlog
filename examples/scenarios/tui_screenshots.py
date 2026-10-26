@@ -27,7 +27,7 @@ from typing import Any, Callable, ContextManager, Iterator, Sequence, cast
 SIZE = (140, 44)
 # Diagnostics is the README's training image: taller, so the timeline, its
 # markers, the indicators and the log all fit below the controls.
-TALL = (140, 58)
+TALL = (140, 50)
 DATA = Path.home() / ".cache" / "stormlog" / "cifar10"
 CIFAR10_MIRROR = "uoft-cs/cifar10"
 MEAN = (0.4914, 0.4822, 0.4465)
@@ -98,6 +98,9 @@ class CifarTraining:
     The data lives on the device and is augmented there (random crop and
     flip), so the GPU is never starved by a loader and memory follows the
     model: high while training, lower while evaluating without gradients.
+    The thread builds the model and moves the data first, sets ``ready``, and
+    waits for ``begin()``, so tracking can start after that setup, as a
+    profiling session would.
     """
 
     def __init__(
@@ -118,10 +121,16 @@ class CifarTraining:
         self.stage = ""
         self.error: BaseException | None = None
         self.done = threading.Event()
+        self.ready = threading.Event()
+        self._go = threading.Event()
         self._thread = threading.Thread(target=self._run, name="training", daemon=True)
 
     def start(self) -> None:
         self._thread.start()
+
+    def begin(self) -> None:
+        """Start the epochs once setup is done."""
+        self._go.set()
 
     def join(self, timeout: float | None = None) -> None:
         self._thread.join(timeout)
@@ -132,6 +141,7 @@ class CifarTraining:
         except BaseException as exc:  # reported by the caller
             self.error = exc
         finally:
+            self.ready.set()
             self.done.set()
 
     def _train(self) -> None:
@@ -157,6 +167,10 @@ class CifarTraining:
         test_y = self.data["test"]["labels"].to(device)
         mean = torch.tensor(MEAN, device=device).view(1, 3, 1, 1) * 255
         std = torch.tensor(STD, device=device).view(1, 3, 1, 1) * 255
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+        self.ready.set()
+        self._go.wait()
 
         def prepare(images: Any, augment: bool) -> Any:
             x = images.permute(0, 3, 1, 2).float()
@@ -319,8 +333,12 @@ async def _capture(
         save("Overview")
 
         await _show(app, pilot, "Monitoring")
-        await _press(app, pilot, "btn-start-tracking", 1.0)
         training.start()
+        await _wait(pilot, training.ready.is_set, timeout=600)
+        if training.error is not None:
+            raise RuntimeError("the training setup failed") from training.error
+        await _press(app, pilot, "btn-start-tracking", 1.0)
+        training.begin()
         # Live, part way through: the middle epoch's training.
         middle = max(1, (epochs + 1) // 2)
         await _wait(
