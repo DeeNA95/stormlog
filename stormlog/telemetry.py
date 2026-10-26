@@ -23,6 +23,7 @@ from .telemetry_model import (
     unique_projected_resources,
 )
 from .telemetry_sink import (
+    MANIFEST_FILENAME,
     read_telemetry_sink_manifest,
     resolve_telemetry_sink_segment_paths,
 )
@@ -1331,6 +1332,12 @@ def _json_tracking_summaries(
     return [summary]
 
 
+def _reject_empty_sink(path: Path) -> None:
+    """A sink with a manifest but no segments has nothing to read as JSON."""
+    if path.is_dir() or path.name == MANIFEST_FILENAME:
+        raise ValueError(f"Telemetry sink {path} retained no segments")
+
+
 def load_telemetry_sessions(
     path: str | Path,
     permissive_legacy: bool = True,
@@ -1360,6 +1367,8 @@ def load_telemetry_sessions(
             default_source=default_source,
             default_source_path=default_source_path,
         )
+    if manifest is not None:
+        _reject_empty_sink(payload_path)
 
     records, summaries = _load_json_records(payload_path, events_key=events_key)
     default_session_id = stable_legacy_session_id(
