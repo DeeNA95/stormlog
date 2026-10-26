@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from contextlib import AbstractContextManager
 from functools import wraps
-from typing import Any, Callable, ParamSpec, TypeVar, cast
+from typing import Any, Callable, ParamSpec, TypeVar, cast, overload
 
 from .profiler import MLXMemoryProfiler, ProfileRegion
 
@@ -33,6 +33,30 @@ def clear_global_profiler() -> None:
     set_global_profiler(None)
 
 
+@overload
+def profile_function(
+    function: Callable[P, R],
+    *,
+    profiler: MLXMemoryProfiler | None = None,
+    name: str | None = None,
+    state_getter: Callable[[], Any] | None = None,
+    root_extractor: Callable[[Any], Any] | None = None,
+    streams: tuple[Any, ...] | None = None,
+) -> Callable[P, R]: ...
+
+
+@overload
+def profile_function(
+    function: None = None,
+    *,
+    profiler: MLXMemoryProfiler | None = None,
+    name: str | None = None,
+    state_getter: Callable[[], Any] | None = None,
+    root_extractor: Callable[[Any], Any] | None = None,
+    streams: tuple[Any, ...] | None = None,
+) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
+
+
 def profile_function(
     function: Callable[P, R] | None = None,
     *,
@@ -41,7 +65,7 @@ def profile_function(
     state_getter: Callable[[], Any] | None = None,
     root_extractor: Callable[[Any], Any] | None = None,
     streams: tuple[Any, ...] | None = None,
-) -> Any:
+) -> Callable[P, R] | Callable[[Callable[P, R]], Callable[P, R]]:
     """Decorate once or with options; construction does not initialize MLX."""
 
     def decorate(target: Callable[P, R]) -> Callable[P, R]:
