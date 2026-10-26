@@ -1,0 +1,259 @@
+{
+  "captured_at_utc": "2026-10-26T15:36:56+00:00",
+  "inference": {
+    "gpu": "NVIDIA L4, 610.57.04, 23034 MiB",
+    "model": "Qwen/Qwen3-0.6B",
+    "model_revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "observers": {
+      "compared_phases": [
+        "replay_in512_out128"
+      ],
+      "observers": {
+        "execution": {
+          "active": true,
+          "configured": true,
+          "healthy": false,
+          "phases": {
+            "replay_in512_out128": {
+              "active": true,
+              "healthy": false,
+              "reasons": [
+                "the hook's heartbeat did not cover the phase"
+              ]
+            }
+          },
+          "requested": true,
+          "settings": {
+            "directory": "/tmp/stormlog-vllm",
+            "server_hook_dir": null
+          },
+          "unjudged": []
+        },
+        "system_sampler": {
+          "active": true,
+          "configured": true,
+          "healthy": true,
+          "phases": {
+            "replay_in512_out128": {
+              "active": true,
+              "healthy": true,
+              "reasons": []
+            }
+          },
+          "requested": true,
+          "settings": {
+            "interval_seconds": 1.0,
+            "sampler": "nvidia-smi"
+          },
+          "unjudged": []
+        },
+        "trace": {
+          "active": null,
+          "configured": null,
+          "healthy": null,
+          "phases": {},
+          "requested": false,
+          "settings": null,
+          "unjudged": []
+        },
+        "vllm_metrics": {
+          "active": true,
+          "configured": true,
+          "healthy": true,
+          "phases": {
+            "replay_in512_out128": {
+              "active": true,
+              "healthy": true,
+              "reasons": []
+            }
+          },
+          "requested": true,
+          "settings": {
+            "authorization": null,
+            "interval_seconds": 1.0,
+            "max_scrape_bytes": 8388608,
+            "max_scrape_series": 20000,
+            "timeout_seconds": 60.0,
+            "url": "http://127.0.0.1:8000/metrics"
+          },
+          "unjudged": []
+        },
+        "vllm_spans": {
+          "active": null,
+          "configured": false,
+          "healthy": null,
+          "phases": {},
+          "requested": false,
+          "settings": null,
+          "unjudged": []
+        }
+      }
+    },
+    "outputs": {
+      "stormlog infer analyze": "Inference Profile Analysis\n----------------------------\nTotal requests: 601\nSuccessful requests: 601\nFailed requests: 0\nFailure rate: 0.00%\nWorkload: 8aac19ff0e82, seed 0, prompts repeat, tokenizer estimated\nSLO policy: cli from artifact, digest a38640359afb\nObservers: system_sampler healthy, vllm_metrics healthy, execution unhealthy\nMemory observations: client-local\nvLLM telemetry: 119 scrapes ok, 0 failed; engine label(s) 0; spans 0 (0 joined); engine-aggregate, no per-request attribution\nvLLM execution: 17670 steps imported (17670 complete, 0 incomplete), memberships run 78969, 617 of 617 run requests bound\n  capture loss: 0 records dropped by the hook, 0 missing, 0 steps pending, 0 incomplete, 0 update failures, 0 range misses, 0 finishes unattached; 10 start-up calls unranged (not loss)\n  replay_in512_out128: 17670 steps\n\nCases:\n- replay_in512_out128: p50 E2E=1492.58 ms, p95 E2E=8065.99 ms, p50 TTFT=450.83 ms, output=- tok/s, requests=- req/s\n  no rate interval (endpoint_undeclared)\n  SLO cli: attainment 53.7% of 601 offered, goodput - req/s, 0 unknown\n  arrivals: replay, offered 601, sent 601, held for a slot 13, peak in flight 128, dispatch lag p95 2.55 ms, E2E from intended arrival p95 8067.62 ms\n  vllm engine 0: waiting max 110.00 mean 10.71; running max 16.00; preemptions 0.00; kv usage max 2.0% (132 of 6625 blocks); prefix hits 307,712 of 313,121 tokens; queue time mean 2,039 ms over 601.00 requests; 2,775 prompt and 681.65 generated tok/s over 112.84 s incl. drain\n",
+      "stormlog infer diagnose": "Diagnosis: findings: 1 warning finding; 3 info findings; 0 incidents unexplained; 4 kinds unsupported; 7 windows untested\nOutcome: findings\n\nCoverage:\n  capture_pause                assessed     no_trace_windows\n  client_admission             assessed\n  host_stall                   partial      engine_core_and_worker_not_assessed_by_this_version\n  kv_preemption_pressure       assessed     not_observed\n  load_increase                assessed\n  longer_inputs                assessed     not_observed\n  longer_outputs               assessed     not_observed\n  mixed_prefill_interference   unsupported  not_assessed_by_this_version\n  prefix_cache_loss            unsupported  no_declared_sharing\n  prefix_sharing_drop          assessed     not_observed\n  queue_saturation             assessed\n  rank_delay                   unsupported  not_assessed_by_this_version\n  transfer_degradation         unsupported  not_assessed_by_this_version\n\n[1] WARNING queue_saturation at scheduler: Requests waited to be scheduled while the engine was full\n    id diagnosis.queue_saturation.43e5fddb0560; claim fault, cause fault, role primary, driver undetermined\n    confidence medium (condition high, contribution medium)\n    - scheduler_wait rose by 3694.2 ms (95% CI 2516.4 to 4746.3) against the reference.\n    - TTFT rose by 3694.2 ms (95% CI 2521.6 to 4749.2).\n    - 92% of the subject's requests waited mostly through steps at capacity; 100% of the 2539 steps scheduled while requests waited ran at capacity, counting the slots freed in the step before.\n    competitor engine_stall (indispensable): ruled_out, 0 engine stalls; the median waiting request was held 0.0 ms by those since its queue was last empty, against a wait excess of 3694.2 ms\n    competitor scheduler_paused (indispensable): ruled_out, no pause transition, and nothing lost\n    competitor blocked_waiting (indispensable): ruled_out, no request used structured output or streaming input\n    competitor engine_ingress (indispensable): ruled_out, engine_ingress excess -0.3 ms\n    competitor kv_preemption_pressure: ruled_out, no allocation preemption of the subject's requests held the queue\n    competitor client_admission: not_ruled_out, 13 requests were held at the client\n    competitor host_stall@api_server: ruled_out, send_to_ingress excess 1.2 ms\n    experiment: rerun at a lower offered load, or with a larger max_num_seqs, same seed; expect median scheduler_wait falls by at least 2516.4 ms\n    at infer.jsonl:1707 infer.request/replay_in512_out128_measured_477\n    at infer.jsonl:1701 infer.request/replay_in512_out128_measured_474\n    at infer.jsonl:1703 infer.request/replay_in512_out128_measured_475\n    at infer.jsonl:1705 infer.request/replay_in512_out128_measured_476\n    at infer.jsonl:38175 iteration:vllm:modal:f3f493df-909f-455c-929d-cdd3871a407a:153:1793028624460570832:10279\n    at infer.jsonl:38192 iteration:vllm:modal:f3f493df-909f-455c-929d-cdd3871a407a:153:1793028624460570832:10280\n    at infer.jsonl:38209 iteration:vllm:modal:f3f493df-909f-455c-929d-cdd3871a407a:153:1793028624460570832:10281\n    at infer.jsonl:38226 iteration:vllm:modal:f3f493df-909f-455c-929d-cdd3871a407a:153:1793028624460570832:10282\n    8 of 47412 supporting records shown; --inspect --all lists them\n\n[2] INFO load_increase at workload: More requests arrived than in the reference\n    id diagnosis.load_increase.7460571f167d; claim condition, cause workload_change, role primary, driver undetermined\n    confidence high (condition high, contribution not assessed)\n    - Requests arrived at 13.42/s against 3.02/s in the reference: 4.45x (95% CI 3.70 to 5.36).\n    experiment: rerun the reference's workload against the same server; expect the latency excess falls by what the demand explains\n    at infer.jsonl:776 infer.request/replay_in512_out128_measured_180\n    at infer.jsonl:773 infer.request/replay_in512_out128_measured_181\n    at infer.jsonl:780 infer.request/replay_in512_out128_measured_182\n    at infer.jsonl:784 infer.request/replay_in512_out128_measured_183\n    at infer.jsonl:787 infer.request/replay_in512_out128_measured_184\n    at infer.jsonl:792 infer.request/replay_in512_out128_measured_185\n    at infer.jsonl:795 infer.request/replay_in512_out128_measured_186\n    at infer.jsonl:798 infer.request/replay_in512_out128_measured_187\n    8 of 340 supporting records shown; --inspect --all lists them\n\n[3] INFO host_stall at api_server: Requests took longer to reach the engine while it kept stepping\n    id diagnosis.host_stall.777f6be0dd44; claim condition, cause undetermined, role primary, driver undetermined\n    confidence medium (condition high, contribution medium)\n    - send_to_ingress rose by 1.2 ms (95% CI 1.0 to 1.6) against the reference.\n    competitor scheduler_paused (indispensable): ruled_out, no pause transition, and nothing lost over the stalls\n    competitor capture_pause (indispensable): ruled_out, no profiler window in the run\n    experiment: rerun with the API server given more CPU, or with fewer API server workers sharing it; expect median send_to_ingress falls by at least 1.0 ms\n    at infer.jsonl:728 infer.dispatch/replay_in512_out128_measured_180\n    at infer.jsonl:729 infer.first_content/replay_in512_out128_measured_180\n    at infer.jsonl:776 infer.request/replay_in512_out128_measured_180\n    at infer.jsonl:730 infer.dispatch/replay_in512_out128_measured_181\n    at infer.jsonl:731 infer.first_content/replay_in512_out128_measured_181\n    at infer.jsonl:773 infer.request/replay_in512_out128_measured_181\n    at infer.jsonl:732 infer.dispatch/replay_in512_out128_measured_182\n    at infer.jsonl:733 infer.first_content/replay_in512_out128_measured_182\n    8 of 1020 supporting records shown; --inspect --all lists them\n\n[4] INFO client_admission at client: The client held requests back at its in-flight limit\n    id diagnosis.client_admission.d0d89a4a0153; claim condition, cause instrumentation, role primary, driver undetermined\n    confidence low (condition high, contribution low)\n    - 13 requests were held for an in-flight slot.\n    - 0 arrivals were dropped and never sent.\n    - Dispatch lag rose by 0.0 ms (95% CI -0.1 to 0.1).\n    experiment: rerun with a larger --max-in-flight, same seed; expect no request is held for a slot, and dispatch lag falls to the reference's\n    at infer.jsonl:1379 infer.dispatch/replay_in512_out128_measured_468\n    at infer.jsonl:1651 infer.first_content/replay_in512_out128_measured_468\n    at infer.jsonl:1687 infer.request/replay_in512_out128_measured_468\n    at infer.jsonl:1382 infer.dispatch/replay_in512_out128_measured_469\n    at infer.jsonl:1653 infer.first_content/replay_in512_out128_measured_469\n    at infer.jsonl:1689 infer.request/replay_in512_out128_measured_469\n    at infer.jsonl:1385 infer.dispatch/replay_in512_out128_measured_470\n    at infer.jsonl:1656 infer.first_content/replay_in512_out128_measured_470\n    8 of 1020 supporting records shown; --inspect --all lists them\n",
+      "stormlog infer profile": "Inference Profile Analysis\n----------------------------\nSession status: running\nTotal requests: 601\nSuccessful requests: 601\nFailed requests: 0\nFailure rate: 0.00%\nWorkload: 8aac19ff0e82, seed 0, prompts repeat, tokenizer estimated\nSLO policy: cli from artifact, digest a38640359afb\nObservers: system_sampler healthy, vllm_metrics healthy, execution unhealthy\nMemory observations: client-local\nvLLM telemetry: 119 scrapes ok, 0 failed; engine label(s) 0; spans 0 (0 joined); engine-aggregate, no per-request attribution\nvLLM execution: 17670 steps imported (17670 complete, 0 incomplete), memberships run 78969, 617 of 617 run requests bound\n  capture loss: 0 records dropped by the hook, 0 missing, 0 steps pending, 0 incomplete, 0 update failures, 0 range misses, 0 finishes unattached; 10 start-up calls unranged (not loss)\n  replay_in512_out128: 17670 steps\n\nCases:\n- replay_in512_out128: p50 E2E=1492.58 ms, p95 E2E=8065.99 ms, p50 TTFT=450.83 ms, output=- tok/s, requests=- req/s\n  no rate interval (endpoint_undeclared)\n  SLO cli: attainment 53.7% of 601 offered, goodput - req/s, 0 unknown\n  arrivals: replay, offered 601, sent 601, held for a slot 13, peak in flight 128, dispatch lag p95 2.55 ms, E2E from intended arrival p95 8067.62 ms\n  vllm engine 0: waiting max 110.00 mean 10.71; running max 16.00; preemptions 0.00; kv usage max 2.0% (132 of 6625 blocks); prefix hits 307,712 of 313,121 tokens; queue time mean 2,039 ms over 601.00 requests; 2,775 prompt and 681.65 generated tok/s over 112.84 s incl. drain\nArtifact saved to: /tmp/run/infer.jsonl\n"
+    },
+    "serve": [
+      "vllm",
+      "serve",
+      "Qwen/Qwen3-0.6B",
+      "--revision",
+      "c1899de289a04d12100db370d81485cdf75e47ca",
+      "--port",
+      "8000",
+      "--max-num-seqs",
+      "16",
+      "--max-model-len",
+      "2048",
+      "--gpu-memory-utilization",
+      "0.6",
+      "--seed",
+      "0"
+    ],
+    "steps": [
+      {
+        "argv": [
+          "stormlog",
+          "infer",
+          "profile",
+          "--base-url",
+          "http://127.0.0.1:8000/v1",
+          "--model",
+          "Qwen/Qwen3-0.6B",
+          "--engine",
+          "vllm",
+          "--arrival",
+          "replay",
+          "--arrival-trace",
+          "/tmp/run/arrivals.jsonl",
+          "--input-tokens",
+          "512",
+          "--output-tokens",
+          "128",
+          "--warmup-requests",
+          "16",
+          "--tokenizer",
+          "none",
+          "--vllm-metrics",
+          "--vllm-metrics-interval",
+          "1",
+          "--vllm-execution-dir",
+          "/tmp/stormlog-vllm",
+          "--slo",
+          "ttft:1000",
+          "--slo",
+          "tpot:60",
+          "--output",
+          "/tmp/run/infer.jsonl"
+        ],
+        "exit": 0,
+        "seconds": 165.5
+      },
+      {
+        "argv": [
+          "stormlog",
+          "infer",
+          "analyze",
+          "infer.jsonl"
+        ],
+        "exit": 0,
+        "seconds": 14.8
+      },
+      {
+        "argv": [
+          "stormlog",
+          "infer",
+          "diagnose",
+          "infer.jsonl"
+        ],
+        "exit": 3,
+        "seconds": 93.9
+      }
+    ],
+    "trace": [
+      [
+        0.0,
+        60.0,
+        3.0
+      ],
+      [
+        60.0,
+        72.0,
+        25.0
+      ],
+      [
+        72.0,
+        112.0,
+        3.0
+      ]
+    ],
+    "trace_requests": 601,
+    "vllm": "0.30.0"
+  },
+  "tui": {
+    "files": [
+      "tui-cli-actions-current.svg",
+      "tui-diagnostics-current.svg",
+      "tui-monitoring-current.svg",
+      "tui-overview-current.svg",
+      "tui-pytorch-current.svg",
+      "tui-visualizations-current.svg"
+    ],
+    "gpu": "NVIDIA L4, 610.57.04, 23034 MiB",
+    "readme_checks": [
+      {
+        "argv": [
+          "gpumemprof",
+          "info"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "gpumemprof",
+          "track",
+          "--duration",
+          "5",
+          "--interval",
+          "0.5",
+          "--output",
+          "track.json",
+          "--format",
+          "json"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "gpumemprof",
+          "analyze",
+          "track.json",
+          "--format",
+          "txt",
+          "--output",
+          "analysis.txt"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "gpumemprof",
+          "diagnose",
+          "--duration",
+          "0",
+          "--output",
+          "diag/"
+        ],
+        "exit": 0
+      },
+      {
+        "argv": [
+          "python",
+          "-c"
+        ],
+        "exit": 0
+      }
+    ]
+  }
+}

@@ -1,298 +1,160 @@
-# Stormlog
+<h1 align="center">Stormlog</h1>
 
-[![CI](https://github.com/Silas-Asamoah/stormlog/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Silas-Asamoah/stormlog/actions/workflows/ci.yml)
-[![PyPI Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fpypi.org%2Fpypi%2Fstormlog%2Fjson&query=%24.info.version&label=pypi)](https://pypi.org/project/stormlog/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/Silas-Asamoah/stormlog/blob/main/LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![PyTorch](https://img.shields.io/badge/PyTorch-1.8+-red.svg)](https://pytorch.org/)
-[![TensorFlow](https://img.shields.io/badge/TensorFlow-2.4+-orange.svg)](https://tensorflow.org/)
-[![Textual TUI](https://img.shields.io/badge/TUI-Textual-blueviolet)](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/tui.md)
+<h3 align="center">
+Memory and performance profiling for ML training and inference
+</h3>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Silas-Asamoah/stormlog/main/docs/tui-overview-current.png" alt="Stormlog overview tab" width="900">
-  <br/>
-  <em>Current Overview tab from the shipped Textual interface.</em>
+| <a href="https://stormlog.readthedocs.io/en/latest/"><b>Documentation</b></a>
+| <a href="https://stormlog.readthedocs.io/en/latest/usage.html"><b>Usage guide</b></a>
+| <a href="https://stormlog.readthedocs.io/en/latest/inference.html"><b>Inference profiling</b></a>
+| <a href="https://stormlog.readthedocs.io/en/latest/tui.html"><b>Terminal UI</b></a>
+| <a href="https://pypi.org/project/stormlog/"><b>PyPI</b></a> |
 </p>
 
-Stormlog is a memory-profiling and inference-profiling toolkit for day-to-day
-PyTorch, TensorFlow, JAX, MLX, and OpenAI-compatible serving work. It combines
-Python APIs, CLI commands, and a Textual TUI so you can move from "what is
-using memory?" or "what is my endpoint doing under load?" to saved artifacts
-and shareable diagnostics without switching tools.
+<p align="center">
+<a href="https://github.com/Silas-Asamoah/stormlog/actions/workflows/ci.yml"><img src="https://github.com/Silas-Asamoah/stormlog/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+<a href="https://pypi.org/project/stormlog/"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fpypi.org%2Fpypi%2Fstormlog%2Fjson&query=%24.info.version&label=pypi" alt="PyPI version"></a>
+<a href="https://stormlog.readthedocs.io/en/latest/"><img src="https://readthedocs.org/projects/stormlog/badge/?version=latest" alt="Documentation"></a>
+<a href="https://www.python.org/downloads/"><img src="https://img.shields.io/badge/python-3.10%E2%80%933.15-blue.svg" alt="Python 3.10–3.15"></a>
+<a href="https://github.com/Silas-Asamoah/stormlog/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
 
-Long-running `track` and `diagnose` flows are session-aware, so one capture can
-be reconstructed deterministically across sink segments, diagnose bundles, and
-OOM flight-recorder artifacts.
+---
 
-For task-oriented operational guidance, use the
-[Production Cookbook](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/index.md).
-The highest-signal entry points are the
-[Always-on Tracking recipe](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/always_on.md),
-[Incident Playbooks](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/incidents.md),
-and
-[CI and Release Qualification](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/ci_release.md).
+## About
 
-## Why use this tool
+Stormlog measures what a model does to the hardware it runs on, and keeps
+the evidence. It works the same way for a training job's memory and for an
+inference server's latency: capture once, save an artifact, then analyze,
+compare and diagnose it from the CLI, Python or a terminal UI.
 
-- Catch memory growth before it becomes an OOM.
-- Compare allocated vs reserved usage during training and inference.
-- Export telemetry and diagnose bundles for CI or release triage.
-- Load the same artifacts into a terminal UI for faster debugging.
-- Keep workflows available on CPU-only and MPS systems, not just CUDA boxes.
+**Training and memory**
 
-## Installation
+- Track allocated, reserved and device memory over time for PyTorch (CUDA,
+  ROCm, Apple MPS and CPU), TensorFlow, JAX, and MLX on Apple Silicon.
+- Catch growth before it becomes an OOM: alert thresholds, growth and gap
+  analysis, and an OOM flight recorder that keeps the moments before a crash.
+- Reconstruct long captures by session, and compare ranks of a distributed
+  run to find the one that diverged.
+- Write diagnose bundles with a fixed exit-code and report contract for CI and
+  release gates, and log to W&B or MLflow.
 
-### From PyPI
+**Inference serving**
 
-```bash
-pip install stormlog
-pip install "stormlog[viz]"
-pip install "stormlog[tui,torch]"
-pip install "stormlog[torch]"
-pip install "stormlog[tf]"
-pip install "stormlog[jax]"
-pip install "stormlog[mlx]"  # native Apple Silicon macOS
-pip install "stormlog[infer-tokenizers]"
-pip install "stormlog[all]"
-```
+- Profile any OpenAI-compatible endpoint: time to first token, time per
+  output token, end-to-end latency, throughput, failures and tokens, under
+  closed-loop, fixed-rate, Poisson, burst or replayed traffic.
+- Judge each run against an SLO with goodput, and compare a baseline with a
+  candidate over repeated runs (`stormlog infer compare`), so a change is
+  shown to help instead of assumed to.
+- Explain slow windows (`stormlog infer diagnose`): queue saturation, KV
+  preemption, prefix-cache loss, client admission and workload changes, each
+  finding citing the records behind it.
+- Go deeper on vLLM: its Prometheus metrics, an execution hook that records
+  scheduler steps, and GPU profiler traces joined to the requests they served.
+- Watch a live server and capture its incidents (`stormlog infer watch`), and
+  export Prometheus metrics and OTLP spans.
 
-`stormlog[all]` installs every runtime extra: visualization, TUI, PyTorch,
-TensorFlow, JAX, platform-gated MLX, W&B, and inference tokenizer dependencies.
+## Supported runtimes
 
-### Package and import names
-
-`stormlog` is the distribution name on PyPI and the primary Python import root.
-TensorFlow-specific APIs live under `stormlog.tensorflow`; JAX-specific APIs
-live under `stormlog.jax`. MLX Python APIs live under `stormlog.mlx`; see the
-[MLX guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/mlx_testing_guide.md) for process allocator scope and lazy
-evaluation. Use `mlxmemprof run -- script.py` for in-process capture and
-`stormlog tui --framework mlx` for MLX tracking or saved-artifact browsing.
-
-| Task | Use |
+| Area | Supported |
 | --- | --- |
-| Install the package | `pip install stormlog` |
-| Launch the TUI | `stormlog` or `stormlog tui` |
-| Profile OpenAI-compatible inference | `stormlog infer profile` |
-| Profile MLX audio and serving evidence | `stormlog infer profile-audio`, `stormlog infer mlx-serve`; [guide](https://github.com/Silas-Asamoah/stormlog/blob/release/dev/docs/mlx_inference.md) |
-| Import PyTorch APIs | `from stormlog import GPUMemoryProfiler, MemoryTracker` |
-| Import TensorFlow APIs | `from stormlog.tensorflow import TFMemoryProfiler` |
-| Import JAX APIs | `from stormlog.jax import JAXMemoryProfiler` |
-| Import MLX APIs | `from stormlog.mlx import MLXMemoryProfiler, MemoryTracker` |
-| Query local artifacts | `stormlog query` |
-| Run framework memory CLI automation | `gpumemprof`, `tfmemprof`, or `jaxmemprof` |
+| Training memory | PyTorch (CUDA, ROCm, MPS, CPU), TensorFlow, JAX, MLX on Apple Silicon |
+| Inference serving | vLLM (metrics, execution hook, profiler traces), any OpenAI-compatible server, MLX-LM, oMLX, MLX-Audio |
+| Interfaces | Python API, `gpumemprof` / `tfmemprof` / `jaxmemprof` / `mlxmemprof`, `stormlog infer`, `stormlog query`, terminal UI |
+| Python | 3.10 to 3.15 |
 
-### From source
+## Getting started
 
 ```bash
-git clone https://github.com/Silas-Asamoah/stormlog.git
-cd stormlog
-pip install -e .
-pip install -e ".[viz,tui,torch]"
+pip install stormlog                 # core, inference profiling and the CLIs
+pip install "stormlog[tui,torch]"    # terminal UI with PyTorch
 ```
 
-If you want both framework extras in a development checkout:
+Other extras: `torch`, `tf`, `jax`, `mlx` (Apple Silicon), `viz`,
+`infer-tokenizers`, `infer-otlp`, `wandb`, `mlflow`, and `all`. The
+`examples/` package and the scenario scripts are source-checkout only: clone
+the repository and `pip install -e .` to run them.
+
+### Training memory
 
 ```bash
-pip install -e ".[dev,test,all]"
+gpumemprof info                      # tfmemprof info, jaxmemprof info, mlxmemprof info
+gpumemprof track --duration 30 --interval 0.5 --output track.json --format json
+gpumemprof analyze track.json --format txt --output analysis.txt
+gpumemprof diagnose --duration 0 --output diag/
+stormlog                             # the terminal UI
 ```
-
-The `examples/` package and Markdown test guides are source-checkout only. A
-plain `pip install stormlog` does not include them.
-
-## Quick start
-
-### CLI-first workflow
-
-This is the fastest path to verify an environment and produce an artifact you can inspect later:
-
-```bash
-gpumemprof info
-gpumemprof track --duration 2 --interval 0.5 --output /tmp/gpumemprof_track.json --format json
-gpumemprof analyze /tmp/gpumemprof_track.json --format txt --output /tmp/gpumemprof_analysis.txt
-gpumemprof diagnose --duration 0 --output /tmp/gpumemprof_diag
-
-tfmemprof info
-tfmemprof diagnose --duration 0 --output /tmp/tf_diag
-
-jaxmemprof info
-jaxmemprof diagnose --duration 0 --output /tmp/jax_diag
-```
-
-If you reuse a sink directory across multiple runs, Stormlog separates those
-captures by `session_id` and defaults analysis to the newest clean session.
-
-### OpenAI-compatible inference workflow
-
-Use `stormlog infer` when you want client-observed latency, throughput,
-failure, token, and optional system telemetry from a Chat Completions endpoint:
-
-```bash
-stormlog infer profile \
-  --base-url http://localhost:8000/v1 \
-  --model Qwen/Qwen2.5-7B-Instruct \
-  --concurrency 1,4,8 \
-  --input-tokens 512,2048 \
-  --output-tokens 128,512 \
-  --requests 20 \
-  --output /tmp/stormlog_infer.jsonl
-
-stormlog infer analyze /tmp/stormlog_infer.jsonl
-```
-
-### PyTorch API workflow
-
-`GPUMemoryProfiler` currently targets PyTorch runtimes exposed through
-`torch.cuda`, which covers NVIDIA CUDA and ROCm-backed builds. On Apple MPS or
-CPU-only systems, use `MemoryTracker`, the CLI, or `CPUMemoryProfiler` instead.
 
 ```python
 import torch
-from stormlog import GPUMemoryProfiler
+from stormlog import GPUMemoryProfiler  # CUDA or ROCm; MemoryTracker also covers MPS
 
 profiler = GPUMemoryProfiler()
-device = profiler.device
-model = torch.nn.Linear(1024, 128).to(device)
+model = torch.nn.Linear(1024, 128).to(profiler.device)
+
 
 def train_step() -> torch.Tensor:
-    x = torch.randn(64, 1024, device=device)
-    y = model(x)
-    return y.sum()
+    return model(torch.randn(64, 1024, device=profiler.device)).sum()
 
-profile = profiler.profile_function(train_step)
-summary = profiler.get_summary()
 
-print(profile.function_name)
-print(f"Peak memory: {summary['peak_memory_usage'] / (1024**3):.2f} GB")
+profiler.profile_function(train_step)
+print(f"Peak: {profiler.get_summary()['peak_memory_usage'] / 1024**2:.1f} MB")
 ```
-
-### TensorFlow API workflow
-
-`TFMemoryProfiler` works on GPU or CPU-backed TensorFlow runtimes.
-
-```python
-from stormlog.tensorflow import TFMemoryProfiler
-
-profiler = TFMemoryProfiler(enable_tensor_tracking=True)
-
-with profiler.profile_context("training"):
-    model.fit(x_train, y_train, epochs=1, batch_size=32)
-
-results = profiler.get_results()
-print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
-print(f"Snapshots captured: {len(results.snapshots)}")
-```
-
-## Daily workflows
-
-### ML engineer
-
-- instrument a training step with `GPUMemoryProfiler` or `TFMemoryProfiler`
-- switch to `track` when you need telemetry over time
-- export plots or analyze saved telemetry later
-
-### Researcher debugging regressions
-
-- capture `track` output or a `diagnose` bundle
-- open the same artifacts in the TUI diagnostics and visualizations tabs
-- compare growth, gaps, and per-rank behavior before changing model code
-- switch between discovered sessions instead of merging multiple captures from the same sink
-
-### CI or release owner
-
-These example-module commands require a source checkout plus `pip install -e .`.
-
-- run `python -m examples.cli.quickstart`
-- run `python -m examples.cli.capability_matrix --mode smoke --target both --oom-mode simulated`
-- archive the emitted artifacts for later triage in the TUI
-- branch on the fixed exit-code table and read `diagnose` bundles'
-  `report.json` verdicts; see the
-  [Report and Exit-Code Contract](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/report_contract.md)
-
-## Terminal UI
-
-Install the optional TUI dependencies and launch:
-
-```bash
-pip install "stormlog[tui,torch]"
-stormlog
-```
-
-For MLX on native Apple Silicon, install `stormlog[mlx,tui]` and launch
-`stormlog tui --framework mlx`. Live tracking observes the TUI process; use
-`mlxmemprof run -- script.py` to capture a separate workload and load its saved
-bundle in the MLX tab. Offline MLX artifact browsing needs only `stormlog[tui]`.
-
-The current TUI tabs are:
-
-- `Overview`
-- `PyTorch`
-- `TensorFlow`
-- `MLX`
-- `Monitoring`
-- `Visualizations`
-- `Diagnostics`
-- `CLI & Actions`
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Silas-Asamoah/stormlog/main/docs/tui-overview-current.png" alt="Stormlog overview tab" width="700">
+  <img src="https://raw.githubusercontent.com/Silas-Asamoah/stormlog/main/docs/tui-visualizations-current.png" alt="Stormlog's terminal UI showing the memory timeline of a PyTorch training run" width="900">
   <br/>
-  <em>Overview tab with current system summary and navigation guidance.</em>
+  <em>The terminal UI during a PyTorch training run on an NVIDIA L4: allocated memory per sample, and the caching allocator's reserved pool.</em>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/Silas-Asamoah/stormlog/main/docs/tui-diagnostics-current.png" alt="Stormlog diagnostics tab" width="700">
-  <br/>
-  <em>Diagnostics tab with the current artifact loader, rank table, and timeline panes.</em>
-</p>
-
-Use the Monitoring tab to start live tracking, export CSV or JSON events to `./exports`, and tune warning or critical thresholds. In Visualizations, refresh the live timeline and save PNG or HTML exports under `./visualizations`. In Diagnostics, load live telemetry or artifact paths and rebuild rank-level diagnostics without leaving the terminal.
-
-For screen-by-screen details, see the [TUI Guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/tui.md).
-
-## Examples and walkthroughs
-
-- [Documentation home](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/index.md)
-- [Installation guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/installation.md)
-- [Usage guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/usage.md)
-- [CLI guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cli.md)
-- [Production cookbook](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/index.md)
-- [Always-on tracking](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/always_on.md)
-- [Incident playbooks](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/incidents.md)
-- [CI and release qualification](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/ci_release.md)
-- [Examples guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/examples.md)
-- [Testing guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/testing.md)
-- [PyTorch guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/pytorch_testing_guide.md)
-- [TensorFlow guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/tensorflow_testing_guide.md)
-- [Long-form article](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/article.md)
-
-## Launch QA scenarios
-
-These commands require a source checkout:
+### Inference
 
 ```bash
-python -m examples.cli.quickstart
-python -m examples.cli.capability_matrix --mode smoke --target both --oom-mode simulated
-python -m examples.scenarios.cpu_telemetry_scenario
-python -m examples.scenarios.oom_flight_recorder_scenario --mode simulated
+stormlog infer profile \
+  --base-url http://localhost:8000/v1 --model Qwen/Qwen2.5-7B-Instruct \
+  --concurrency 1,8,32 --duration 60 --slo ttft:500 --vllm-metrics \
+  --output run.jsonl
+stormlog infer analyze run.jsonl     # latency, throughput, goodput per case
+stormlog infer diagnose run.jsonl    # why slow windows were slow
+stormlog infer compare --baseline base-*.jsonl --candidate cand-*.jsonl \
+  --gate 'client.e2e.p95=non-inferiority:0.05'
 ```
 
-## CPU-only and laptop workflows
+<p align="center">
+  <img src="https://raw.githubusercontent.com/Silas-Asamoah/stormlog/main/docs/infer-diagnose-current.png" alt="stormlog infer diagnose explaining a queue saturation incident with its evidence" width="900">
+  <br/>
+  <em>An excerpt of <code>stormlog infer diagnose</code> on vLLM 0.30.0 serving Qwen3-0.6B on an NVIDIA L4, overloaded for 12 seconds.</em>
+</p>
 
-If CUDA is not available, Stormlog still supports:
+## Documentation
 
-- `gpumemprof info`
-- `gpumemprof monitor`
-- `gpumemprof track`
-- `CPUMemoryProfiler`
-- `CPUMemoryTracker`
-- the TUI overview, monitoring, diagnostics, and CLI tabs
-
-See the [CPU Compatibility Guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cpu_compatibility.md) for the CPU-only path.
+- [Installation](https://stormlog.readthedocs.io/en/latest/installation.html)
+  and [usage guide](https://stormlog.readthedocs.io/en/latest/usage.html)
+- [CLI reference](https://stormlog.readthedocs.io/en/latest/cli.html) and
+  [Python API](https://stormlog.readthedocs.io/en/latest/api.html)
+- [Inference profiling](https://stormlog.readthedocs.io/en/latest/inference.html),
+  [SLOs and goodput](https://stormlog.readthedocs.io/en/latest/inference_slo.html),
+  [comparing runs](https://stormlog.readthedocs.io/en/latest/inference_comparison.html)
+  and [diagnosis](https://stormlog.readthedocs.io/en/latest/inference_diagnosis.html)
+- [vLLM execution hook](https://stormlog.readthedocs.io/en/latest/vllm_execution.html),
+  [incident capture](https://stormlog.readthedocs.io/en/latest/incident_capture.html)
+  and [Prometheus and OTLP export](https://stormlog.readthedocs.io/en/latest/inference_export.html)
+- [Terminal UI](https://stormlog.readthedocs.io/en/latest/tui.html),
+  [MLX on Apple Silicon](https://stormlog.readthedocs.io/en/latest/mlx_testing_guide.html)
+  and [CPU-only machines](https://stormlog.readthedocs.io/en/latest/cpu_compatibility.html)
+- [Production cookbook](https://stormlog.readthedocs.io/en/latest/cookbook/index.html):
+  always-on tracking, incident playbooks, and CI and release qualification
+- [Report and exit-code contract](https://stormlog.readthedocs.io/en/latest/report_contract.html)
 
 ## Contributing
 
-See the [Contributing Guide](https://github.com/Silas-Asamoah/stormlog/blob/main/CONTRIBUTING.md) and [Code of Conduct](https://github.com/Silas-Asamoah/stormlog/blob/main/CODE_OF_CONDUCT.md).
+Contributions are welcome. See the
+[contributing guide](https://github.com/Silas-Asamoah/stormlog/blob/main/CONTRIBUTING.md)
+and the
+[code of conduct](https://github.com/Silas-Asamoah/stormlog/blob/main/CODE_OF_CONDUCT.md).
 
 ## License
 
-[MIT License](https://github.com/Silas-Asamoah/stormlog/blob/main/LICENSE)
+[MIT](https://github.com/Silas-Asamoah/stormlog/blob/main/LICENSE)

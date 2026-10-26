@@ -538,6 +538,11 @@ the flaky benchmark memory gates
 
 ### Changed
 
+- The terminal UI is titled Stormlog. Its tabs have compact, labelled controls;
+  timelines span the panel in block elements; repeated alerts share one row
+  with a count, newest first; and the MLX tab describes its device in words.
+- The README is rewritten around training and inference, with screenshots
+  taken on an NVIDIA L4 by `examples/scenarios/modal_readme_media.py`.
 - **Breaking:** `stormlog infer analyze` JSON is `analysis_version: 2`.
   - Each case's throughput divides by its rate interval. For an open loop
     that is the schedule's own window; for a closed loop, the phase start to
@@ -654,6 +659,11 @@ the flaky benchmark memory gates
 
 ### Fixed
 
+- The terminal UI's Markdown guides rendered empty, the PyTorch and TensorFlow
+  samples never reached their tabs, and controls on the Monitoring and
+  Diagnostics tabs were clipped. All three are fixed.
+- `MemoryTracker` no longer warns "High fragmentation" when nothing is
+  allocated. On Apple MPS every sample used to raise the warning.
 - `stormlog infer analyze` no longer keeps the first of two different
   deliveries of a request's vLLM span. That request, and any request with more
   than one span, is quarantined: its spans are left out of the case's span
