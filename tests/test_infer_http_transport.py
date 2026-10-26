@@ -227,3 +227,37 @@ def test_a_chunked_stream_cut_short_keeps_its_status(end: str) -> None:
         with pytest.raises(CutResponseError) as raised:
             stream(client(url))
     assert classify_failure(raised.value) == ("error", 200)
+
+
+@contextlib.contextmanager
+def served(wire: bytes) -> Iterator[str]:
+    """Answer one request with ``wire`` all at once."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def serve() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            _read_request(connection)
+            connection.sendall(wire)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}/v1/chat/completions"
+    finally:
+        listener.close()
+        thread.join(3)
+
+
+def test_invalid_utf8_in_a_stream_is_replaced() -> None:
+    body = b'data: {"choices": [{"delta": {"content": "ok\xff"}}]}\n\ndata: [DONE]\n\n'
+    wire = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+        b"Content-Length: %d\r\n\r\n" % len(body)
+    ) + body
+    with served(wire) as url:
+        result = stream(client(url))
+    assert result.text == "ok\ufffd"

@@ -375,7 +375,8 @@ def _stream_data(response: Any) -> Iterator[str]:
 
 def _data_lines(response: Any) -> Iterator[str | None]:
     for raw_line in response:
-        line = raw_line.decode("utf-8").rstrip("\r\n")
+        # A server that splits a multibyte character must not fail the request.
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
         if not line:
             yield None
         elif line.startswith("data:"):
