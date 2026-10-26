@@ -168,7 +168,7 @@ also cover disk failure, unavailable/partial counters and recovery boundaries.
 - Native Runtime Info, evaluated MLX Sample, live tracking and shutdown passed
   in the MLX/TUI-only environment. Both runnable cookbook examples (training
   loss/model/optimizer roots and completed token generation) executed natively.
-  The [reviewed MLX panel](../tui-mlx-current.svg) comes from this native run.
+  The [reviewed MLX panel](mlx-qualification-tui.svg) comes from this native run.
 - A wheel built and included the MLX CLI, adapter and console script. Installed
   `mlxmemprof --help` and `stormlog tui --help` succeeded. The final wheel also
   launched the MLX TUI from outside the checkout with all four framework imports
