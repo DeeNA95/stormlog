@@ -1,8 +1,9 @@
 """Import a vLLM execution-hook log into an inference artifact.
 
 The artifact's ``infer.artifact`` record supplies the run and session; its
-``infer.request`` records supply the ``X-Request-Id`` values the reducer binds
-to; its phase and trace windows let foreign-only iterations be placed; and the
+``infer.dispatch`` and ``infer.request`` records supply the ``X-Request-Id``
+values the reducer binds to; its phase and trace windows, and phases begun but
+not yet measured, let foreign-only iterations be placed; and the
 entities it already holds, with the high-water marks of earlier imports, keep
 a re-import from writing anything twice. The reduced records are appended
 through ``append_inference_capture`` as an engine adapter's capture. The raw
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,7 @@ from .correlation_events import (
     LegacyInferenceRecord,
     MembershipEvent,
     RequestEvent,
+    StageEvent,
     load_inference_artifact,
 )
 from .errors import InferInputError, InferUsageError
@@ -59,12 +62,13 @@ from .vllm_execution_log import (
 )
 
 SOURCE = "stormlog.infer.import_execution"
-SUPPORTED = ("iterations", "memberships", "requests", "clock_alignment")
+SUPPORTED = ("iterations", "memberships", "requests", "clock_alignment", "stages")
 _COLLECTED_BY = {
     "iterations": IterationEvent,
     "memberships": MembershipEvent,
     "requests": RequestEvent,
     "clock_alignment": ClockAlignmentEvent,
+    "stages": StageEvent,
 }
 
 
@@ -88,7 +92,7 @@ def import_execution_into_artifact(
     """
     run_id, session_id = artifact_run_identity(artifact)
     records = _load_records(artifact)
-    facts = run_facts_from_records(records, run_id, session_id)
+    facts = run_facts_from_records(records, run_id, session_id, run_over=server_stopped)
     read = _read_log(directory, execution_high_water(records), importer, server_stopped)
     _check_foreign_schemes(read, execution_foreign_schemes(records), raw_foreign_ids)
     capture = reduce_to_capture(read, facts, ReduceOptions(raw_foreign_ids))
@@ -285,45 +289,68 @@ def reduce_to_capture(
 
 
 def run_facts_from_records(
-    records: Iterable[InferenceRecord], run_id: str, session_id: str
+    records: Iterable[InferenceRecord],
+    run_id: str,
+    session_id: str,
+    *,
+    run_over: bool = False,
 ) -> RunFacts:
-    """What an artifact's records tell the reducer about the run."""
-    requests: dict[str, RunRequest] = {}
-    windows: list[Window] = []
-    referenced: set[EntityRef] = set()
-    iterations: set[EntityRef] = set()
-    attempts: set[EntityRef] = set()
-    admissions: dict[tuple[str, int], EntityRef] = {}
-    alignments: set[str] = set()
-    client_clock_domain: str | None = None
+    """What an artifact's records tell the reducer about the run.
+
+    ``run_over`` says the run can make no more steps (its server stopped), so
+    a phase a client that died left begun ends at its last record.
+    """
+    client = _ClientFacts()
+    held = _HeldFacts()
     for record in records:
-        if isinstance(record, ArtifactIdentityEvent):
-            client_clock_domain = record.context.clock_domain
-        elif isinstance(record, ActivityReferenceEvent):
-            if record.iteration_ref is not None:
-                referenced.add(record.iteration_ref)
-        elif isinstance(record, IterationEvent):
-            iterations.add(record.iteration_ref)
-        elif isinstance(record, RequestEvent):
-            if record.attempt_ref is not None:
-                attempts.add(record.attempt_ref)
-                _note_admission(admissions, record)
-        elif isinstance(record, ClockAlignmentEvent):
-            alignments.add(record.event_id)
-        elif isinstance(record, LegacyInferenceRecord):
-            _legacy_facts(record.raw, requests, windows)
+        if isinstance(record, LegacyInferenceRecord):
+            client.add(record.raw)
+        else:
+            held.add(record)
     return RunFacts(
         run_id=run_id,
         session_id=session_id,
-        client_clock_domain=client_clock_domain,
-        requests=requests,
-        windows=tuple(windows),
-        referenced_iterations=frozenset(referenced),
-        existing_iterations=frozenset(iterations),
-        existing_attempts=frozenset(attempts),
-        existing_alignments=frozenset(alignments),
-        existing_admissions=admissions,
+        client_clock_domain=held.client_clock_domain,
+        requests=client.requests,
+        windows=client.all_windows(run_over),
+        referenced_iterations=frozenset(held.referenced),
+        existing_iterations=frozenset(held.iterations),
+        existing_attempts=frozenset(held.attempts),
+        existing_alignments=frozenset(held.alignments),
+        existing_stages=frozenset(held.stages),
+        existing_admissions=held.admissions,
     )
+
+
+@dataclass
+class _HeldFacts:
+    """What the artifact already holds: entities an import must not write
+    again, and the steps imported GPU activity refers to."""
+
+    client_clock_domain: str | None = None
+    referenced: set[EntityRef] = field(default_factory=set)
+    iterations: set[EntityRef] = field(default_factory=set)
+    attempts: set[EntityRef] = field(default_factory=set)
+    admissions: dict[tuple[str, int], EntityRef] = field(default_factory=dict)
+    alignments: set[str] = field(default_factory=set)
+    stages: set[str] = field(default_factory=set)
+
+    def add(self, record: InferenceRecord) -> None:
+        if isinstance(record, ArtifactIdentityEvent):
+            self.client_clock_domain = record.context.clock_domain
+        elif isinstance(record, ActivityReferenceEvent):
+            if record.iteration_ref is not None:
+                self.referenced.add(record.iteration_ref)
+        elif isinstance(record, IterationEvent):
+            self.iterations.add(record.iteration_ref)
+        elif isinstance(record, RequestEvent):
+            if record.attempt_ref is not None:
+                self.attempts.add(record.attempt_ref)
+                _note_admission(self.admissions, record)
+        elif isinstance(record, ClockAlignmentEvent):
+            self.alignments.add(record.event_id)
+        elif isinstance(record, StageEvent) and record.context.source == SOURCE:
+            self.stages.add(record.event_id)
 
 
 def _note_admission(
@@ -337,27 +364,86 @@ def _note_admission(
         admissions[(epoch, seq)] = record.attempt_ref
 
 
-def _legacy_facts(
-    raw: dict[str, Any], requests: dict[str, RunRequest], windows: list[Window]
-) -> None:
-    kind = raw.get("event_type")
-    if kind == "infer.request":
+# The end of a phase that has begun but whose window is not yet recorded,
+# while the run is still going: every later step may lie inside it.
+_OPEN_END_NS = 2**63 - 1
+
+
+# The client records that are windows: their kind, start and end fields. An
+# incident watcher's window is its capture: every step in it is the bundle's.
+_WINDOWS = {
+    "infer.phase_window": ("phase", "started_at_ns", "drained_at_ns"),
+    "infer.trace_window": ("trace", "started_at_ns", "stopped_at_ns"),
+    "infer.incident_window": ("incident", "start_ns", "end_ns"),
+}
+
+
+@dataclass
+class _ClientFacts:
+    """What the client's v1 records say: its requests and its windows."""
+
+    requests: dict[str, RunRequest] = field(default_factory=dict)
+    windows: list[Window] = field(default_factory=list)
+    # Phases begun and not yet measured, by (case, phase), at their start.
+    begun: dict[tuple[str | None, str | None], int] = field(default_factory=dict)
+    session_end_ns: int | None = None
+    # When the client last wrote anything.
+    last_record_ns: int | None = None
+
+    def add(self, raw: dict[str, Any]) -> None:
+        kind = raw.get("event_type")
+        at = _integer(raw.get("timestamp_ns"))
+        if at is not None:
+            last = self.last_record_ns
+            self.last_record_ns = at if last is None else max(at, last)
+        if kind in ("infer.request", "infer.dispatch"):
+            self._add_request(raw)
+        elif kind == "infer.phase_start":
+            started_at_ns = _integer(raw.get("started_at_ns"))
+            if started_at_ns is not None:
+                self.begun[_phase_key(raw)] = started_at_ns
+        elif kind in _WINDOWS:
+            if kind == "infer.phase_window":
+                self.begun.pop(_phase_key(raw), None)
+            _add_window(self.windows, *_WINDOWS[kind], raw)
+        elif kind == "infer.session" and raw.get("status") != "running":
+            self.session_end_ns = _integer(raw.get("timestamp_ns"))
+
+    def _add_request(self, raw: dict[str, Any]) -> None:
+        # A request is bound from its send, so a prefix of a growing
+        # artifact binds the requests still in flight.
         x_request_id = raw.get("x_request_id")
         if isinstance(x_request_id, str) and x_request_id:
-            requests[x_request_id] = RunRequest(
+            self.requests[x_request_id] = RunRequest(
                 str(raw.get("request_id")),
                 x_request_id,
                 _text(raw.get("case_id")),
                 _text(raw.get("phase")),
             )
-    elif kind == "infer.phase_window":
-        _add_window(windows, "phase", raw, "started_at_ns", "drained_at_ns")
-    elif kind == "infer.trace_window":
-        _add_window(windows, "trace", raw, "started_at_ns", "stopped_at_ns")
+
+    def all_windows(self, run_over: bool = False) -> tuple[Window, ...]:
+        """The recorded windows, plus each begun phase up to the session's
+        end, or open-ended while the session is still running. A session
+        that never ended in a run that is over had a client that died: its
+        phases end at the last thing it wrote."""
+        end_ns = self.session_end_ns
+        if end_ns is None:
+            last = self.last_record_ns
+            end_ns = last if run_over and last is not None else _OPEN_END_NS
+        begun = [
+            Window("phase", start_ns, end_ns, case_id, phase)
+            for (case_id, phase), start_ns in self.begun.items()
+            if start_ns <= end_ns
+        ]
+        return (*self.windows, *begun)
+
+
+def _phase_key(raw: dict[str, Any]) -> tuple[str | None, str | None]:
+    return _text(raw.get("case_id")), _text(raw.get("phase"))
 
 
 def _add_window(
-    windows: list[Window], kind: str, raw: dict[str, Any], start: str, end: str
+    windows: list[Window], kind: str, start: str, end: str, raw: dict[str, Any]
 ) -> None:
     start_ns, end_ns = _integer(raw.get(start)), _integer(raw.get(end))
     if start_ns is not None and end_ns is not None and end_ns >= start_ns:

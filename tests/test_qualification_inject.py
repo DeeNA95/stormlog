@@ -1,0 +1,2516 @@
+"""An injection run end to end, against the fake vLLM engine as its own
+process: priming, baseline, three episodes with recovery, and the truth."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Callable, cast
+
+import psutil
+import pytest
+
+from examples.qualification.__main__ import main
+from examples.qualification.fake_engine.process import FakeEngineProcess, _environment
+from examples.qualification.inject import (
+    _complete_records,
+    _harness_clock,
+    _victim_clock,
+)
+from examples.qualification.run_dir import new_label, verify
+from stormlog.infer.correlation_codec import read_inference_records
+from stormlog.infer.correlation_events import ArtifactIdentityEvent, CorrelationContext
+from stormlog.infer.events import JsonlEventWriter
+from stormlog.infer.qualify.ground_truth import load_injections, load_run
+from tests.qualification_fake_engine_helpers import post, wait_until
+
+pytestmark = pytest.mark.skipif(
+    sys.platform == "win32" or not hasattr(signal, "SIGSTOP"),
+    reason="needs SIGSTOP and SIGCONT",
+)
+
+
+def _plan(path: Path) -> Path:
+    plan: dict[str, Any] = {
+        "format": "stormlog.qualify.plan/1",
+        "profile": "smoke",
+        "seed": 7,
+        "victim": {
+            "rate_per_second": 10.0,
+            "input_tokens": 64,
+            "output_tokens": 8,
+            "prefix_groups": 2,
+            "shared_prefix_ratio": 0.75,
+            "slo_ttft_ms": 2000,
+            "slo_e2e_ms": 5000,
+        },
+        "timeline": {
+            "priming": 2,
+            "baseline": 3,
+            "episode": 2,
+            "min_recovery": 1,
+            "recovery_timeout": 15,
+            "final_recovery": 1,
+            "min_clean": 0.5,
+        },
+        # Holds of at least two scrape periods: a hold shorter than the
+        # scrape spacing can contain no gauge sample.
+        "thresholds": {
+            "window": 1,
+            "hold": 2.5,
+            "cadence_hold": 1,
+            "priming_window": 1,
+        },
+        "episodes": [
+            {"type": "N"},
+            {
+                "type": "T3b",
+                "dose": {"rate_per_second": 2, "input_tokens": 64, "output_tokens": 4},
+            },
+            {"type": "F4a", "dose": {"pulse_ms": 100, "period_ms": 400}},
+            {
+                "type": "F2",
+                "dose": {"concurrency": 4, "input_tokens": 256, "output_tokens": 64},
+            },
+        ],
+    }
+    path.write_text(json.dumps(plan))
+    return path
+
+
+def test_a_run_injects_its_plan_and_publishes_the_truth(tmp_path: Path) -> None:
+    hook = tmp_path / "hook"
+    arguments = [
+        "--step-seconds", "0.002",
+        "--decode-token-seconds", "0.0005",
+        "--num-gpu-blocks", "40",
+        "--max-num-seqs", "8",
+        "--hook-dir", str(hook),
+    ]  # fmt: skip
+    with FakeEngineProcess(arguments) as server:
+        code = main(
+            [
+                "inject",
+                "--plan", str(_plan(tmp_path / "plan.json")),
+                "--out", str(tmp_path / "runs"),
+                "--label", "q221-0123456789abcdef",
+                "--base-url", server.base_url,
+                "--model", "fake/qwen-0.5b",
+                "--reference-channel", str(hook),
+                "--target", f"engine_core={server.pid}",
+                "--", "--tokenizer", "none", "--system-sampler", "none",
+            ]  # fmt: skip
+        )
+    assert code == 0
+    run = tmp_path / "runs" / "q221-0123456789abcdef"
+    assert run.is_dir() and verify(run) == []
+    injections = {
+        i.episode_type: i for i in load_injections(run / "truth" / "injections.jsonl")
+    }
+    assert sorted(injections) == ["F2", "F4a", "N", "T3b"]
+    for injection in injections.values():
+        assert injection.times.priming_check == {
+            "passed": True,
+            "cached_fraction_median": pytest.approx(1.0),
+        }
+    stall = injections["F4a"]
+    assert stall.status == "valid", stall.validity
+    assert stall.injected["pulses"]
+    landings = {"in_schedule", "in_step", "between_steps"}
+    assert all(pulse["landed"] in landings for pulse in stall.injected["pulses"])
+    assert stall.times.effect_onset_ns == stall.times.action_onset_ns
+    assert injections["N"].status == "valid"
+    # T3b: the neighbor's unique prompts pull the engine-wide hit ratio down,
+    # read from the scraped prefix-cache counters, while the victim's own
+    # cached fraction holds.
+    twin = injections["T3b"]
+    assert twin.status == "valid", twin.validity
+    checks = {c["name"]: c for c in twin.validity.checks}
+    assert checks["engine_hit_ratio_fell"]["passed"] is True
+    assert not checks["engine_hit_ratio_fell"]["incomplete"]
+    # Its effect, the benign change, spans its whole action, as N's does.
+    times = twin.times
+    assert times.effect_onset_ns is not None and times.action_end_ns is not None
+    assert times.effect_end_ns is not None
+    assert times.effect_end_ns >= times.action_end_ns > times.effect_onset_ns
+    # Every label at an engine component names the engine #218 will name:
+    # the producer in the fake engine's hello, for L2.
+    (hello,) = [
+        json.loads(line)
+        for path in (run / "truth" / "reference" / "hook").rglob("*.jsonl*")
+        if "engine-" in str(path)
+        for line in path.read_text().splitlines()
+        if '"hello"' in line
+    ]
+    assert hello["producer"]
+    assert stall.expects[0].component == "engine_core"
+    assert stall.expects[0].engine == hello["producer"]
+    assert injections["F2"].expects[0].engine == hello["producer"]
+    # F2's neighbor preempts victim requests: the KV fault is realized.
+    kv = injections["F2"]
+    assert kv.status == "valid", kv.validity
+    (preempted,) = [c for c in kv.validity.checks if c["name"] == "victim_preempted"]
+    assert preempted["value"] > 0
+    assert (run / "run" / "victim.jsonl").exists()
+    assert (run / "truth" / "reference" / "scrapes.jsonl").exists()
+    assert (run / "probes" / "hook-firstseen.jsonl").exists()
+    # The record lag the hang check allowed was measured once the baseline
+    # ended (close-221-delta, N4), and is on record.
+    used = json.loads((run / "probes" / "record-lag.json").read_text())
+    assert used["measured_p99_ns"] is not None and used["lag_ns"] >= 1_000_000_000
+    # The run record: its label, its windows and the victim's clock, which
+    # every episode shares; the victim ran under the same label.
+    record = load_run(run / "truth" / "run.json")
+    assert record.run_id == "q221-0123456789abcdef"
+    assert record.clock_domain is not None
+    assert record.priming is not None and record.final_recovery is not None
+    assert record.measured.start_ns == record.priming.start_ns
+    assert record.final_recovery.end_ns == record.measured.end_ns
+    # close-221-delta, H4: run.json says how near the dose check each
+    # cadence series came, and each episode how long after its action its
+    # effect ended, so a late recovery just under the limit can be read.
+    dose = record.baseline_checks["dose_check"]
+    assert dose["limit_per_hold"] == 1.0
+    assert 0 <= dose["per_hold"]["busy step gaps"] < 1
+    p99 = dose["p99_s"]["busy step gaps"]
+    assert p99 is not None and dose["never_longer_s"]["busy step gaps"] >= 2 * p99
+    times = stall.times
+    assert times.effect_end_ns is not None and times.action_end_ns is not None
+    lateness = times.effect_end_ns - times.action_end_ns
+    assert stall.injected["recovery_lateness_ns"] == max(0, lateness)
+    for injection in injections.values():
+        assert injection.run_id == record.run_id
+        assert injection.clock_domain == record.clock_domain
+        assert [a["kind"].rsplit("_", 1)[1] for a in injection.actions] == [
+            "start",
+            "end",
+        ]
+    victim_records = read_inference_records(run / "run" / "victim.jsonl")
+    (artifact,) = [r for r in victim_records if r.get("event_type") == "infer.artifact"]
+    assert artifact["context"]["run_id"] == record.run_id
+    assert artifact["context"]["clock_domain"] == record.clock_domain
+    # The victim ended its measured window when the run was done, drained
+    # and completed: the diagnoser gets a whole artifact, not an
+    # interrupted one.
+    (measured,) = [
+        r
+        for r in victim_records
+        if r.get("event_type") == "infer.phase_window" and r["phase"] == "measured"
+    ]
+    assert measured["stopped_early"] is True
+    # The run's measured window ends where the victim's did, before its
+    # drain (Fable's A2 delta N5).
+    assert record.measured.end_ns == measured["window_ended_at_ns"]
+    sessions = [r for r in victim_records if r.get("event_type") == "infer.session"]
+    assert sessions[-1]["status"] == "completed"
+    assert "KeyboardInterrupt" not in (run / "probes" / "victim.log").read_text()
+    # The reference hook log is in the truth, beside the first-seen notes
+    # that cut it for the replay.
+    copied = [
+        line
+        for path in (run / "truth" / "reference" / "hook").rglob("*.jsonl*")
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+    noted = (run / "probes" / "hook-firstseen.jsonl").read_text().splitlines()
+    assert len(copied) >= len(noted) > 0
+
+
+def test_a_bad_plan_is_refused_before_anything_runs(tmp_path: Path) -> None:
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps({"format": "other"}))
+    command = [
+        sys.executable, "-m", "examples.qualification", "inject",
+        "--plan", str(plan), "--out", str(tmp_path), "--base-url", "http://127.0.0.1:9",
+        "--model", "m", "--reference-channel", str(tmp_path),
+    ]  # fmt: skip
+    finished = subprocess.run(
+        command, env=_environment(), capture_output=True, text=True
+    )
+    assert finished.returncode == 2
+    assert "format is not" in finished.stderr
+
+
+def test_a_target_replaced_since_the_run_began_is_never_pulsed(
+    tmp_path: Path,
+) -> None:
+    # The CLI binds each target to its start time at startup; an episode
+    # whose target exited, or whose pid now names another process, is not
+    # actuated, and nothing is signalled.
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.pulser import Target
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "F4a"}]})
+    stand_in = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        replaced = Target(
+            stand_in.pid, Target.of(stand_in.pid).start_time - 10, "engine_core"
+        )
+        server = Server("http://127.0.0.1:9", "m", tmp_path, {"engine_core": replaced})
+        run = InjectionRun(plan, RunDirectory(tmp_path / "runs", "q221-x"), server)
+        _actions, actuated, injected = run._pulse(plan.episodes[0])
+        assert not actuated
+        assert "exited or was replaced" in injected["error"]
+    finally:
+        stand_in.kill()
+        stand_in.wait()
+
+
+def _after_the_stop_is_confirmed(
+    monkeypatch: pytest.MonkeyPatch, act: Callable[[], None]
+) -> None:
+    """Run ``act`` in a thread once the pulser has confirmed its first stop.
+    Acting on the target's own STOPPED state raced the pulser's first read
+    (gate-221, F1 and F2: 4 runs in 30): the stop could end before the
+    pulser saw it."""
+    import threading
+
+    from examples.qualification import pulser as pulser_module
+
+    real = pulser_module.Pulser._confirm_stopped
+    confirmed = threading.Event()
+
+    def confirm(self: Any, stop_sent: int) -> int:
+        seen = real(self, stop_sent)
+        confirmed.set()
+        return seen
+
+    def wait_then_act() -> None:
+        if confirmed.wait(30):
+            act()
+
+    monkeypatch.setattr(pulser_module.Pulser, "_confirm_stopped", confirm)
+    threading.Thread(target=wait_then_act, daemon=True).start()
+
+
+def test_the_pulse_a_failure_cut_short_is_in_what_was_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Fable's and rev-220-a's second A2 deltas: the engine went through a
+    # stop that a failure cut short (here its process killed mid-pulse),
+    # but the truth listed completed pulses only.
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.pulser import PulseRefused, Target
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    dose = {"pulse_ms": 300, "period_ms": 800}
+    plan = parse_plan({**record, "episodes": [{"type": "F4a", "dose": dose}]})
+    loop = "import time\nwhile True:\n    time.sleep(0.01)\n"
+    stand_in = subprocess.Popen([sys.executable, "-c", loop], start_new_session=True)
+
+    def kill() -> None:
+        stand_in.kill()
+        stand_in.wait()
+
+    try:
+        target = Target.of(stand_in.pid, "engine_core")
+        server = Server("http://127.0.0.1:9", "m", tmp_path, {"engine_core": target})
+        run = InjectionRun(plan, RunDirectory(tmp_path / "runs", "q221-x"), server)
+        # Inside the first 300 ms pulse, once its stop is confirmed.
+        _after_the_stop_is_confirmed(monkeypatch, kill)
+        with pytest.raises(PulseRefused, match="^target_gone: .* exited during"):
+            run._pulse(plan.episodes[0])
+        done = run._done_so_far(plan.episodes[0])
+    finally:
+        kill()
+    (cut,) = done["pulses"]
+    assert cut["completed"] is False and cut["continue_sent_ns"] is None
+
+
+def test_a_pulse_continued_by_someone_else_leaves_the_episode_not_actuated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # rev-220-a's final A2 delta-2 note: nothing read continued_by_other.
+    # A pulse someone else continued wasn't the stop the dose asked for, so
+    # the episode is not actuated, with actuation interrupted_by_other (the
+    # lead's ruling), and its record names the pulse.
+    from types import SimpleNamespace
+    from typing import cast
+
+    from examples.qualification.inject import InjectionRun, Server, _actuation
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.pulser import Target
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    dose = {"pulse_ms": 300, "period_ms": 800}
+    plan = parse_plan({**record, "episodes": [{"type": "F4a", "dose": dose}]})
+    loop = "import time\nwhile True:\n    time.sleep(0.01)\n"
+    stand_in = subprocess.Popen([sys.executable, "-c", loop], start_new_session=True)
+
+    def continue_it() -> None:
+        os.kill(stand_in.pid, signal.SIGCONT)  # the operator's
+
+    try:
+        target = Target.of(stand_in.pid, "engine_core")
+        server = Server("http://127.0.0.1:9", "m", tmp_path, {"engine_core": target})
+        run = InjectionRun(plan, RunDirectory(tmp_path / "runs", "q221-y"), server)
+        _after_the_stop_is_confirmed(monkeypatch, continue_it)
+        _actions, actuated, injected = run._pulse(plan.episodes[0])
+    finally:
+        stand_in.kill()
+        stand_in.wait()
+    assert actuated is False
+    assert injected["interrupted_by_other"] == [0]
+    attempt = cast(Any, SimpleNamespace(actuated=actuated, injected=injected))
+    assert _actuation(attempt) == "interrupted_by_other"
+
+
+def test_a_pulse_continued_before_its_stop_was_seen_reads_interrupted_by_other(
+    tmp_path: Path,
+) -> None:
+    # gate-221, F2's product half: a pulse someone continued before the
+    # pulser saw its stop raised "did not stop", and the episode read as a
+    # failed actuation. It is named as continued by another now, and the
+    # episode's actuation is interrupted_by_other.
+    from types import SimpleNamespace
+    from typing import cast
+
+    from examples.qualification.inject import InjectionRun, Server, _actuation
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.pulser import ContinuedByOther
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "F4a"}]})
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-z"), Server("", "m", tmp_path, {})
+    )
+    cut = {"stop_sent_ns": 1, "stopped_ns": None, "completed": False}
+    run._pulser = cast(Any, SimpleNamespace(pulses=[], cut_short=cut))
+    error = ContinuedByOther("continued_by_other: pid 1 ran on after its SIGSTOP")
+    injected = run._failed(plan.episodes[0], error)
+    assert injected["interrupted_by_other"] == [0]
+    attempt = cast(Any, SimpleNamespace(actuated=False, injected=injected))
+    assert _actuation(attempt) == "interrupted_by_other"
+
+
+@pytest.mark.parametrize("hung", [True, False])
+def test_the_next_episode_waits_while_the_engine_looks_hung(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hung: bool
+) -> None:
+    # rev-220-b's delta-3 closure, G4: the recovery was found in an idle
+    # stretch, and START came at once, although a victim request sent at
+    # 99 s has had no step since (an engine hung with an open-loop victim).
+    # Now the decision reads the present, and a hung engine runs into the
+    # recovery timeout instead.
+    from examples.qualification import inject as module
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+    from stormlog.infer.qualify.recovery import (
+        START,
+        TIMEOUT,
+        Actions,
+        Baseline,
+        Signals,
+        Timing,
+    )
+
+    second = 1_000_000_000
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "F4a"}]})
+    now = [100 * second]
+
+    def clock() -> int:
+        now[0] += second // 4
+        return now[0]
+
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-z"), Server("", "m", tmp_path, {}),
+        clock=clock,
+    )  # fmt: skip
+    last_step = 99 * second if hung else 1000 * second
+    steps = [tick * 20_000_000 for tick in range(last_step // 20_000_000)]
+    signals = Signals(in_flight=[(0, 10**18)], step_starts=steps)
+    baseline = Baseline.measure(signals, 0, 45 * second)
+    monkeypatch.setattr(run, "_signals", lambda: signals)
+    monkeypatch.setattr(
+        run,
+        "_timing",
+        lambda *_args: Timing(90 * second, "test", 90 * second, 95 * second),
+    )
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    decision, _timing = run._recover(
+        plan.episodes[0], baseline, Actions(), 90 * second, 95 * second
+    )
+    assert decision == (TIMEOUT if hung else START)
+
+
+@pytest.mark.parametrize(
+    ("late_ms", "measured_ms", "hung", "decision"),
+    [
+        (15, 15, False, "start"),
+        (1500, 1500, False, "start"),
+        (1500, None, False, "timeout"),
+        (0, 60_000, True, "timeout"),
+    ],
+)
+def test_a_healthy_engine_whose_records_arrive_late_is_not_hung(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    late_ms: int,
+    measured_ms: int | None,
+    hung: bool,
+    decision: str,
+) -> None:
+    # Astra's closure of delta 3, H5: engine_stalled compared the gap open
+    # at the poll with twice the baseline's p99 (40 ms here), but the hook's
+    # records arrive after their steps start, so a healthy engine read as
+    # hung at most polls and every episode ran into the recovery timeout.
+    # The run allows at least a poll period, or the baseline's measured lag
+    # if longer; a lag past both still reads as a hang. Which it used, and
+    # why, is logged in probes/record-lag.json. close-221-delta, N3: a
+    # measured p99 of a minute let an engine hung since 80 s start the next
+    # episode; the allowance is capped at 10 s (a tenth of the 150 s
+    # timeout at most), and the hang times out.
+    from types import SimpleNamespace
+    from typing import cast
+
+    from examples.qualification import inject as module
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+    from stormlog.infer.qualify.recovery import Actions, Baseline, Signals, Timing
+
+    second, step = 1_000_000_000, 20_000_000
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    record["timeline"]["recovery_timeout"] = 150
+    plan = parse_plan({**record, "episodes": [{"type": "F4a"}]})
+    now = [100 * second]
+
+    def clock() -> int:
+        now[0] += second // 4
+        return now[0]
+
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-y"), Server("", "m", tmp_path, {}),
+        clock=clock,
+    )  # fmt: skip
+    run.directory.create()
+    lag = None if measured_ms is None else measured_ms * 1_000_000
+    stopped: list[bool] = []
+    run.channel = cast(
+        Any,
+        SimpleNamespace(
+            record_lag_ns=lambda *_: lag, stop_noting_lags=lambda: stopped.append(True)
+        ),
+    )
+    run._measure_record_lag(0, 45 * second)
+    # Measured once, the channel notes no more lags (close-221-final).
+    assert stopped == [True]
+    # The lag used, and where it came from, is on record.
+    used = json.loads((run.directory.probes / "record-lag.json").read_text())
+    assert used["measured_p99_ns"] == lag
+    assert used["cap_ns"] == 10 * second
+    assert used["lag_ns"] == min(max(second, lag or 0), 10 * second)
+    assert (
+        used["source"]
+        == {
+            15: "poll_period: longer than the measured lag",
+            1500: "measured",
+            60_000: "cap: the measured lag was longer",
+            None: "poll_period: no step record in the baseline to measure",
+        }[measured_ms]
+    )
+
+    def seen() -> Signals:
+        visible = now[0] - late_ms * 1_000_000
+        if hung:
+            visible = min(visible, 80 * second)
+        steps = list(range(0, visible + 1, step))
+        return Signals(in_flight=[(0, 10**18)], step_starts=steps)
+
+    baseline = Baseline.measure(seen(), 0, 45 * second)
+    monkeypatch.setattr(run, "_signals", seen)
+    monkeypatch.setattr(
+        run,
+        "_timing",
+        lambda *_args: Timing(90 * second, "test", 90 * second, 95 * second),
+    )
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    found, _timing = run._recover(
+        plan.episodes[0], baseline, Actions(), 90 * second, 95 * second
+    )
+    assert found == decision
+
+
+@pytest.mark.parametrize(("timeout_s", "cap_s"), [(150, 10), (30, 3), (5, 1)])
+def test_the_record_lag_cap_is_a_tenth_of_the_timeout_but_never_under_a_poll(
+    tmp_path: Path, timeout_s: int, cap_s: int
+) -> None:
+    # close-221-final's mutants: the cap is 10 s or a tenth of the recovery
+    # timeout, whichever is less, and never less than the poll period (1 s
+    # here), the least the run ever allows.
+    from types import SimpleNamespace
+    from typing import cast
+
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    second = 1_000_000_000
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "F4a"}]})
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-c"), Server("", "m", tmp_path, {})
+    )
+    run.thresholds = replace(run.thresholds, recovery_timeout_ns=timeout_s * second)
+    run.directory.create()
+    run.channel = cast(
+        Any,
+        SimpleNamespace(
+            record_lag_ns=lambda *_: 60 * second, stop_noting_lags=lambda: None
+        ),
+    )
+    run._measure_record_lag(0, 45 * second)
+    used = json.loads((run.directory.probes / "record-lag.json").read_text())
+    assert used["cap_ns"] == used["lag_ns"] == cap_s * second
+    assert used["source"] == "cap: the measured lag was longer"
+
+
+def test_a_recovery_that_can_never_hold_ends_the_episode_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # close-221-delta, H4: an engine refused by G0's dose check waited out
+    # the full recovery timeout (150 s) before its episode ended. Its
+    # recovery can never hold, so the decision is a timeout at once, with
+    # no poll waited.
+    from examples.qualification import inject as module
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+    from stormlog.infer.qualify.recovery import (
+        TIMEOUT,
+        Actions,
+        Baseline,
+        GapStats,
+        Signals,
+        Timing,
+    )
+
+    second = 1_000_000_000
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "F4a"}]})
+    now = [100 * second]
+
+    def clock() -> int:
+        now[0] += second // 4
+        return now[0]
+
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-x"), Server("", "m", tmp_path, {}),
+        clock=clock,
+    )  # fmt: skip
+    # 30 too-long gaps among 1,000 busy ones of 20 ms: 1.5 per 1 s hold.
+    steps = GapStats(count=1000, mean=0.02, p95=0.03, p99=0.03, too_long_count=30)
+    baseline = Baseline(
+        wait_p95=1.0, waiting_low=0.0, waiting_high=1.0, kv_max=0.5,
+        steps=steps, chunks=GapStats(), cached_median=1.0,
+    )  # fmt: skip
+    slept: list[float] = []
+    monkeypatch.setattr(run, "_signals", lambda: Signals(in_flight=[(0, 10**18)]))
+    monkeypatch.setattr(
+        run, "_timing", lambda *_args: Timing(90 * second, "test", None, None)
+    )
+    monkeypatch.setattr(module.time, "sleep", slept.append)
+    decision, _timing = run._recover(
+        plan.episodes[0], baseline, Actions(), 90 * second, 95 * second
+    )
+    assert (decision, slept) == (TIMEOUT, [])
+
+
+def test_the_baseline_is_measured_with_the_plans_thresholds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The run measured its baseline with the design's default thresholds,
+    # so a plan's long_gap_factor never reached which baseline gaps were
+    # long (the allowance) or too long (the dose check). Gaps of 20 ms with
+    # one in 100 of 50 ms: long at a factor of 2 (over 40 ms) are the 50 ms
+    # ones; at a factor of 3 (over 60 ms), none.
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+    from stormlog.infer.qualify.recovery import Signals
+
+    second, ms = 1_000_000_000, 1_000_000
+    gaps = [50 if index % 100 == 50 else 20 for index in range(2000)]
+    steps = [sum(gaps[:index]) * ms for index in range(len(gaps) + 1)]
+    signals = Signals(in_flight=[(0, 10**18)], step_starts=steps)
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    for factor, long in ((2.0, 20), (3.0, 0)):
+        thresholds = {**record["thresholds"], "long_gap_factor": factor}
+        plan = parse_plan({**record, "thresholds": thresholds})
+        run = InjectionRun(
+            plan,
+            RunDirectory(tmp_path / "runs", "q221-w"),
+            Server("", "m", tmp_path, {}),
+        )
+        monkeypatch.setattr(run, "_signals", lambda: signals)
+        assert run._measure_baseline(0, 45 * second).steps.long_count == long
+
+
+def test_an_episodes_pulses_cover_the_whole_episode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Codex on #310: the pulse count floored episode / period, so a 45 s
+    # episode at a 2 s period got 22 pulses, the last at 42 s, though one at
+    # 44 s fits; the action ended a period early. Every pulse that fits in
+    # the episode is sent.
+    from types import SimpleNamespace
+
+    from examples.qualification import inject
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.pulser import Target
+    from examples.qualification.run_dir import RunDirectory
+
+    counts: list[int] = []
+
+    class Pulser:
+        def __init__(self, _target: Any, max_pulse_seconds: float) -> None:
+            pass
+
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            pass
+
+        def run(self, _pulse: float, _period: float, count: int) -> list[Any]:
+            counts.append(count)
+            pulse = SimpleNamespace(stopped_ns=1, continue_sent_ns=2,
+                                    continued_by_other=False, to_record=dict)  # fmt: skip
+            return [pulse] * count
+
+    monkeypatch.setattr(inject, "Pulser", Pulser)
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    cases = (
+        (100, 2000, 45, 23),
+        (100, 2000, 10, 5),
+        (100, 500, 1, 2),
+        (100, 1100, 10, 10),
+    )
+    for pulse_ms, period_ms, episode, expected in cases:
+        record["timeline"]["episode"] = episode
+        dose = {"pulse_ms": pulse_ms, "period_ms": period_ms}
+        plan = parse_plan({**record, "episodes": [{"type": "F4a", "dose": dose}]})
+        target = Target.of(os.getpid(), "engine_core")
+        server = Server("", "m", tmp_path, {"engine_core": target})
+        run = InjectionRun(plan, RunDirectory(tmp_path / "runs", "q221-pc"), server)
+        _actions, actuated, _injected = run._pulse(plan.episodes[0])
+        assert (counts[-1], actuated) == (expected, True)
+
+
+def test_targets_are_bound_at_startup(tmp_path: Path) -> None:
+    from examples.qualification.__main__ import _targets
+
+    stand_in = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        bound = _targets(None, [f"sidecar={stand_in.pid}"])
+        assert bound["sidecar"].is_alive()
+    finally:
+        stand_in.kill()
+        stand_in.wait()
+    with pytest.raises(ValueError, match="sidecar="):
+        _targets(None, [f"sidecar={stand_in.pid}"])
+
+
+def test_queue_episodes_recover_end_to_end(tmp_path: Path) -> None:
+    # Fable's A2 deltas, N0: the e2e above has no queue episode, so a plan
+    # whose queue recovery could never hold passed CI. T1 and F1 with a
+    # baseline and hold long enough for the waits and the waiting gauge:
+    # each recovers, and F1's neighbor saturates the queue. 400 blocks keep
+    # F1's load from preempting the victim, which would make it invalid.
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    # A timeout well past the 6 s hold: on a loaded host the waits take
+    # longer to settle back into the baseline's band, and the test asks
+    # that they do, not how soon.
+    record["timeline"].update(baseline=7, recovery_timeout=60)
+    record["thresholds"]["hold"] = 6
+    shape = {"input_tokens": 128, "output_tokens": 16}
+    record["episodes"] = [
+        {"type": "T1", "dose": {"rate_per_second": 2, **shape}},
+        {"type": "F1", "dose": {"rate_per_second": 120, **shape}},
+    ]
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(record))
+    # 20 ms steps, so a victim's wait (admission to its first step, about
+    # half a step) is the engine's own time, not the host's. With 2 ms
+    # steps the baseline's waits were 0.5-2 ms, its 2x p99 ceiling 7-30 ms
+    # and its 1.25x mean bound a fraction of a millisecond: the host's
+    # scheduling delays under the full suite's load broke every hold for
+    # the 60 s timeout (2 of 3 full runs). Under 16 busy loops, two runs in
+    # four lost a third to nearly half of their steady 6 s windows to the
+    # mean bound, the ceiling or the exceedance count; at 20 ms none fails
+    # the mean or the ceiling, and 82-96% hold.
+    arguments = [
+        "--step-seconds", "0.02",
+        "--decode-token-seconds", "0.0005",
+        "--num-gpu-blocks", "400",
+        "--max-num-seqs", "8",
+        "--hook-dir", str(tmp_path / "hook"),
+    ]  # fmt: skip
+    with FakeEngineProcess(arguments) as server:
+        assert _inject(server, tmp_path, plan) == 0
+    run = tmp_path / "runs" / "q221-00000000000000bb"
+    assert verify(run) == []
+    twin, fault = load_injections(run / "truth" / "injections.jsonl")
+    for injection in (twin, fault):
+        assert injection.validity.actuation == "ok", injection.validity
+        assert injection.times.effect_end_ns is not None  # it recovered
+    assert fault.status == "valid", fault.validity
+    checks = {c["name"]: c["passed"] for c in fault.validity.checks}
+    assert checks == {"onset_reached": True, "no_victim_preemption": True}
+    # The twin is valid on a quiet host. On a loaded one (load average 20
+    # in the full suite) the victim's own waits can pass the baseline's p95
+    # for a window, and the harness rightly calls the twin not realized:
+    # its one check then fails, nothing else, and only just. The check's
+    # value, the highest window median over the p95, tells host noise from
+    # a twin that saturated the queue (F1's own waits read many times over).
+    if twin.status != "valid":
+        (check,) = twin.validity.checks
+        assert (check["name"], check["passed"]) == ("waits_within_baseline", False)
+        assert check["value"] is not None and check["value"] < 3, twin.validity
+
+
+def test_a_baseline_too_thin_to_recover_is_named_not_a_bare_timeout(
+    tmp_path: Path,
+) -> None:
+    # fable-design's A2 delta 2, N0: a run whose baseline was too thin for a
+    # queue rule timed out with only "recovery_timeout" in its truth. Here
+    # /metrics fails, so the baseline has no waiting count: T1 can never
+    # recover, its record says which series was too thin, and the N it
+    # skips says baseline_too_thin.
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    record["timeline"].update(baseline=7, recovery_timeout=4)
+    record["thresholds"]["hold"] = 6
+    record["episodes"] = [
+        {"type": "T1", "dose": {"rate_per_second": 2, "input_tokens": 128,
+                                "output_tokens": 16}},
+        {"type": "N"},
+    ]  # fmt: skip
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(record))
+    arguments = ["--step-seconds", "0.002", "--hook-dir", str(tmp_path / "hook")]
+    with FakeEngineProcess(arguments) as server:
+        controls = json.dumps({"metrics_mode": "fail"}).encode()
+        assert post(f"{server.base_url}/_fault/controls", controls)[0] == 200
+        _inject(server, tmp_path, plan)
+    run = tmp_path / "runs" / "q221-00000000000000bb"
+    assert verify(run) == []
+    twin, skipped = load_injections(run / "truth" / "injections.jsonl")
+    assert twin.injected["recovery_blocked"] == [
+        "baseline_too_thin: 0 waiting counts of the 5 a hold needs"
+    ]
+    assert skipped.injected["skipped"] == "baseline_too_thin"
+
+
+def test_the_dose_check_on_record_shows_a_slow_step_its_rate_cant() -> None:
+    # close-221-final: a slow step as common as one in a hundred is the p99
+    # itself, so the gaps too long for a hold are none and the rate reads 0.
+    # run.json gives each series' p99 and the longest gap a hold may hold, so
+    # the run shows it; and they come from the plan's thresholds.
+    from examples.qualification.inject import _baseline_checks
+    from stormlog.infer.qualify.recovery import Baseline, GapStats, Thresholds
+
+    slow = GapStats.of([0.005] * 97 + [0.25] * 3, 2.0, 0.06)
+    baseline = Baseline(0.1, 0.0, 1.0, 0.5, steps=slow, chunks=GapStats(),
+                        cached_median=1.0)  # fmt: skip
+    dose = _baseline_checks(baseline, Thresholds())["dose_check"]
+    assert dose["per_hold"] == {"busy step gaps": 0.0, "chunk gaps": None}
+    assert dose["p99_s"] == {"busy step gaps": 0.25, "chunk gaps": None}
+    assert dose["never_longer_s"] == {"busy step gaps": 0.5, "chunk gaps": None}
+    # The plan's thresholds, not the defaults: too few gaps for its minimum.
+    strict = replace(Thresholds(), min_cadence_samples=101)
+    dose = _baseline_checks(baseline, strict)["dose_check"]
+    assert dose["per_hold"]["busy step gaps"] is None
+    assert dose["p99_s"]["busy step gaps"] is None
+    # gate-221-final, H5: the p99, not the p99.9, and the longest gap at the
+    # plan's long-gap factor, not the default's.
+    tail = GapStats.of([0.005] * 990 + [0.02] * 9 + [0.3], 2.0, 0.06)
+    assert tail.p99 != tail.p999
+    baseline = replace(baseline, steps=tail)
+    dose = _baseline_checks(baseline, Thresholds())["dose_check"]
+    assert dose["p99_s"]["busy step gaps"] == tail.p99
+    wide = replace(Thresholds(), long_gap_factor=3.0)
+    dose = _baseline_checks(baseline, wide)["dose_check"]
+    longest = max(3.0 * tail.p99, min(3.0 * tail.p999, 0.06))
+    assert dose["never_longer_s"]["busy step gaps"] == pytest.approx(longest)
+    assert longest != max(2.0 * tail.p99, min(2.0 * tail.p999, 0.06))
+
+
+def test_an_effect_over_before_its_action_was_undone_is_not_late() -> None:
+    # close-221-final: lateness ran from the action's end as the harness
+    # records it, once a pulser is torn down or a neighbor drained, which
+    # the effect needn't outlast: F4a read -37 ms and F2 -569 ms. Such an
+    # effect wasn't late, so 0; one that never ended has none.
+    from examples.qualification.inject import _lateness
+    from stormlog.infer.qualify.recovery import Timing
+
+    second = 1_000_000_000
+    assert _lateness(Timing(1, "x", end_ns=10 * second - 37_000_000), 10 * second) == 0
+    assert _lateness(Timing(1, "x", end_ns=13 * second), 10 * second) == 3 * second
+    assert _lateness(Timing(1, "x"), 10 * second) is None
+
+
+def test_an_engine_whose_prefill_steps_outlast_a_dose_is_not_evaluable(
+    tmp_path: Path,
+) -> None:
+    # The lead's note on Astra's H4, end to end. A fake engine whose victim
+    # prefill steps take about 90 ms, past the 60 ms smallest dose, and come
+    # about once in 200 busy steps (0.5 a second, long outputs) fails G0's
+    # dose check: F4a can't recover, its record says dose_check_failed, the
+    # N it skips says so, and the scorer counts it as not evaluable. At its
+    # default prefill cost (about 2 ms a step) the engine passes the check:
+    # the first e2e's F4a is valid. (With prefill steps over 1% of the busy
+    # steps, twice the p99 is a prefill step and the check passes: the 2%
+    # residual the guide leaves to G0's step times.)
+    from stormlog.infer.qualify.ground_truth import load_run
+    from stormlog.infer.qualify.scoring import ScoreConfig, score_run
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    record["victim"].update(rate_per_second=0.5, output_tokens=512)
+    record["timeline"].update(baseline=15, recovery_timeout=10)
+    record["thresholds"]["cadence_hold"] = 4
+    record["episodes"] = [{"type": "F4a"}, {"type": "N"}]
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(record))
+    arguments = [
+        "--step-seconds", "0.002",
+        "--prefill-token-seconds", "0.004",
+        "--hook-dir", str(tmp_path / "hook"),
+    ]  # fmt: skip
+    with FakeEngineProcess(arguments) as server:
+        _inject(server, tmp_path, plan, "--target", f"engine_core={server.pid}")
+    run = tmp_path / "runs" / "q221-00000000000000bb"
+    assert verify(run) == []
+    stall, null = load_injections(run / "truth" / "injections.jsonl")
+    assert stall.validity.actuation == "ok"
+    (reason,) = stall.injected["recovery_blocked"]
+    assert reason.startswith("dose_check_failed: ") and "busy step gaps" in reason
+    assert stall.injected["recovery_lateness_ns"] is None
+    per_hold = load_run(run / "truth" / "run.json").baseline_checks["dose_check"]
+    assert per_hold["per_hold"]["busy step gaps"] >= 1
+    assert stall.status == "recovery_incomplete"
+    assert null.injected["skipped"] == "dose_check_failed"
+    nothing: dict[str, Any] = {"payload": {"findings_detail": {}, "coverage": {}}}
+    config = ScoreConfig(supported_types=frozenset({"F4a"}))
+    truth = load_run(run / "truth" / "run.json")
+    scored = score_run(truth, [stall, null], nothing, config)
+    assert scored.episodes[0].not_evaluable == "dose_check_failed"
+
+
+def _inject(server: FakeEngineProcess, tmp_path: Path, plan: Path, *extra: str) -> int:
+    return main(
+        [
+            "inject",
+            "--plan", str(plan),
+            "--out", str(tmp_path / "runs"),
+            "--label", "q221-00000000000000bb",
+            "--base-url", server.base_url,
+            "--model", "fake/qwen-0.5b",
+            "--reference-channel", str(tmp_path / "hook"),
+            *extra,
+            "--", "--tokenizer", "none", "--system-sampler", "none",
+        ]  # fmt: skip
+    )
+
+
+def _main_restoring_signals(
+    tmp_path: Path, label: str, base_url: str = "http://127.0.0.1:9"
+) -> int:
+    from examples.qualification import pulser
+
+    saved = {
+        s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    }
+    try:
+        return main(
+            [
+                "inject",
+                "--plan", str(_plan(tmp_path / "plan.json")),
+                "--out", str(tmp_path / "runs"),
+                "--label", label,
+                "--base-url", base_url,
+                "--model", "m",
+                "--reference-channel", str(tmp_path / "hook"),
+            ]  # fmt: skip
+        )
+    finally:
+        for saved_signum, handler in saved.items():
+            signal.signal(saved_signum, handler)
+        pulser._HANDLED.clear()
+
+
+def test_a_taken_label_exits_2_naming_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # fable-221-bisect, N5: a label already taken came out of inject as a
+    # FileExistsError traceback (exit 1). It is refused, by name.
+    from examples.qualification.run_dir import RunDirectory
+
+    RunDirectory(tmp_path / "runs", "q221-taken").create()
+    assert _main_restoring_signals(tmp_path, "q221-taken") == 2
+    assert "label q221-taken is taken" in capsys.readouterr().err
+
+
+def test_a_run_interrupted_before_it_published_says_nothing_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # fable-221-bisect, N5: a Ctrl+C before the run had a directory still
+    # printed "the run so far is published as ...".
+    from examples.qualification.run_dir import RunDirectory
+
+    def interrupted(self: RunDirectory) -> RunDirectory:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(RunDirectory, "create", interrupted)
+    assert _main_restoring_signals(tmp_path, "q221-early") == 130
+    printed = capsys.readouterr()
+    assert "published as" not in printed.out
+    assert "before the run had anything to publish" in printed.err
+    assert not (tmp_path / "runs" / "q221-early").exists()
+
+
+def _without_a_server(monkeypatch: pytest.MonkeyPatch, episodes: Any) -> None:
+    """Every run started from here has no channel, no poller work and no
+    victim, and runs ``episodes`` as its episodes."""
+    from examples.qualification.inject import InjectionRun
+
+    monkeypatch.setattr(InjectionRun, "_channel", lambda self: None)
+    monkeypatch.setattr(InjectionRun, "_poll_loop", lambda self: None)
+    monkeypatch.setattr(InjectionRun, "_start_victim", lambda self: None)
+    monkeypatch.setattr(InjectionRun, "_episodes", episodes)
+
+
+def test_a_run_interrupted_after_it_published_names_its_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # gate-221-final, H5: nothing pinned that the run keeps what it
+    # published, so a Ctrl+C after the publish could say nothing was.
+    def interrupted(self: Any, victim: Any, progress: Any) -> None:
+        raise KeyboardInterrupt
+
+    _without_a_server(monkeypatch, interrupted)
+    assert _main_restoring_signals(tmp_path, "q221-late") == 130
+    published = tmp_path / "runs" / "q221-late"
+    assert f"published as {published}" in capsys.readouterr().out
+    assert verify(published) == []
+
+
+def test_a_lock_a_signal_left_held_never_stops_the_run_publishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gate-221-final, H1: on 3.14 a Ctrl+C handled just as `with
+    # self._lock:` takes the lock can leave it held, and the finish then
+    # waited for it in _close_channel until a fourth Ctrl+C left the run
+    # unpublished. The run's own thread can take its lock again.
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    plan = parse_plan(json.loads(_plan(tmp_path / "plan.json").read_text()))
+    probe = InjectionRun(
+        plan, RunDirectory(tmp_path / "probe", "q221-lp"), Server("", "m", tmp_path, {})
+    )
+    probe._lock.acquire()
+    # Checked first, so the run below can't hang on its own lock.
+    assert probe._lock.acquire(blocking=False)
+
+    def interrupted_holding_the_lock(self: Any, victim: Any, progress: Any) -> None:
+        self._lock.acquire()  # taken, and its release never set up
+        raise KeyboardInterrupt
+
+    _without_a_server(monkeypatch, interrupted_holding_the_lock)
+    assert _main_restoring_signals(tmp_path, "q221-ll") == 130
+    assert verify(tmp_path / "runs" / "q221-ll") == []
+
+
+def test_a_poller_left_waiting_is_abandoned_and_the_run_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # gate-221-final, H1: with the run's lock left held, the poller waits on
+    # it for good; the finish gives it POLLER_JOIN_SECONDS, then publishes
+    # without it. That is in the run, in probes/harness-notes.jsonl, and in
+    # the command's output, never silent.
+    from examples.qualification import inject
+    from examples.qualification.inject import InjectionRun
+
+    monkeypatch.setattr(inject, "POLLER_JOIN_SECONDS", 0.2)
+    runs: list[Any] = []
+
+    def interrupted_holding_the_lock(self: Any, victim: Any, progress: Any) -> None:
+        runs.append(self)
+        self._lock.acquire()  # left held, as a Ctrl+C there leaves it on 3.14
+        time.sleep(self.poll_seconds * 1.5)  # the poller now waits on it
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(InjectionRun, "_channel", lambda self: None)
+    monkeypatch.setattr(InjectionRun, "_start_victim", lambda self: None)
+    monkeypatch.setattr(InjectionRun, "_episodes", interrupted_holding_the_lock)
+    try:
+        assert _main_restoring_signals(tmp_path, "q221-ab") == 130
+    finally:
+        for run in runs:
+            run._lock.release()  # lets the abandoned poller see the run closed
+    note = "the reference poller did not stop; abandoned after 0.2 s"
+    assert f"Warning: {note}" in capsys.readouterr().err
+    published = tmp_path / "runs" / "q221-ab"
+    assert verify(published) == []
+    notes = (published / "probes" / "harness-notes.jsonl").read_text().splitlines()
+    assert [json.loads(line)["note"] for line in notes] == [note]
+
+
+def test_a_signal_during_a_long_wait_is_handled_within_a_slice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gate-221-final, H2's product side: CPython runs a Python signal
+    # handler only between bytecodes, so a signal that lands just before a
+    # sleep's syscall begins is handled when that sleep returns. The run's
+    # waits last minutes; each sleep is a slice, so such a Ctrl+C waits for
+    # one slice. The stand-in sleep below handles the signal as it returns.
+    import threading
+
+    from examples.qualification import inject
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    plan = parse_plan(json.loads(_plan(tmp_path / "plan.json").read_text()))
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-sl"), Server("", "m", tmp_path, {})
+    )
+    ten_minutes = 600 * 1_000_000_000
+    asked: list[float] = []
+
+    def handled_as_it_returns(seconds: float) -> None:
+        asked.append(seconds)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(inject.time, "sleep", handled_as_it_returns)
+        with pytest.raises(KeyboardInterrupt):
+            run._sleep_until(run.clock() + ten_minutes)
+        with pytest.raises(KeyboardInterrupt):
+            run._sleep_for(600)
+    # One slice of 0.1 s each (gate-221-close, J3: against the length itself,
+    # not the constant that sets it).
+    assert asked == [0.1, 0.1]
+    # And a real SIGINT during a long wait ends it at once.
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    main = threading.main_thread().ident or 0
+    timer = threading.Timer(0.2, signal.pthread_kill, (main, signal.SIGINT))
+    started = time.monotonic()
+    try:
+        timer.start()
+        with pytest.raises(KeyboardInterrupt):
+            run._sleep_for(600)
+    finally:
+        timer.cancel()
+        signal.signal(signal.SIGINT, previous)
+    assert time.monotonic() - started < 2
+
+
+def test_a_wait_for_a_length_of_time_is_timed_on_the_monotonic_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gate-221-close, J2: an episode's wait and the final recovery's were
+    # timed on the run's clock, the wall clock, so a step of it stretched or
+    # cut them. Here the wall clock steps an hour ahead at every slice; the
+    # wait still sleeps its whole second, a slice at a time.
+    from examples.qualification import inject
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    wall = [0]
+    monotonic = [100.0]
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        monotonic[0] += seconds
+        wall[0] += 3600 * 1_000_000_000
+
+    plan = parse_plan(json.loads(_plan(tmp_path / "plan.json").read_text()))
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-mo"), Server("", "m", tmp_path, {}),
+        clock=lambda: wall[0],
+    )  # fmt: skip
+    with monkeypatch.context() as patched:
+        patched.setattr(inject.time, "sleep", sleep)
+        patched.setattr(inject.time, "monotonic", lambda: monotonic[0])
+        run._sleep_for(1.0)
+    assert sum(slept) == pytest.approx(1.0)
+    assert max(slept) <= 0.1 + 1e-9
+
+
+def test_closing_the_channel_reads_the_hook_once_more(tmp_path: Path) -> None:
+    # gate-221-close, J4: the finish copied the hook log without reading it,
+    # so a record written after the poller's last poll was in the copy and
+    # never in the run's signals. Closing the channel reads it once more.
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    part = tmp_path / "hook" / "host-a" / "engine-1" / "000001.jsonl.part"
+    part.parent.mkdir(parents=True)
+
+    def step(start: int) -> str:
+        record = {"epoch": "engine-1", "seq": start, "kind": "scheduled",
+                  "start_wall_ns": start}  # fmt: skip
+        return json.dumps(record) + "\n"
+
+    part.write_text(step(1))
+    plan = parse_plan(json.loads(_plan(tmp_path / "plan.json").read_text()))
+    directory = RunDirectory(tmp_path / "runs", "q221-cl").create()
+    run = InjectionRun(plan, directory, Server("", "m", tmp_path / "hook", {}))
+    channel = run.channel = run._channel()
+    assert run._signals().step_starts == [1]
+    with part.open("a") as handle:
+        handle.write(step(2))
+    run._close_channel()
+    assert channel.signals().step_starts == [1, 2]
+
+
+def test_a_base_url_ending_in_v1_is_taken_as_the_servers_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gate-221-final, H3: #213 hands out {base_url} as ...:8000/v1, and
+    # inject added /v1/chat/completions to it: every victim request was a
+    # 404. A trailing /v1 is dropped, as #213's own health check drops it.
+    from examples.qualification.__main__ import server_root
+
+    assert server_root("http://127.0.0.1:8000/v1/") == "http://127.0.0.1:8000"
+    assert server_root("http://127.0.0.1:8000/") == "http://127.0.0.1:8000"
+    seen: list[str] = []
+
+    def episodes(self: Any, victim: Any, progress: Any) -> None:
+        seen.append(self.server.base_url)
+
+    _without_a_server(monkeypatch, episodes)
+    _main_restoring_signals(tmp_path, "q221-v1", base_url="http://127.0.0.1:9/v1")
+    assert seen == ["http://127.0.0.1:9"]
+
+
+def test_a_run_none_of_whose_episodes_can_be_judged_exits_4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # gate-221-final, H3: with its priming check failed, so that every
+    # episode is a protocol failure, inject exited 0 and run_plan recorded
+    # the run as completed. It is published, and exits 4 (GATE_FAILED).
+    _without_a_server(monkeypatch, lambda self, victim, progress: None)
+    assert _main_restoring_signals(tmp_path, "q221-pf") == 4
+    assert "no episode can be judged: priming_check_failed" in capsys.readouterr().err
+    assert verify(tmp_path / "runs" / "q221-pf") == []
+
+
+def _short_plan(path: Path, *episodes: dict[str, Any]) -> Path:
+    record = json.loads(_plan(path).read_text())
+    record["episodes"] = list(episodes)
+    path.write_text(json.dumps(record))
+    return path
+
+
+def test_the_skipped_episodes_name_why_recovery_could_never_hold() -> None:
+    # Astra's closure of delta 3, H4: a cadence episode refused by G0's dose
+    # check also times out. The episodes it skips say so, not that the
+    # baseline was too thin.
+    from types import SimpleNamespace
+
+    from examples.qualification.inject import _timeout_reason
+
+    def skipped_after(injected: dict[str, Any]) -> str:
+        attempt = SimpleNamespace(injected=injected)
+        return _timeout_reason(cast(Any, SimpleNamespace(attempts=[attempt])))
+
+    dose = "dose_check_failed: 16 of 2021 busy step gaps in the baseline are ..."
+    thin = "baseline_too_thin: 3 waiting counts of the 5 a hold needs"
+    assert skipped_after({"recovery_blocked": [dose]}) == "dose_check_failed"
+    assert skipped_after({"recovery_blocked": [thin, dose]}) == "baseline_too_thin"
+    assert skipped_after({}) == "recovery_timeout"
+
+
+def test_an_actuation_that_raises_is_published_not_actuated(tmp_path: Path) -> None:
+    # F4a's target can't be stopped (a zombie): the pulser raises, the
+    # episode is not actuated with the error kept, and the N before it and
+    # the run are still published.
+    zombie = subprocess.Popen([sys.executable, "-c", "pass"])
+    zombie_pid = zombie.pid
+    arguments = ["--step-seconds", "0.002", "--hook-dir", str(tmp_path / "hook")]
+    try:
+        assert wait_until(
+            lambda: psutil.Process(zombie_pid).status() == psutil.STATUS_ZOMBIE
+        )
+        plan = _short_plan(tmp_path / "plan.json", {"type": "N"}, {"type": "F4a"})
+        with FakeEngineProcess(arguments) as server:
+            code = _inject(
+                server, tmp_path, plan, "--target", f"engine_core={zombie_pid}"
+            )
+    finally:
+        zombie.wait()
+    assert code == 0
+    run = tmp_path / "runs" / "q221-00000000000000bb"
+    assert verify(run) == []
+    by_type = {
+        i.episode_type: i for i in load_injections(run / "truth" / "injections.jsonl")
+    }
+    assert by_type["N"].status == "valid"
+    assert by_type["F4a"].status == "not_actuated"
+    assert "did not stop" in by_type["F4a"].injected["error"]
+
+
+def test_a_run_that_fails_is_published_with_its_reason(tmp_path: Path) -> None:
+    # The victim exits before measuring (an argument infer profile refuses):
+    # nothing is attempted, and the run says why, exit code 1.
+    arguments = ["--step-seconds", "0.002", "--hook-dir", str(tmp_path / "hook")]
+    plan = _short_plan(tmp_path / "plan.json", {"type": "N"})
+    with FakeEngineProcess(arguments) as server:
+        code = main(
+            [
+                "inject", "--plan", str(plan), "--out", str(tmp_path / "runs"),
+                "--label", "q221-00000000000000cc", "--base-url", server.base_url,
+                "--model", "fake/qwen-0.5b", "--reference-channel", str(tmp_path / "hook"),
+                "--", "--no-such-flag",
+            ]  # fmt: skip
+        )
+    assert code == 1
+    run = tmp_path / "runs" / "q221-00000000000000cc"
+    assert verify(run) == []
+    record = load_run(run / "truth" / "run.json")
+    assert record.protocol_failure is not None
+    assert "before measuring" in record.protocol_failure
+    # No victim clock: the run's times are the harness's, on this host.
+    assert record.clock_domain == _harness_clock()
+    (skipped,) = load_injections(run / "truth" / "injections.jsonl")
+    assert skipped.status in ("protocol_failure", "not_actuated")
+
+
+class _FlakyChannel:
+    """A reference channel whose first poll raises."""
+
+    def __init__(self) -> None:
+        self.polls = 0
+
+    def poll(self, *, scrape: bool = True) -> None:
+        self.polls += 1
+        if self.polls == 1:
+            raise OSError("disk full")
+
+
+def test_the_reference_poller_survives_a_failed_poll_and_stops_cleanly(
+    tmp_path: Path,
+) -> None:
+    import threading
+    import time
+
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    directory = RunDirectory(tmp_path / "runs", "q221-x").create()
+    run = InjectionRun(
+        parse_plan(record), directory, Server("http://127.0.0.1:9", "m", tmp_path),
+        poll_seconds=0.01,
+    )  # fmt: skip
+    channel = _FlakyChannel()
+    run.channel = channel  # type: ignore[assignment]
+    poller = threading.Thread(target=run._poll_loop, daemon=True)
+    poller.start()
+    assert wait_until(lambda: channel.polls >= 3)
+    errors = (directory.probes / "poll-errors.jsonl").read_text()
+    assert "disk full" in errors
+    # Closing waits out any poll in progress; none follows it.
+    run._close_channel()
+    polls = channel.polls
+    time.sleep(0.1)
+    assert channel.polls == polls
+    poller.join(timeout=5)
+    assert not poller.is_alive()
+
+
+def test_neighbor_names_say_nothing_about_the_episode_order() -> None:
+    # The hook log a diagnosed configuration may import carries each
+    # neighbor's request IDs; they mustn't give away which episode ran when
+    # (C.4's blinding).
+    from examples.qualification.inject import neighbor_name
+
+    names = [neighbor_name("q221-0123456789abcdef", index) for index in range(3)]
+    assert len(set(names)) == 3
+    assert all(re.fullmatch(r"[0-9a-f]{12}", name) for name in names)
+    assert names == [neighbor_name("q221-0123456789abcdef", i) for i in range(3)]
+    assert neighbor_name("q221-fedcba9876543210", 0) != names[0]
+
+
+def test_an_api_server_pulse_that_stalled_the_engine_adds_that_mechanism(
+    tmp_path: Path,
+) -> None:
+    # The fake engine is one process, so pulsing its API server stops its
+    # engine too. A.4: F4b stays realized, its realized set adds
+    # host_stall@engine_core, and the label allows it.
+    arguments = ["--step-seconds", "0.002", "--hook-dir", str(tmp_path / "hook")]
+    plan = _short_plan(
+        tmp_path / "plan.json",
+        {"type": "F4b", "dose": {"pulse_ms": 100, "period_ms": 400}},
+    )
+    with FakeEngineProcess(arguments) as server:
+        code = _inject(server, tmp_path, plan, "--target", f"api_server={server.pid}")
+    assert code == 0
+    run = tmp_path / "runs" / "q221-00000000000000bb"
+    (f4b,) = load_injections(run / "truth" / "injections.jsonl")
+    assert f4b.validity.realization == "realized", f4b.validity
+    assert "host_stall@engine_core" in f4b.validity.realized_mechanisms
+    assert ("host_stall", "engine_core") in {(a.kind, a.component) for a in f4b.allows}
+
+
+def test_a_capture_records_its_start_for_i1s_realization(tmp_path: Path) -> None:
+    # A1 realizes I1 only when the capture both started and stopped.
+    from examples.qualification.fake_engine import FakeEngine, FakeEngineConfig
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan(
+        {**record, "episodes": [{"type": "I1", "dose": {"seconds": 0.1}}]}
+    )
+    config = FakeEngineConfig(step_seconds=0.001, trace_dir=tmp_path / "traces")
+    with FakeEngine(config) as engine:
+        server = Server(engine.base_url, engine.config.model, tmp_path)
+        run = InjectionRun(plan, RunDirectory(tmp_path / "runs", "q221-y"), server)
+        actions, actuated, _injected = run._capture(plan.episodes[0])
+    assert actuated
+    assert actions.capture_started_ns is not None
+    assert actions.stop_requested_ns is not None
+    assert actions.capture_started_ns <= actions.stop_requested_ns
+
+
+def test_a_twin_without_its_scraped_ratio_is_published_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A server whose /metrics has no prefix-cache counters: T3b's hit-ratio
+    # check has nothing to judge. The twin stays valid on its victim check,
+    # and its observation says the reference channel was incomplete.
+    from examples.qualification import reference
+
+    scrape = reference.scrape_metrics
+
+    def without_counters(url: str, **kwargs: Any) -> reference.Scrape:
+        taken = scrape(url, **kwargs)
+        return replace(taken, prefix_queries=None, prefix_hits=None)
+
+    monkeypatch.setattr(reference, "scrape_metrics", without_counters)
+    dose = {"rate_per_second": 2, "input_tokens": 64, "output_tokens": 4}
+    plan = _short_plan(tmp_path / "plan.json", {"type": "T3b", "dose": dose})
+    with FakeEngineProcess(
+        ["--step-seconds", "0.002", "--hook-dir", str(tmp_path / "hook")]
+    ) as server:
+        assert _inject(server, tmp_path, plan) == 0
+    run = tmp_path / "runs" / "q221-00000000000000bb"
+    (twin,) = load_injections(run / "truth" / "injections.jsonl")
+    assert twin.status == "valid", twin.validity
+    assert twin.validity.observation == "incomplete"
+    (ratio,) = [c for c in twin.validity.checks if c["name"] == "engine_hit_ratio_fell"]
+    assert ratio["incomplete"] is True
+
+
+def _signal_mid_first_episode(
+    tmp_path: Path, episodes: list[dict[str, Any]], signum: int, *targets: str
+) -> Path:
+    """Run ``episodes`` (6 s each) in their own session, signal the
+    harness's process group inside the first one, and return the run."""
+    hook = tmp_path / "hook"
+    plan = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan["timeline"]["episode"] = 6
+    plan["episodes"] = episodes
+    (tmp_path / "plan.json").write_text(json.dumps(plan))
+    label = new_label()  # a session's own, as concurrent sessions may run
+    engine = ["--step-seconds", "0.002", "--hook-dir", str(hook)]
+    with FakeEngineProcess(engine) as server:
+        # fmt: off
+        argv = [
+            "inject", "--plan", str(tmp_path / "plan.json"),
+            "--out", str(tmp_path / "runs"), "--label", label,
+            "--base-url", server.base_url, "--model", "fake/qwen-0.5b",
+            "--reference-channel", str(hook),
+            *(arg.format(pid=server.pid) for arg in targets),
+            "--", "--tokenizer", "none", "--system-sampler", "none",
+        ]
+        # fmt: on
+        harness = subprocess.Popen(
+            [sys.executable, "-m", "examples.qualification", *argv],
+            env=_environment(),
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        markers = tmp_path / "runs" / f".{label}.partial" / "probes" / "markers"
+        assert wait_until(lambda: any(markers.glob("*measured_started*")), timeout=60)
+        # Past priming and the baseline (5 s): inside the first episode.
+        time.sleep(7)
+        os.killpg(harness.pid, signum)
+        assert harness.wait(timeout=120) == 128 + signum
+        assert psutil.Process(server.pid).status() != psutil.STATUS_STOPPED
+    return tmp_path / "runs" / label
+
+
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGHUP])
+def test_a_run_without_pulses_signalled_mid_run_is_published(
+    tmp_path: Path, signum: int
+) -> None:
+    # A job's SIGTERM or an ssh disconnect's SIGHUP during [N, N], before
+    # any pulser exists: the run is still published, interrupted, with the
+    # episode it attempted. The handlers used to come only with a pulser.
+    run = _signal_mid_first_episode(tmp_path, [{"type": "N"}, {"type": "N"}], signum)
+    assert verify(run) == []
+    assert load_run(run / "truth" / "run.json").protocol_failure == "interrupted"
+    attempted = load_injections(run / "truth" / "injections.jsonl")
+    assert [injection.episode_type for injection in attempted] == ["N", "N"]
+
+
+def _victim_of(harness: subprocess.Popen[bytes]) -> psutil.Process:
+    """The harness's own victim process, from its process tree: found by
+    label across the machine, a victim of the same case run elsewhere (the
+    other interpreter's suite, at once) read as one left behind."""
+    (victim,) = [
+        child
+        for child in psutil.Process(harness.pid).children(recursive=True)
+        if "examples.qualification.victim" in " ".join(child.cmdline())
+    ]
+    return victim
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        (signal.SIGTERM, signal.SIGTERM),
+        (signal.SIGTERM, signal.SIGINT),
+        # rev-220-a's final note: a job runner's SIGHUP, and an operator's
+        # second Ctrl+C, pinned as well.
+        (signal.SIGHUP, signal.SIGHUP),
+        (signal.SIGINT, signal.SIGINT),
+    ],
+    ids=["term-term", "term-int", "hup-hup", "int-int"],
+)
+def test_a_second_signal_while_the_run_finishes_still_publishes_it(
+    tmp_path: Path, first: int, second: int
+) -> None:
+    # rev-220-a's second A2 delta, D1: SIGTERM to the harness alone, then
+    # another signal while it waited for its victim to drain. The second
+    # one ended the harness there: no truth, the run left in .partial and
+    # the victim still loading the engine. Now the second signal cuts the
+    # drain short, and the run is published before the harness exits.
+    hook = tmp_path / "hook"
+    plan = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan["timeline"]["episode"] = 6
+    plan["episodes"] = [{"type": "N"}, {"type": "N"}]
+    (tmp_path / "plan.json").write_text(json.dumps(plan))
+    # Each run its own label (gate-221, E2): fixed per case, two pytest
+    # sessions at once ran the same labels side by side.
+    label = new_label()
+    engine = ["--step-seconds", "0.002", "--hook-dir", str(hook)]
+    victim: psutil.Process | None = None
+    try:
+        with FakeEngineProcess(engine) as server:
+            # fmt: off
+            argv = [
+                "inject", "--plan", str(tmp_path / "plan.json"),
+                "--out", str(tmp_path / "runs"), "--label", label,
+                "--base-url", server.base_url, "--model", "fake/qwen-0.5b",
+                "--reference-channel", str(hook),
+                "--", "--tokenizer", "none", "--system-sampler", "none",
+            ]
+            # fmt: on
+            harness = subprocess.Popen(
+                [sys.executable, "-m", "examples.qualification", *argv],
+                env=_environment(),
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            partial = tmp_path / "runs" / f".{label}.partial"
+            markers = partial / "probes" / "markers"
+            assert wait_until(
+                lambda: any(markers.glob("*measured_started*")), timeout=60
+            )
+            victim = _victim_of(harness)
+            time.sleep(7)  # inside the first episode
+            # A held engine: the victim's requests sent from now on can't
+            # finish (about ten in the next second), so its drain lasts as
+            # long as a real victim's long outputs would.
+            assert post(f"{server.base_url}/_fault/pause?target=engine")[0] == 200
+            time.sleep(1)
+            os.kill(harness.pid, first)  # the harness alone
+            time.sleep(1)
+            assert harness.poll() is None  # still waiting for the victim
+            os.kill(harness.pid, second)
+            code = harness.wait(timeout=120)
+            # close-221-delta, N8: the harness's own victim, by its pid and
+            # start time; matched by label across the machine, the same
+            # case's victim in another suite running at once was "left".
+            left = victim.is_running()
+            post(f"{server.base_url}/_fault/resume?target=engine")
+    finally:
+        if victim is not None and victim.is_running():
+            victim.kill()
+    assert code == 128 + first  # it exits as the first signal would have
+    assert not left
+    run = tmp_path / "runs" / label
+    assert not partial.exists() and verify(run) == []
+    assert load_run(run / "truth" / "run.json").protocol_failure == "interrupted"
+
+
+def test_a_third_signal_is_not_held() -> None:
+    # rev-220-b's delta-3 closure, G5: once the second signal had killed the
+    # victim, every further one was only noted, so a publish that hung (a
+    # full disk) could be ended only by SIGKILL. The third goes to the
+    # handler held before, as if nothing had been held.
+    from examples.qualification.inject import _HeldSignals
+
+    seen: list[int] = []
+    previous = signal.signal(signal.SIGHUP, lambda signum, _frame: seen.append(signum))
+    try:
+        with _HeldSignals() as held:
+            held.holding = True
+            signal.raise_signal(signal.SIGHUP)
+            signal.raise_signal(signal.SIGHUP)
+            assert (held.received, seen) == ([signal.SIGHUP] * 2, [])
+            signal.raise_signal(signal.SIGHUP)
+            assert seen == [signal.SIGHUP]
+            assert not held.installed
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+
+def test_a_signal_ignored_before_the_run_stays_ignored() -> None:
+    # close-221-delta, N6: _pass_on's SIG_IGN branch was unpinned. A signal
+    # the process ignored before the run is ignored while it is passed on:
+    # it neither ends the run nor turns holding on, and the holder stays.
+    from examples.qualification.inject import _HeldSignals
+
+    previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    try:
+        with _HeldSignals() as held:
+            signal.raise_signal(signal.SIGHUP)
+            assert (held.holding, held.received, held.installed) == (False, [], True)
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+
+def test_a_holder_cut_short_while_installing_installs_the_rest_next_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # close-221-delta, N1: a signal between two installs left __enter__
+    # with SIGTERM held and the rest not; the finish's entry then returned
+    # at once (something was installed), so a Ctrl+C during the publish
+    # was not held. Entering again installs what isn't yet.
+    from examples.qualification import inject as module
+
+    real = signal.signal
+    saved = {signum: signal.getsignal(signum) for signum in module._HeldSignals.SIGNALS}
+    cut = [True]
+
+    def cut_after_sigterm(signum: int, handler: Any) -> Any:
+        if signum == signal.SIGHUP and cut[0]:
+            cut[0] = False
+            raise KeyboardInterrupt  # a Ctrl+C between two installs
+        return real(signum, handler)
+
+    monkeypatch.setattr(module.signal, "signal", cut_after_sigterm)
+    held = module._HeldSignals()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            held.__enter__()
+        assert signal.getsignal(signal.SIGINT) is saved[signal.SIGINT]
+        held.__enter__()
+        assert all(signal.getsignal(s) == held._note for s in held.SIGNALS)
+        held.__exit__()
+        assert {s: signal.getsignal(s) for s in saved} == saved
+    finally:
+        for signum, handler in saved.items():
+            real(signum, handler)
+
+
+def test_a_signal_while_the_run_sets_up_still_publishes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # close-221-delta, N1's pre-existing half: a signal after the run's
+    # directory was made but before its try (the plan written, the channel
+    # and poller starting) left the run in .partial. The set-up is inside
+    # the try now: the run is published, interrupted, with every episode
+    # skipped, and the interruption goes on.
+    from examples.qualification import pulser
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "N"}]})
+    directory = RunDirectory(tmp_path / "runs", "q221-s")
+    run = InjectionRun(plan, directory, Server("", "m", tmp_path, {}))
+
+    def interrupted() -> None:
+        raise KeyboardInterrupt  # a Ctrl+C as the channel starts
+
+    saved = {
+        s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    }
+    monkeypatch.setattr(run, "_channel", interrupted)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run.execute()
+    finally:
+        for saved_signum, handler in saved.items():
+            signal.signal(saved_signum, handler)
+        pulser._HANDLED.clear()
+    assert not directory.partial.exists() and verify(directory.final) == []
+    assert load_run(directory.final / "truth" / "run.json").protocol_failure == (
+        "interrupted"
+    )
+    (skipped,) = load_injections(directory.final / "truth" / "injections.jsonl")
+    assert skipped.injected["skipped"] == "run_ended"
+
+
+def _set_up_run(tmp_path: Path, label: str) -> Any:
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "N"}]})
+    directory = RunDirectory(tmp_path / "runs", label)
+    return InjectionRun(plan, directory, Server("", "m", tmp_path, {}))
+
+
+def _execute_restoring_signals(run: Any) -> None:
+    from examples.qualification import pulser
+
+    saved = {
+        s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    }
+    try:
+        run.execute()
+    finally:
+        for saved_signum, handler in saved.items():
+            signal.signal(saved_signum, handler)
+        pulser._HANDLED.clear()
+
+
+def _files(directory: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(directory).as_posix(): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("taken_by", ["published", "partial"])
+def test_a_taken_label_is_refused_and_left_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, taken_by: str
+) -> None:
+    # close-221-final, the P2: with the set-up inside the run's try, a
+    # label already taken made create() fail as the run's own failure, and
+    # the finish then published anyway: over a published run, its digest
+    # was rewritten so it no longer verified; over a crashed run's
+    # .partial, that partial was published as a valid run. The label is
+    # checked before anything starts, and neither is touched: no handler is
+    # installed, not even the pulser's (fable-221-bisect, N6).
+    from examples.qualification import inject
+    from examples.qualification.run_dir import RunDirectory
+
+    run = _set_up_run(tmp_path, "q221-dup")
+    earlier = RunDirectory(run.directory.root, "q221-dup").create()
+    (earlier.run / "victim.jsonl").write_text('{"event_type": "infer.request"}\n')
+    if taken_by == "published":
+        earlier.publish()
+    taken = earlier.final if taken_by == "published" else earlier.partial
+    before = _files(taken)
+    beside = sorted(path.name for path in run.directory.root.iterdir())
+    terminations: list[bool] = []
+    monkeypatch.setattr(inject, "handle_termination", lambda: terminations.append(True))
+    handlers = {s: signal.getsignal(s) for s in _HELD}
+    with pytest.raises(FileExistsError):
+        _execute_restoring_signals(run)
+    assert terminations == [] and {s: signal.getsignal(s) for s in _HELD} == handlers
+    assert _files(taken) == before
+    assert sorted(path.name for path in run.directory.root.iterdir()) == beside
+    if taken_by == "published":
+        assert verify(taken) == []
+
+
+def test_an_interruption_before_the_run_has_a_directory_publishes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # close-221-final's mutants: a run interrupted before its directory
+    # was made has nothing to publish, and makes nothing.
+    from examples.qualification.run_dir import RunDirectory
+
+    def interrupted(self: RunDirectory) -> RunDirectory:
+        raise KeyboardInterrupt
+
+    run = _set_up_run(tmp_path, "q221-n")
+    monkeypatch.setattr(RunDirectory, "create", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _execute_restoring_signals(run)
+    assert not run.directory.partial.exists() and not run.directory.final.exists()
+
+
+@pytest.mark.parametrize("claimed", [False, True])
+def test_a_run_interrupted_as_it_claims_its_label_publishes_only_its_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, claimed: bool
+) -> None:
+    # close-221-final: only a partial directory carrying the run's nonce
+    # is published. Interrupted just before the rename that claims the
+    # label, a run leaves nothing under it; just after, its directory is
+    # whole, and published, interrupted.
+    from examples.qualification import run_dir
+
+    real = run_dir._claim
+
+    def interrupted(staging: Path, partial: Path) -> None:
+        if claimed:
+            real(staging, partial)
+        raise KeyboardInterrupt
+
+    run = _set_up_run(tmp_path, "q221-l")
+    monkeypatch.setattr(run_dir, "_claim", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _execute_restoring_signals(run)
+    root, final = run.directory.root, run.directory.final
+    if not claimed:
+        assert list(root.iterdir()) == []
+        return
+    assert sorted(path.name for path in root.iterdir()) == ["q221-l", "q221-l.sha256"]
+    assert verify(final) == []
+    assert all((final / name).is_dir() for name in ("run", "truth", "probes"))
+    run_record = load_run(final / "truth" / "run.json")
+    assert run_record.protocol_failure == "interrupted"
+
+
+@pytest.mark.parametrize("winner", ["claimed", "published"])
+def test_two_runs_given_one_label_never_publish_into_each_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, winner: str
+) -> None:
+    # close-221-final: another run took the label between this run's check
+    # and its claim, so its create() failed inside the try, and the finish
+    # published the other's partial directory, or rewrote the published
+    # run's digest. Only a directory with this run's nonce is published:
+    # the loser publishes nothing and leaves the winner's as it was.
+    from examples.qualification import inject
+    from examples.qualification.run_dir import RunDirectory
+
+    loser = _set_up_run(tmp_path, "q221-race")
+    winning = RunDirectory(loser.directory.root, "q221-race")
+
+    def the_other_run_claims_first() -> None:  # just after the check
+        winning.create()
+        (winning.run / "victim.jsonl").write_text('{"event_type": "infer.request"}\n')
+        if winner == "published":
+            winning.publish()
+
+    monkeypatch.setattr(inject, "handle_termination", the_other_run_claims_first)
+    with pytest.raises(FileExistsError):
+        _execute_restoring_signals(loser)
+    if winner == "claimed":
+        assert winning.owned() and not loser.directory.owned()
+        assert set(_files(winning.partial)) == {".owner", "run/victim.jsonl"}
+        winning.publish()
+    assert verify(winning.final) == []
+    names = sorted(path.name for path in loser.directory.root.iterdir())
+    assert names == ["q221-race", "q221-race.sha256"]
+
+
+def test_the_poller_starts_with_the_runs_signals_blocked() -> None:
+    # close-221-final: a Ctrl+C handled inside Thread.start broke it: it
+    # came out as RuntimeError('release unlocked lock'), a run failure that
+    # lost the Ctrl+C, or left the poller started but unjoinable and the
+    # run in .partial. The poller starts with the three signals blocked;
+    # one sent meanwhile is handled once start has returned.
+    import threading
+
+    from examples.qualification.inject import _start_unsignalled
+
+    masks: list[set[int]] = []
+
+    class Poller(threading.Thread):
+        def start(self) -> None:
+            masks.append(signal.pthread_sigmask(signal.SIG_BLOCK, []))
+            # A Ctrl+C sent during start, then a check point inside it.
+            signal.pthread_kill(threading.main_thread().ident or 0, signal.SIGINT)
+            time.sleep(0.01)
+            super().start()
+
+    def interrupt(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGINT, interrupt)
+    poller = Poller(target=lambda: None)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            _start_unsignalled(poller)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    poller.join(timeout=10)
+    assert poller.ident is not None and not poller.is_alive()
+    assert set(_HELD) <= masks[0]
+    assert not set(_HELD) & signal.pthread_sigmask(signal.SIG_BLOCK, [])
+
+
+_HELD = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+def test_a_signal_during_the_runs_poll_waits_for_the_poll(tmp_path: Path) -> None:
+    # The run's own poll (from _signals) applies what it read whole: a Ctrl+C
+    # sent mid-poll is handled once the poll is done, so none lands inside a
+    # record's apply, which the next poll would then apply again.
+    import threading
+    from types import SimpleNamespace
+
+    run = _set_up_run(tmp_path, "q221-sp")
+    done: list[bool] = []
+
+    def poll(scrape: bool) -> None:
+        signal.pthread_kill(threading.main_thread().ident or 0, signal.SIGINT)
+        time.sleep(0.05)  # where the handler would run, were it not blocked
+        done.append(True)
+
+    run.channel = cast(Any, SimpleNamespace(poll=poll, signals=lambda: None))
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run._signals()
+    finally:
+        signal.signal(signal.SIGINT, previous)
+    assert done == [True]
+
+
+def test_the_pulse_someone_else_continued_is_named_by_its_place(
+    tmp_path: Path,
+) -> None:
+    # gate-221-bisect, G3: a continue before the stop was seen ends the
+    # episode at its pulse in progress, the last on record, so that is the
+    # one interrupted_by_other names, not the first.
+    from types import SimpleNamespace
+
+    from examples.qualification.pulser import ContinuedByOther
+
+    run = _set_up_run(tmp_path, "q221-ibo")
+    completed = SimpleNamespace(to_record=lambda: {"completed": True})
+    run._pulser = cast(
+        Any,
+        SimpleNamespace(pulses=[completed, completed], cut_short={"completed": False}),
+    )
+    error = ContinuedByOther("continued_by_other: pid 1 ran on after its SIGSTOP")
+    injected = run._failed(run.plan.episodes[0], error)
+    assert len(injected["pulses"]) == 3
+    assert injected["interrupted_by_other"] == [2]
+
+
+def test_a_signal_as_the_mask_is_blocked_leaves_nothing_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # gate-221-bisect, G1: the block sat before the try, and CPython runs a
+    # handler as pthread_sigmask returns, so a Ctrl+C there left the three
+    # signals blocked in the main thread for the rest of the process: later
+    # signals stayed pending, and every child inherited the block.
+    import threading
+
+    from examples.qualification import inject
+
+    real = signal.pthread_sigmask
+
+    def handled_as_it_returns(how: int, mask: Any) -> Any:
+        before = real(how, mask)
+        if how == signal.SIG_BLOCK and set(mask) == set(_HELD):
+            raise KeyboardInterrupt  # the Ctrl+C, handled as the block returns
+        return before
+
+    monkeypatch.setattr(inject.signal, "pthread_sigmask", handled_as_it_returns)
+    thread = threading.Thread(target=lambda: None, daemon=True)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            inject._start_unsignalled(thread)
+        leaked = real(signal.SIG_BLOCK, []) & set(_HELD)
+    finally:
+        real(signal.SIG_UNBLOCK, _HELD)
+    assert not leaked
+
+
+def test_the_run_starts_its_poller_with_its_signals_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gate-221-bisect, G3: the poller's start went through
+    # _start_unsignalled, but nothing said so; poller.start() passed.
+    from examples.qualification import inject
+
+    started: list[str] = []
+    real = inject._start_unsignalled
+
+    def recorded(thread: Any) -> None:
+        started.append(thread.name)
+        real(thread)
+
+    def no_victim() -> Any:
+        raise RuntimeError("no victim here")
+
+    run = _set_up_run(tmp_path, "q221-po")
+    run._channel = lambda: None
+    run._poll_loop = lambda: None
+    run._start_victim = no_victim
+    monkeypatch.setattr(inject, "_start_unsignalled", recorded)
+    _execute_restoring_signals(run)
+    assert started == ["reference"] and run.failure.startswith("run_failed")
+
+
+def test_each_neighbor_starts_with_the_runs_signals_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gate-221-bisect, G2: a Ctrl+C inside a neighbor's Thread.start came out
+    # as RuntimeError('release unlocked lock'), a failed actuation, and the
+    # run went on. The neighbor's thread starts as the poller's does.
+    from types import SimpleNamespace
+
+    from examples.qualification import inject
+    from examples.qualification.neighbor import Actuation
+    from examples.qualification.plan import parse_plan
+
+    launched: list[Any] = []
+
+    class Neighbor:
+        external_prefix = "n"
+
+        def __init__(self, **_: Any) -> None:
+            pass
+
+        def start(self, launch: Any) -> None:
+            launched.append(launch)
+
+        def join(self) -> bool:
+            return True
+
+        def actuation(self) -> Actuation:
+            return Actuation(True, 0, 0, 0, None, None, None)
+
+    plan = parse_plan(json.loads(_plan(tmp_path / "plan.json").read_text()))
+    (f2,) = [episode for episode in plan.episodes if episode.type == "F2"]
+    run = _set_up_run(tmp_path, "q221-nb")
+    run.directory.create()
+    view = SimpleNamespace(first_admission=lambda _prefix: None)
+    run.channel = cast(Any, SimpleNamespace(view=view))
+    monkeypatch.setattr(inject, "Neighbor", Neighbor)
+    run._neighbor(0, f2)
+    assert launched == [inject._start_unsignalled]
+
+
+@pytest.mark.parametrize("cut", ["after_its_claim", "as_it_gives_the_claim_up"])
+def test_a_run_that_claims_a_label_just_published_never_touches_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cut: str
+) -> None:
+    # gate-221-bisect, G3: run A publishes between run B's checks and its
+    # claim, so B's claim succeeds (the partial name is free again), and B
+    # is interrupted before create() gives the label up. B's finish then
+    # met only publish()'s check that the run isn't published already:
+    # without it, B rewrote A's digest and A no longer verified.
+    import shutil
+
+    from examples.qualification import run_dir
+    from examples.qualification.run_dir import RunDirectory
+
+    root = tmp_path / "runs"
+    b = _set_up_run(tmp_path, "q221-p")
+    b._channel = lambda: None
+    b._poll_loop = lambda: None
+    b._start_victim = lambda: None
+    a = RunDirectory(root, "q221-p")
+    real_claim, real_rmtree = run_dir._claim, shutil.rmtree
+
+    def claim(staging: Path, partial: Path) -> None:
+        if staging.name.endswith(f".{a.owner}.new"):
+            return real_claim(staging, partial)  # A's own
+        a.create()
+        (a.run / "victim.jsonl").write_text('{"who": "A"}\n')
+        a.publish()  # the partial directory's name is free again
+        real_claim(staging, partial)
+        if cut == "after_its_claim":
+            raise KeyboardInterrupt
+        return None
+
+    def rmtree(path: Any, *args: Any, **kwargs: Any) -> None:
+        if cut == "as_it_gives_the_claim_up" and Path(path) == b.directory.partial:
+            for child in sorted(Path(path).rglob("*"), reverse=True):
+                if child.name != ".owner":  # cut short before .owner
+                    child.rmdir() if child.is_dir() else child.unlink()
+            raise KeyboardInterrupt
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(run_dir, "_claim", claim)
+    monkeypatch.setattr(run_dir.shutil, "rmtree", rmtree)
+    with pytest.raises((KeyboardInterrupt, OSError)):
+        _execute_restoring_signals(b)
+    assert verify(a.final) == []
+    assert (a.final / "run" / "victim.jsonl").read_text() == '{"who": "A"}\n'
+
+
+def test_a_signal_before_holding_is_passed_on() -> None:
+    # Installed for the whole run, the handlers act as the ones they
+    # replaced until the run's end sets holding: mid-run, a signal still
+    # ends the run (and the run is published on the way out).
+    from examples.qualification.inject import _HeldSignals
+
+    seen: list[int] = []
+    previous = signal.signal(signal.SIGHUP, lambda signum, _frame: seen.append(signum))
+    try:
+        with _HeldSignals() as held:
+            signal.raise_signal(signal.SIGHUP)
+            assert (held.received, seen) == ([], [signal.SIGHUP])
+            with pytest.raises(KeyboardInterrupt):
+                signal.raise_signal(signal.SIGINT)
+            assert held.installed
+    finally:
+        signal.signal(signal.SIGHUP, previous)
+
+
+def test_a_signal_handled_as_the_holder_installs_is_passed_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # close-221-final, 2: a signal handled just as signal.signal installed
+    # the note-taker, before what it replaced was kept, found nothing to
+    # pass on to, and was held for the whole run. The replaced handler is
+    # kept first, so a Ctrl+C there ends the run as Python's own would.
+    from examples.qualification import inject as module
+
+    real = signal.signal
+    saved = {signum: signal.getsignal(signum) for signum in module._HeldSignals.SIGNALS}
+    holder = module._HeldSignals()
+
+    def handled_as_it_returns(signum: int, handler: Any) -> Any:
+        before = real(signum, handler)
+        if signum == signal.SIGINT and handler == holder._note:
+            handler(signum, None)  # handled before __enter__ goes on
+        return before
+
+    monkeypatch.setattr(module.signal, "signal", handled_as_it_returns)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            holder.__enter__()
+        assert holder.received == []
+    finally:
+        for signum, handler in saved.items():
+            real(signum, handler)
+
+
+def test_a_handler_installed_from_c_is_restored_as_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # G5: signal.signal returns None for a handler installed from C, and
+    # __exit__ skipped it, leaving the note-taker installed for good.
+    from examples.qualification import inject as module
+
+    real, real_get = signal.signal, signal.getsignal
+    saved: dict[int, Any] = {
+        signum: signal.getsignal(signum) for signum in module._HeldSignals.SIGNALS
+    }
+
+    def from_c(signum: int, handler: Any) -> Any:
+        before = real(signum, handler)
+        return None if signum == signal.SIGHUP and handler != signal.SIG_DFL else before
+
+    def read_from_c(signum: int) -> Any:
+        return None if signum == signal.SIGHUP else saved[signum]
+
+    monkeypatch.setattr(module.signal, "signal", from_c)
+    monkeypatch.setattr(module.signal, "getsignal", read_from_c)
+    try:
+        with module._HeldSignals():
+            pass
+        assert real_get(signal.SIGHUP) == signal.SIG_DFL
+    finally:
+        for signum, handler in saved.items():
+            real(signum, handler)
+
+
+def test_the_run_holds_signals_before_it_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # G5: on the normal path a signal that landed between the episodes'
+    # end and _finish holding them raised out of execute() with nothing
+    # published. Signals are now held inside the try, before _finish runs.
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "N"}]})
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-w"), Server("", "m", tmp_path, {})
+    )
+    holding: list[bool] = []
+
+    def finish(victim: Any, poller: Any, progress: Any, held: Any) -> tuple[Path, None]:
+        holding.append(held.holding)
+        held.__exit__()
+        return tmp_path, None
+
+    monkeypatch.setattr(run, "_channel", lambda: None)
+    monkeypatch.setattr(run, "_poll_loop", lambda: None)
+    monkeypatch.setattr(run, "_start_victim", lambda: None)
+    monkeypatch.setattr(run, "_episodes", lambda victim, progress: None)
+    monkeypatch.setattr(run, "_finish", finish)
+    run.execute()
+    assert holding == [True]
+
+
+@pytest.mark.parametrize("first", ["run_failure", "keyboard_interrupt"])
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_a_signal_on_the_way_to_the_finish_still_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str, signum: int
+) -> None:
+    # Astra's closure of delta 3, H6: after the run's own failure, or a
+    # first Ctrl+C, signals were held only once _finish entered them, so a
+    # signal landing in between (a double Ctrl+C) raised out of execute()
+    # with nothing published. It lands here at _finish's entry, the last
+    # moment of that window: the run is still published, then ends as the
+    # first cause, or the held signal, says.
+    from examples.qualification import pulser
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "N"}]})
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-v"), Server("", "m", tmp_path, {})
+    )
+    published: list[bool] = []
+
+    def finish(victim: Any, poller: Any, progress: Any, held: Any) -> Any:
+        signal.raise_signal(signum)
+        with held:
+            published.append(True)
+        return tmp_path, held.received[0] if held.received else None
+
+    def episodes(victim: Any, progress: Any) -> None:
+        if first == "run_failure":
+            raise RuntimeError("engine died")
+        raise KeyboardInterrupt
+
+    saved = {
+        s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    }
+    monkeypatch.setattr(run, "_channel", lambda: None)
+    monkeypatch.setattr(run, "_poll_loop", lambda: None)
+    monkeypatch.setattr(run, "_start_victim", lambda: None)
+    monkeypatch.setattr(run, "_episodes", episodes)
+    monkeypatch.setattr(run, "_finish", finish)
+    expected = {
+        "keyboard_interrupt": KeyboardInterrupt,
+        "run_failure": KeyboardInterrupt if signum == signal.SIGINT else SystemExit,
+    }[first]
+    try:
+        with pytest.raises(expected):
+            run.execute()
+    finally:
+        for saved_signum, handler in saved.items():
+            signal.signal(saved_signum, handler)
+        pulser._HANDLED.clear()
+    assert published == [True]
+
+
+@pytest.mark.parametrize("first", ["run_failure", "keyboard_interrupt"])
+@pytest.mark.parametrize("signum", [signal.SIGTERM, signal.SIGINT])
+def test_a_signal_at_the_last_check_before_the_runs_except_still_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str, signum: int
+) -> None:
+    # The lead's proof for Astra's H6: the run's end is raised from deep in
+    # the episodes, and a signal is made pending in the last __exit__ the
+    # unwind runs before execute's except block, the last place CPython can
+    # run a handler before it (from 3.11; see execute). After a failure the
+    # signal raises into the except and the run is published interrupted;
+    # after a first Ctrl+C it is held, the first goes on, and the run is
+    # published. Run on 3.11 and 3.12 as well as 3.10.
+    from examples.qualification import pulser
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "N"}]})
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-u"), Server("", "m", tmp_path, {})
+    )
+    seen: dict[str, Any] = {}
+
+    class LastExit:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, *_exc: object) -> None:
+            signal.raise_signal(signum)
+
+    def deep(depth: int) -> None:
+        if depth:
+            deep(depth - 1)
+        elif first == "run_failure":
+            raise RuntimeError("engine died")
+        else:
+            signal.raise_signal(signal.SIGINT)  # a first Ctrl+C, deep in the run
+
+    def episodes(victim: Any, progress: Any) -> None:
+        with LastExit():
+            deep(8)
+
+    def finish(victim: Any, poller: Any, progress: Any, held: Any) -> Any:
+        with held:
+            seen.update(failure=progress.failure, received=list(held.received))
+        return tmp_path, None
+
+    saved = {
+        s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    }
+    monkeypatch.setattr(run, "_channel", lambda: None)
+    monkeypatch.setattr(run, "_poll_loop", lambda: None)
+    monkeypatch.setattr(run, "_start_victim", lambda: None)
+    monkeypatch.setattr(run, "_episodes", episodes)
+    monkeypatch.setattr(run, "_finish", finish)
+    held_first = first == "keyboard_interrupt"
+    raised = KeyboardInterrupt if held_first or signum == signal.SIGINT else SystemExit
+    try:
+        with pytest.raises(raised):
+            run.execute()
+    finally:
+        for saved_signum, handler in saved.items():
+            signal.signal(saved_signum, handler)
+        pulser._HANDLED.clear()
+    assert seen["failure"] == "interrupted"
+    assert seen["received"] == ([signum] if held_first else [])
+
+
+# Instructions that run no Python code and don't check for pending signals
+# (POP_TOP drops the caught exception, which the handler still holds;
+# NOT_TAKEN, from 3.14, only marks a branch not taken, for sys.monitoring;
+# LOAD_COMMON_CONSTANT, from 3.15, only loads an interpreter constant).
+_NO_HANDLER_RUNS = {
+    "PUSH_EXC_INFO", "LOAD_GLOBAL", "CHECK_EXC_MATCH", "POP_JUMP_IF_FALSE",
+    "POP_JUMP_FORWARD_IF_FALSE", "POP_TOP", "STORE_FAST", "LOAD_CONST",
+    "LOAD_FAST", "STORE_ATTR", "NOP", "CACHE", "NOT_TAKEN", "LOAD_COMMON_CONSTANT",
+}  # fmt: skip
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="3.10 checks for signals entering an except"
+)
+def test_no_signal_handler_can_run_between_the_runs_except_and_holding() -> None:
+    # The other half of H6's proof: from each of execute's except clauses'
+    # first instruction to its store of ``holding``, the bytecode holds
+    # nothing CPython checks for pending signals at (no call, no backward
+    # jump, no RESUME), and the store itself runs no Python code (no
+    # __setattr__, no descriptor). A signal is handled before an except,
+    # and raises into it, or after the store, and is held.
+    import dis
+
+    from examples.qualification.inject import InjectionRun, _HeldSignals
+
+    code = list(dis.get_instructions(InjectionRun.execute))
+    handlers = []
+    for entry, ins in enumerate(code):
+        if ins.opname != "PUSH_EXC_INFO":
+            continue
+        store = next(
+            index
+            for index in range(entry, len(code))
+            if code[index].opname == "STORE_ATTR" and code[index].argval == "holding"
+        )
+        names = [c.opname for c in code[entry : store + 1]]
+        if "CHECK_EXC_MATCH" in names:
+            handlers.append(names)
+    assert len(handlers) == 2  # the run's except, and the one around it
+    for names in handlers:
+        assert set(names) <= _NO_HANDLER_RUNS, names
+    assert _HeldSignals.__setattr__ is object.__setattr__
+    assert "holding" not in vars(_HeldSignals)
+
+
+def _fail_with_signals_pending(*signums: int) -> None:
+    """Unblock queued signals and raise TypeError from one C call.
+
+    Queue on the main thread while blocked, then restore its mask through
+    PyDLL (which keeps the GIL) with the C builtin pow as errcheck. No
+    nested ctypes call can handle the first signal before queuing the
+    second. CPython runs their handlers at its next checks, which on 3.10
+    include the entry to an except block.
+    """
+    import ctypes
+    import threading
+
+    libc = ctypes.PyDLL(None)
+    # Opaque, aligned storage: sigset_t is 128 bytes on Linux and 4 on macOS.
+    saved_mask = (ctypes.c_uint64 * 16)()
+    change_mask: Any = libc.pthread_sigmask
+    change_mask.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+    change_mask.restype = ctypes.c_int
+    assert change_mask(signal.SIG_SETMASK, None, saved_mask) == 0
+    change_mask.errcheck = pow
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, signums)
+    try:
+        for signum in signums:
+            signal.pthread_kill(threading.get_ident(), signum)
+    except BaseException:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+        raise
+    # This C call restores the mask before pow raises. A Python finally
+    # here would itself provide a signal checkpoint before execute's except.
+    change_mask(signal.SIG_SETMASK, saved_mask, None)
+
+
+@pytest.mark.parametrize(
+    "pending", [(signal.SIGINT,), (signal.SIGINT, signal.SIGTERM)], ids=["one", "two"]
+)
+def test_a_run_that_fails_with_signals_pending_is_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pending: tuple[int, ...]
+) -> None:
+    # The lead's 3.10 question on H6: the run fails in a C call with SIGINT
+    # (and SIGTERM) left pending. On 3.10, CPython runs the first handler
+    # as the run's except is entered, so the KeyboardInterrupt skipped it
+    # and left the run unpublished; it now lands in the except around it,
+    # and the second signal, handled as that one is entered, is held. From
+    # 3.11 both are handled after the except has set holding, and held.
+    from examples.qualification import pulser
+    from examples.qualification.inject import InjectionRun, Server
+    from examples.qualification.plan import parse_plan
+    from examples.qualification.run_dir import RunDirectory
+
+    record = json.loads(_plan(tmp_path / "plan.json").read_text())
+    plan = parse_plan({**record, "episodes": [{"type": "N"}]})
+    run = InjectionRun(
+        plan, RunDirectory(tmp_path / "runs", "q221-t"), Server("", "m", tmp_path, {})
+    )
+    seen: dict[str, Any] = {}
+
+    def finish(victim: Any, poller: Any, progress: Any, held: Any) -> Any:
+        with held:
+            seen.update(failure=progress.failure, received=list(held.received))
+        return tmp_path, held.received[0] if held.received else None
+
+    saved = {
+        s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    }
+    monkeypatch.setattr(run, "_channel", lambda: None)
+    monkeypatch.setattr(run, "_poll_loop", lambda: None)
+    monkeypatch.setattr(run, "_start_victim", lambda: None)
+    monkeypatch.setattr(
+        run, "_episodes", lambda victim, progress: _fail_with_signals_pending(*pending)
+    )
+    monkeypatch.setattr(run, "_finish", finish)
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run.execute()
+    finally:
+        for saved_signum, handler in saved.items():
+            signal.signal(saved_signum, handler)
+        # If restoring the mask had failed, the signals would stay blocked and
+        # later signal tests would hang instead of failing.
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, pending)
+        pulser._HANDLED.clear()
+    if sys.version_info < (3, 11):
+        assert seen == {"failure": "interrupted", "received": list(pending[1:])}
+    else:
+        assert seen["failure"].startswith("run_failed: TypeError")
+        assert seen["received"] == list(pending)
+
+
+def test_an_episode_interrupted_mid_pulse_records_its_pulses(tmp_path: Path) -> None:
+    # SIGTERM during F4a's pulses: the engine was stopped several times, so
+    # the truth says so, with each completed pulse, and that it was cut
+    # short. The next episode is skipped because the run ended.
+    episodes: list[dict[str, Any]] = [
+        {"type": "F4a", "dose": {"pulse_ms": 100, "period_ms": 400}},
+        {"type": "N"},
+    ]
+    run = _signal_mid_first_episode(
+        tmp_path, episodes, signal.SIGTERM, "--target", "engine_core={pid}"
+    )
+    assert verify(run) == []
+    stall, null = load_injections(run / "truth" / "injections.jsonl")
+    assert stall.status == "not_actuated"
+    assert stall.validity.actuation == "interrupted"
+    assert stall.injected["interrupted"] is True
+    assert len(stall.injected["pulses"]) >= 1
+    # Fable's lens-a closure, K5: an interrupted episode's pulses say where
+    # they landed in the step loop, as a whole episode's do.
+    assert all("landed" in pulse for pulse in stall.injected["pulses"])
+    assert null.injected == {"method": "none", "skipped": "run_ended"}
+
+
+def test_pulses_delivered_before_a_failing_one_are_on_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Fable's A2 delta N6: pulse 3 of 5 fails to confirm its stop; the two
+    # real stops before it are in the hook log, and now in the truth too,
+    # beside the error.
+    from examples.qualification import pulser as pulser_module
+
+    real_pulse = pulser_module.Pulser.pulse
+    calls = [0]
+
+    def third_fails(self: Any, seconds: float, **kwargs: Any) -> Any:
+        calls[0] += 1
+        if calls[0] == 3:
+            raise pulser_module.PulseRefused("did not stop within 1 s")
+        return real_pulse(self, seconds, **kwargs)
+
+    monkeypatch.setattr(pulser_module.Pulser, "pulse", third_fails)
+    dose = {"pulse_ms": 100, "period_ms": 400}
+    plan = _short_plan(tmp_path / "plan.json", {"type": "F4a", "dose": dose})
+    engine = ["--step-seconds", "0.002", "--hook-dir", str(tmp_path / "hook")]
+    with FakeEngineProcess(engine) as server:
+        assert (
+            _inject(server, tmp_path, plan, "--target", f"engine_core={server.pid}")
+            == 0
+        )
+    run = tmp_path / "runs" / "q221-00000000000000bb"
+    (stall,) = load_injections(run / "truth" / "injections.jsonl")
+    assert stall.status == "not_actuated"
+    assert "did not stop" in stall.injected["error"]
+    assert len(stall.injected["pulses"]) == 2
+    assert all("landed" in pulse for pulse in stall.injected["pulses"])
+
+
+def test_the_victim_clock_comes_from_its_artifact_identity(tmp_path: Path) -> None:
+    # A domain from before boot IDs were part of it keeps the boot in the
+    # artifact's metadata. A compact file's context definition, the first row
+    # with a context, has no metadata, so the records must be expanded first.
+    context = CorrelationContext(
+        run_id="run", session_id="session", producer_id="client", source="test",
+        clock_domain="host-a/unix_epoch_ns", clock_kind="wall",
+        collection_mode="active", provenance="observed", host="host-a",
+    )  # fmt: skip
+    identity = ArtifactIdentityEvent(
+        context=context,
+        event_id="artifact",
+        artifact_kind="inference_jsonl",
+        created_at_ns=1,
+        metadata={"boot_id": "boot-1"},
+    )
+    path = tmp_path / "victim.jsonl"
+    with JsonlEventWriter(path) as writer:
+        writer.append(identity.to_record())
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write('{"event_type": "infer.req')  # a line still being written
+    records = _complete_records(path)
+    assert [r["event_type"] for r in records] == ["infer.artifact"]
+    assert _victim_clock(records) == "host-a/boot-1/unix_epoch_ns"

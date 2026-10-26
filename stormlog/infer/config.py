@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .arrivals import BURST, CLOSED, RATE_MODES, REPLAY, ArrivalSpec, ArrivalTrace
 from .cache_state import RESET_RETRY_SECONDS, UNSPECIFIED
+from .engine_adapters import TASK_PATHS, get_adapter
+from .export_config import ExportConfig
 from .prompts import REPEAT, PromptSpec
 
 if TYPE_CHECKING:
@@ -37,15 +39,19 @@ def parse_int_list(value: str, *, field_name: str) -> list[int]:
     return parsed
 
 
-def resolve_endpoint(*, endpoint: str | None, base_url: str | None) -> str:
+def resolve_endpoint(
+    *, endpoint: str | None, base_url: str | None, task: str = "chat"
+) -> str:
     """Resolve either a full chat-completions endpoint or a /v1 base URL."""
+    if task not in TASK_PATHS:
+        raise ValueError(f"Unknown inference task {task!r}")
     if endpoint and base_url:
         raise ValueError("Use either --endpoint or --base-url, not both")
     if endpoint:
         return endpoint
     if not base_url:
         raise ValueError("One of --endpoint or --base-url is required")
-    return base_url.rstrip("/") + DEFAULT_ENDPOINT_PATH
+    return base_url.rstrip("/") + TASK_PATHS[task]
 
 
 def parse_float_list(value: str, *, field_name: str) -> list[float]:
@@ -97,6 +103,7 @@ class ProfileConfig:
     stream: bool = True
     stream_include_usage: bool = True
     timeout_seconds: float = 60.0
+    request_deadline_seconds: float | None = None
     warmup_requests: int = 0
     seed: int = 0
     api_key: str | None = None
@@ -118,6 +125,9 @@ class ProfileConfig:
     # After the measured window, how long in-flight requests may finish.
     # None means the request timeout.
     drain_timeout_seconds: float | None = None
+    # When this file appears, the measured window ends as if its duration
+    # had run out: no more arrivals, then the drain, and the run completes.
+    stop_file: str | None = None
     prompt_mode: str = REPEAT
     shared_prefix_ratio: float | None = None
     prefix_groups: int | None = None
@@ -147,6 +157,62 @@ class ProfileConfig:
     # came from a file or from --slo flags. None records none.
     slo: SloSpec | None = None
     slo_source: str | None = None
+    # What to export, and where; nothing by default (docs/inference_export.md).
+    export: ExportConfig = field(default_factory=ExportConfig)
+    # What to ask the server about itself before and after the run: auto,
+    # basic or none (see server_probe). /server_info is asked of a public
+    # host only when allow_remote_probe is set.
+    server_probe: str = "auto"
+    allow_remote_probe: bool = False
+    # A server description (describe-server) taken before the run, and the
+    # operator's declarations; each is recorded as an infer.manifest record.
+    server_description: dict[str, Any] | None = None
+    declarations: dict[str, Any] | None = None
+    # Which experiment, arm and block this run is: infer compare pairs runs
+    # of one block. None leaves the run unlabelled.
+    labels: dict[str, Any] | None = None
+
+    engine: str = "generic"
+    task: str = "chat"
+    server_version: str | None = None
+    max_response_bytes: int = 16 * 1024**2
+    omlx_stats_url: str | None = None
+    omlx_stats_api_key: str | None = None
+    omlx_stats_cookie: str | None = None
+    omlx_stats_interval_seconds: float = 1.0
+
+    def __post_init__(self) -> None:
+        get_adapter(self.engine, self.task)
+        if self.task not in {"chat", "completion"}:
+            raise ValueError("Use AudioProfileConfig for audio tasks")
+        if self.engine in {"omlx", "mlx-lm"} and any(
+            (
+                self.vllm_metrics_url,
+                self.vllm_spans_listen,
+                self.vllm_execution_dir,
+                self.trace,
+            )
+        ):
+            raise ValueError(
+                "MLX endpoint engines cannot use vLLM or text-trace instrumentation flags"
+            )
+        self._validate_stats_options()
+
+    def _validate_stats_options(self) -> None:
+        if (
+            any((self.omlx_stats_api_key, self.omlx_stats_cookie))
+            and self.omlx_stats_url is None
+        ):
+            raise ValueError("oMLX admin credential requires a statistics URL")
+        if self.omlx_stats_url is not None and self.engine != "omlx":
+            raise ValueError("oMLX statistics require --engine omlx")
+        if type(self.max_response_bytes) is not int or self.max_response_bytes < 1:
+            raise ValueError("max_response_bytes must be a positive integer")
+        if (
+            not math.isfinite(self.omlx_stats_interval_seconds)
+            or self.omlx_stats_interval_seconds <= 0
+        ):
+            raise ValueError("oMLX stats interval must be positive and finite")
 
     def prompt_spec(self) -> PromptSpec:
         return PromptSpec(

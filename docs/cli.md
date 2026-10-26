@@ -102,10 +102,20 @@ For controlled experiments, `--arrival` sends requests on a fixed-rate,
 Poisson, burst or replayed schedule instead of a closed loop. `--prompt-mode`
 chooses whether requests share prefixes, and `--cache-state cold` with
 `--cache-reset-url` asks for an empty prefix cache before each case.
+To record which server a run measured, run `stormlog infer describe-server`
+on the serving host (see [Inference server descriptions](inference_server.md)).
 For server memory, run `stormlog infer collect-server` on the serving host,
 pass the same `--run-id` to `infer profile`, and import the collector JSONL with
 `infer analyze --server-telemetry`. The guide explains the direct-route and
 clock evidence required before a server sample enters a case report.
+To feed Prometheus while a profile runs, add `--prometheus-listen HOST:PORT`
+or `--prometheus-textfile-dir DIR`; to send Stormlog's spans to an
+OpenTelemetry collector, add `--otlp-endpoint URL` or `--otlp-file PATH`;
+see [Exporting inference metrics and spans](inference_export.md).
+`--trace-context preserve-engine` sends W3C trace context with each
+request, so a tracing server's spans join Stormlog's traces.
+`infer collect-server` takes the same `--prometheus-*` flags to report its
+own health, labelled with the identity it observes.
 
 ### Watch a vLLM server for incidents
 
@@ -658,3 +668,14 @@ jaxmemprof diagnose --duration 0 --output ./jax_diag
 ---
 
 [← Back to main docs](index.md)
+
+
+## MLX allocator commands
+
+`mlxmemprof` supplies `info`, `monitor`, `track`, `run`, `analyze` and `diagnose`.
+Use `mlxmemprof run --output artifacts/mlx-run -- script.py [args...]` to sample
+the workload in the same interpreter. Monitor/track/diagnose observe their own
+process. Analyze reads saved artifacts offline without any framework import.
+See the [MLX command guide](mlx_testing_guide.md) for options,
+[report contract](report_contract.md) for exit statuses, and
+[MLX cookbook](cookbook/mlx.md) for runnable workflows.

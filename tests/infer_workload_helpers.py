@@ -3,6 +3,7 @@
 import json
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,8 @@ class SleepingClient:
         self.first_latencies = list(first_latencies)
         self.calls = 0
         self.finished_at: list[float] = []
+        # The extra headers each call was given, by X-Request-Id.
+        self.headers: dict[str | None, dict[str, str]] = {}
         self.active = 0
         self.max_active = 0
         self.lock = threading.Lock()
@@ -37,10 +40,16 @@ class SleepingClient:
         stream: bool,
         stream_include_usage: bool,
         request_id: str | None = None,
+        headers: dict[str, str] | None = None,
+        on_sent: Callable[[int], None] | None = None,
+        on_first_content: Callable[[int], None] | None = None,
     ) -> ChatCompletionResult:
         started_at_ns = time.time_ns()
+        if on_sent is not None:
+            on_sent(started_at_ns)
         with self.lock:
             self.calls += 1
+            self.headers[request_id] = dict(headers or {})
             self.active += 1
             self.max_active = max(self.max_active, self.active)
             latency = (
@@ -81,6 +90,8 @@ def run_profile_with_fake_client(
         "stream": False,
         "system_sampler": "none",
         "tokenizer": "none",
+        # The probe asks the endpoint over HTTP; a test opts in by name.
+        "server_probe": "none",
     }
     values.update(changes)
     profiler = InferenceProfiler(ProfileConfig(**values))

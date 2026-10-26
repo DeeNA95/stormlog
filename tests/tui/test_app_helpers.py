@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -150,3 +151,53 @@ def test_button_dispatch_ignores_unknown_buttons(button_id: str | None) -> None:
     app = appmod.GPUMemoryProfilerTUI()
 
     asyncio.run(app.on_button_pressed(Button.Pressed(Button(id=button_id))))
+
+
+@pytest.mark.parametrize(
+    ("timeline", "expected"),
+    [
+        (
+            {},
+            [
+                ("Samples", "0"),
+                ("Duration (s)", "-"),
+                ("Allocated Max", "-"),
+                ("Reserved Max", "-"),
+                ("Allocated Latest", "-"),
+                ("Reserved Latest", "-"),
+            ],
+        ),
+        (
+            {"timestamps": [1.0, 3.5], "allocated": [1048576, 3145728], "reserved": []},
+            [
+                ("Samples", "2"),
+                ("Duration (s)", "2.5"),
+                ("Allocated Max", "3.00 MB"),
+                ("Reserved Max", "0 B"),
+                ("Allocated Latest", "3.00 MB"),
+                ("Reserved Latest", "0 B"),
+            ],
+        ),
+        (
+            {
+                "timestamps": [1.0, 3.5],
+                "allocated": [1048576, 3145728],
+                "reserved": [1048576, 5242880],
+            },
+            [
+                ("Samples", "2"),
+                ("Duration (s)", "2.5"),
+                ("Allocated Max", "3.00 MB"),
+                ("Reserved Max", "5.00 MB"),
+                ("Allocated Latest", "3.00 MB"),
+                ("Reserved Latest", "5.00 MB"),
+            ],
+        ),
+    ],
+)
+def test_legacy_timeline_rows_keep_their_order_and_placeholders(
+    timeline: dict[str, Any], expected: list[tuple[str, str]]
+) -> None:
+    from stormlog.tui.builders import build_legacy_timeline_rows
+
+    assert build_legacy_timeline_rows(timeline) == expected

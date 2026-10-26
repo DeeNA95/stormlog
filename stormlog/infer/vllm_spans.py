@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from .._export.inflate import gunzip_capped
 from .correlation_events import (
     CapabilityEvent,
     CorrelationContext,
@@ -679,24 +680,6 @@ def _json_nested_count(value: Any) -> int:
     return 0
 
 
-def gunzip_capped(body: bytes | bytearray, cap: int) -> bytes | None:
-    """Inflate a gzip body, or None when its output would exceed ``cap``.
-
-    A gzip member a few hundred kilobytes long can hold gigabytes of zeros,
-    so the decoder is asked for at most ``cap + 1`` bytes: one byte over the
-    cap, or input left unconsumed, refuses the body without inflating it
-    whole. A stream cut before its trailer raises ``ValueError``; a
-    malformed one raises ``zlib.error``.
-    """
-    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
-    out = decoder.decompress(body, cap + 1)
-    if len(out) > cap or decoder.unconsumed_tail:
-        return None
-    if not decoder.eof:
-        raise ValueError("truncated gzip body")
-    return out
-
-
 _GRPC_PREFACE = b"PRI * HTTP/2.0"
 GRPC_HINT = (
     "an export arrived as gRPC (HTTP/2 preface); start vLLM with "
@@ -1016,8 +999,12 @@ class OtlpSpanReceiver:
         if not self._enqueue(spans, media, handler.client_address[0]):
             _respond_busy(handler)
             return
-        # An empty ExportTraceServiceResponse is valid in either encoding.
-        _respond(handler, 200, b"" if media == PROTOBUF_MEDIA else b"{}", media)
+        # An empty ExportTraceServiceResponse is valid in either encoding. Name
+        # it with our own constant, never the request's header text.
+        if media == PROTOBUF_MEDIA:
+            _respond(handler, 200, b"", PROTOBUF_MEDIA)
+        else:
+            _respond(handler, 200, b"{}", JSON_MEDIA)
 
     def _decode(
         self,
@@ -1165,7 +1152,7 @@ class OtlpSpanReceiver:
         with memoryview(body) as view:
             received = 0
             while received < length:
-                count = handler.rfile.readinto(view[received:])  # type: ignore[attr-defined]
+                count = handler.rfile.readinto(view[received:])  # type: ignore[attr-defined, unused-ignore]
                 if not count:
                     break  # a short body fails to decode and is answered 400
                 received += count

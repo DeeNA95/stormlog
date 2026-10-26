@@ -5,6 +5,10 @@ arrivals, prompts, warmup, decoding settings, seed, tokenizer and requested
 cache state. It leaves out the endpoint, model, timeouts, reset URL and
 where a replay trace was read from, so the same workload sent to two engine
 configurations has the same digest.
+
+That digest is the workload's realization: another seed sends other
+prompts at other times. ``spec_digest`` leaves the seed out, so runs of
+one workload with different seeds share it.
 The API key is never recorded, and the reset URL is recorded without its
 credentials or query string.
 """
@@ -16,6 +20,7 @@ import json
 from typing import Any
 
 from ..scrub import redact_url
+from .arrivals import CLOSED
 from .config import ProfileConfig
 from .prompts import GENERATOR_VERSION, REPEAT, PromptSpec
 from .tokens import TokenCounter
@@ -30,11 +35,15 @@ def workload_record(
 ) -> dict[str, Any]:
     """The ``infer.workload`` record written at the start of a run."""
     spec = workload_spec(config, counter=counter, prompt_spec=prompt_spec)
+    traffic = _traffic(spec, open_loop=_open_loop(config))
     return {
         "schema_version": 1,
         "event_type": "infer.workload",
         "session_id": session_id,
-        "workload_digest": _digest(_traffic(spec, open_loop=_open_loop(config))),
+        "workload_digest": _digest(traffic),
+        "engine": config.engine,
+        "task": config.task,
+        "spec_digest": _digest(_without_seed(traffic)),
         **spec,
         "chat_template": chat_template_identity(counter),
     }
@@ -44,6 +53,7 @@ def workload_spec(
     config: ProfileConfig, *, counter: TokenCounter, prompt_spec: PromptSpec
 ) -> dict[str, Any]:
     return {
+        "task": config.task,
         "seed": config.seed,
         "generator": {"name": "stormlog.synthetic", "version": GENERATOR_VERSION},
         "cases": [
@@ -64,6 +74,7 @@ def workload_spec(
             "overflow": config.overflow,
             "drain_timeout_seconds": config.drain_timeout_seconds,
             "timeout_seconds": config.timeout_seconds,
+            "request_deadline_seconds": config.request_deadline_seconds,
         },
         "prompts": prompt_spec.to_record(),
         "warmup": {
@@ -87,8 +98,36 @@ def workload_spec(
     }
 
 
+def workload_digests(record: dict[str, Any]) -> dict[str, str | None]:
+    """A recorded workload's spec and realization digests.
+
+    Both are recomputed from the record, so an artifact written before
+    ``spec_digest`` existed has one too; a record too old to recompute keeps
+    what it recorded.
+    """
+    try:
+        open_loop = any(
+            (case.get("arrival") or {}).get("mode") != CLOSED
+            for case in record["cases"]
+        )
+        traffic = _traffic(record, open_loop=open_loop)
+    except (KeyError, TypeError, AttributeError):
+        return {
+            "spec_digest": record.get("spec_digest"),
+            "realization_digest": record.get("workload_digest"),
+        }
+    return {
+        "spec_digest": _digest(_without_seed(traffic)),
+        "realization_digest": _digest(traffic),
+    }
+
+
 def _open_loop(config: ProfileConfig) -> bool:
     return any(case.arrival.open_loop for case in config.cases())
+
+
+def _without_seed(traffic: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in traffic.items() if key != "seed"}
 
 
 def _traffic(spec: dict[str, Any], *, open_loop: bool) -> dict[str, Any]:
@@ -102,7 +141,7 @@ def _traffic(spec: dict[str, Any], *, open_loop: bool) -> dict[str, Any]:
     shaping = ["request_count", "duration_seconds"]
     if open_loop:
         shaping += ["max_in_flight", "overflow"]
-    return {
+    traffic = {
         "seed": spec["seed"],
         "generator": spec["generator"],
         "cases": [_case_traffic(case) for case in spec["cases"]],
@@ -113,6 +152,9 @@ def _traffic(spec: dict[str, Any], *, open_loop: bool) -> dict[str, Any]:
         "tokenizer": spec["tokenizer"],
         "cache_requested": spec["cache"]["requested"],
     }
+    if spec.get("task", "chat") != "chat":
+        traffic = {"text_task_version": 1, "task": spec["task"], **traffic}
+    return traffic
 
 
 def _case_traffic(case: dict[str, Any]) -> dict[str, Any]:

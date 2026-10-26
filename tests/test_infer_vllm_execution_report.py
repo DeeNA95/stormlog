@@ -274,6 +274,18 @@ def test_coverage_is_a_union_per_device_and_clock(tmp_path: Path) -> None:
     assert report["imports"][0]["high_water"] == {EPOCH: 9}
 
 
+def test_a_request_still_in_flight_counts_from_its_dispatch(tmp_path: Path) -> None:
+    records = _records(tmp_path)
+    # B was sent and has not ended: the client wrote only its dispatch.
+    records[1] = {**records[1], "event_type": "infer.dispatch"}
+    del records[1]["status"]
+
+    report = execution_report(records)
+
+    assert report["requests"]["run_requests_total"] == 2
+    assert sorted(report["cases"]) == ["c1_in8_out4", "c2_in8_out4"]
+
+
 def test_text_lines_name_every_dimension(tmp_path: Path) -> None:
     lines = execution_lines(execution_report(_records(tmp_path)))
     assert lines[0] == (
@@ -491,3 +503,17 @@ def test_a_failed_import_is_reported_as_such() -> None:
     assert report["available"] is True
     assert report["iterations"]["total"] == 0
     assert execution_lines(report) == ["vLLM execution: import failed (no epoch)"]
+
+
+def test_compact_direct_sequence_matches_embedded_report(tmp_path):
+    import pytest
+
+    from stormlog.infer.correlation_codec import CorrelationRecordEncoder
+
+    records = _execution_records(tmp_path)
+    encoder = CorrelationRecordEncoder()
+    rows = [row for record in records for row in encoder.encode(record)]
+    assert execution_report(rows) == execution_report(records)
+    without_definitions = [r for r in rows if r.get("event_type") != "infer.context"]
+    with pytest.raises(ValueError, match="unknown context_id"):
+        execution_report(without_definitions)

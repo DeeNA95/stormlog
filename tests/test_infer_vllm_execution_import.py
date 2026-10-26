@@ -25,6 +25,7 @@ from stormlog.infer.correlation_events import (
     IterationEvent,
     MembershipEvent,
     RequestEvent,
+    StageEvent,
     load_inference_artifact,
 )
 from stormlog.infer.errors import InferInputError
@@ -45,11 +46,13 @@ from tests.vllm_execution_helpers import (
     done,
     engine_log,
     heartbeat,
+    hello,
     importer,
     member,
     producer,
     scheduled,
     terminal,
+    write_epoch,
 )
 
 PID, START = 2600, 1_790_000_000_000_000_000
@@ -174,6 +177,7 @@ def test_import_appends_the_reduced_records_and_the_high_water(tmp_path: Path) -
         "memberships": 4,
         "requests": 2,
         "clock_alignment": 1,
+        "stages": 0,
     }
     assert execution["epochs"][EPOCH]["foreign_only_counted"] == 1
     assert execution["epochs"][EPOCH]["foreign_only_placed"] == 1
@@ -184,8 +188,132 @@ def test_import_appends_the_reduced_records_and_the_high_water(tmp_path: Path) -
     assert resolve_inference_events(records).unresolved == ()
 
 
-def test_a_second_import_adds_only_what_became_final(tmp_path: Path) -> None:
+def _newer_hook(record: dict[str, Any]) -> dict[str, Any]:
+    """A record as a later hook writes it: bracketed stamps, and the pause
+    state on each step."""
+    newer = dict(record)
+    for prefix in ("", "start_", "end_"):
+        if f"{prefix}wall_ns" in newer:
+            newer[f"{prefix}wall_after_ns"] = newer[f"{prefix}wall_ns"] + 900
+    if newer["kind"] == "scheduled":
+        newer["pause_state"] = "UNPAUSED"
+    return newer
+
+
+# What the import takes from a later hook's records: stages, the request's
+# enqueue, the second wall read of each stamp, and each record's source
+# sequence, which the inserted records shift.
+_LATER_REQUEST_FIELDS = (
+    "enqueued_mono_ns",
+    "enqueued_wall_ns",
+    "enqueued_wall_after_ns",
+    "structured_output",
+)
+_LATER_WALL_AFTER = (
+    "admitted_wall_after_ns",
+    "start_wall_after_ns",
+    "schedule_end_wall_after_ns",
+    "completed_wall_after_ns",
+)
+
+
+def _without_later_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    if "metadata" not in record:
+        return record  # not the import's: the client's own v1 records
+    dropped = ["source_seq_max", *_LATER_WALL_AFTER]
+    if record["event_type"] == "infer.request":
+        dropped.extend(_LATER_REQUEST_FIELDS)
+    metadata = {
+        key: value for key, value in record["metadata"].items() if key not in dropped
+    }
+    if isinstance(metadata.get("finish"), dict):
+        metadata["finish"] = {
+            key: value
+            for key, value in metadata["finish"].items()
+            if key != "wall_after_ns"
+        }
+    return {**record, "metadata": metadata}
+
+
+def test_a_later_hook_s_log_changes_only_what_the_import_reads_from_it(
+    tmp_path: Path,
+) -> None:
+    """The log format stays version 1 because every addition is optional:
+    the same run logged by a later hook imports to the same records, apart
+    from the facts the import takes from the later records."""
+    stamp = {"wall_ns": T0 + WALL_OFFSET, "mono_ns": T0, "wall_after_ns": T0 + 1}
+    later = [
+        hello(
+            "engine",
+            PID,
+            START,
+            config={"max_num_seqs": 256, "profiler": None},
+            observes=["cache_reset", "enqueued", "pause"],
+            process_start_ns=START - SECOND,
+            process_start_ticks=81234567,
+            parent_pid=1,
+            parent_process_start_ticks=1,
+            parent_process_start_ns=1,
+        ),
+        # After the aliases, whose seq the import keeps as admission_seq.
+        *(_newer_hook(record) for record in _records()[:2]),
+        {
+            "kind": "enqueued",
+            "internal": OWN0,
+            "structured_output": False,
+            "resumable": False,
+            **stamp,
+        },
+        {"kind": "pause", "from": "UNPAUSED", "to": "PAUSED_NEW", **stamp},
+        *(_newer_hook(record) for record in _records()[2:4]),
+        {
+            "kind": "cache_reset",
+            "reset_running_requests": True,
+            "reset_connector": False,
+            "running": [OWN0],
+            "succeeded": True,
+            "raised": False,
+            **{f"start_{k}": v for k, v in stamp.items()},
+            **{f"end_{k}": v for k, v in stamp.items()},
+        },
+        *(_newer_hook(record) for record in _records()[4:]),
+    ]
+    imported = []
+    for name, log in (("plain", None), ("later", later)):
+        artifact = _artifact(tmp_path / f"{name}.jsonl")
+        if log is None:
+            engine_log(tmp_path / name, _records())
+        else:
+            write_epoch(tmp_path / name, "engine", PID, START, log)
+        import_execution_into_artifact(artifact, tmp_path / name, importer=HERE)
+        imported.append(
+            [
+                _without_later_evidence(record.to_record())
+                for record in load_inference_artifact(artifact)
+                if not isinstance(record, (CapabilityEvent, StageEvent))
+            ]
+        )
+
+    assert imported[0] == imported[1]
+
+
+@pytest.mark.parametrize("compact_seed", [False, True])
+def test_a_second_import_adds_only_what_became_final(
+    tmp_path: Path, compact_seed: bool
+) -> None:
     artifact = _artifact(tmp_path / "infer.jsonl")
+    if compact_seed:
+        from stormlog.infer.correlation_codec import CorrelationRecordEncoder
+
+        encoder = CorrelationRecordEncoder()
+        rows = [json.loads(line) for line in artifact.read_text().splitlines()]
+        artifact.write_text(
+            "".join(
+                json.dumps(row) + "\n"
+                for record in rows
+                for row in encoder.encode(record)
+            )
+        )
     hook = tmp_path / "hook"
     engine_log(hook, _records())
     import_execution_into_artifact(artifact, hook, importer=HERE)
@@ -446,6 +574,138 @@ def test_run_facts_come_from_the_artifact(tmp_path: Path) -> None:
     assert [w.kind for w in facts.windows] == ["phase"]
     assert facts.windows[0].end_ns == T0 + WALL_OFFSET + 3 * SECOND
     assert facts.existing_iterations == frozenset()
+
+
+def _in_progress_artifact(path: Path, *later: dict[str, Any]) -> Path:
+    """The artifact of a run still under way: its measured phase has begun
+    and its request was sent; neither has ended."""
+    _artifact(path, requests=False)
+    lines = [
+        {
+            "schema_version": 1,
+            "event_type": "infer.phase_start",
+            "session_id": SESSION,
+            "case_id": "c1_in8_out4",
+            "phase": "measured",
+            "arrival_mode": "closed",
+            "started_at_ns": T0 + WALL_OFFSET - SECOND,
+            "timestamp_ns": T0 + WALL_OFFSET - SECOND,
+        },
+        {
+            "schema_version": 1,
+            "event_type": "infer.dispatch",
+            "session_id": SESSION,
+            "request_id": REQUEST0,
+            "x_request_id": X0,
+            "case_id": "c1_in8_out4",
+            "phase": "measured",
+            "intended_at_ns": None,
+            "started_at_ns": T0 + WALL_OFFSET - 20,
+            "timestamp_ns": T0 + WALL_OFFSET - 20,
+        },
+        *later,
+    ]
+    with path.open("a", encoding="utf-8") as handle:
+        handle.writelines(json.dumps(line) + "\n" for line in lines)
+    return path
+
+
+def _placement(artifact: Path) -> tuple[int, int]:
+    engine = next(
+        r
+        for r in load_inference_artifact(artifact)
+        if isinstance(r, CapabilityEvent) and r.component == "engine_adapter"
+    )
+    epoch = engine.metadata["summary"]["execution"]["epochs"][EPOCH]
+    return epoch["foreign_only_placed"], epoch["foreign_only_counted"]
+
+
+def test_an_import_of_a_run_under_way_binds_requests_still_in_flight(
+    tmp_path: Path,
+) -> None:
+    artifact = _in_progress_artifact(tmp_path / "infer.jsonl")
+    engine_log(tmp_path / "hook", _records())
+
+    import_execution_into_artifact(artifact, tmp_path / "hook", importer=HERE)
+
+    requests = [
+        r for r in load_inference_artifact(artifact) if isinstance(r, RequestEvent)
+    ]
+    own = next(r for r in requests if r.metadata["ownership"] == "run")
+    assert own.request_ref == EntityRef("stormlog", REQUEST0)
+    assert own.metadata["case_id"] == "c1_in8_out4"
+    # The begun phase has no end yet, so every later step lies inside it.
+    assert _placement(artifact) == (2, 0)
+
+
+def test_a_begun_phase_ends_with_its_window_or_the_session(tmp_path: Path) -> None:
+    window = {
+        "schema_version": 1,
+        "event_type": "infer.phase_window",
+        "session_id": SESSION,
+        "case_id": "c1_in8_out4",
+        "phase": "measured",
+        "started_at_ns": T0 + WALL_OFFSET - SECOND,
+        "window_ended_at_ns": T0 + WALL_OFFSET + 2 * SECOND,
+        "drained_at_ns": T0 + WALL_OFFSET + 3 * SECOND,
+    }
+    interrupted = {
+        "schema_version": 1,
+        "event_type": "infer.session",
+        "session_id": SESSION,
+        "timestamp_ns": T0 + WALL_OFFSET + 3 * SECOND,
+        "status": "interrupted",
+    }
+    for name, later in (("measured", window), ("interrupted", interrupted)):
+        artifact = _in_progress_artifact(tmp_path / f"{name}.jsonl", later)
+        engine_log(tmp_path / name, _records())
+
+        import_execution_into_artifact(artifact, tmp_path / name, importer=HERE)
+
+        assert _placement(artifact) == (1, 1), name
+
+
+def test_a_dead_client_s_phase_ends_at_its_last_record_once_the_run_is_over(
+    tmp_path: Path,
+) -> None:
+    # The client was killed: its last sign of life is a first content at
+    # 3 s, and it wrote neither the phase's window nor the session's end.
+    last = {
+        "schema_version": 1,
+        "event_type": "infer.first_content",
+        "session_id": SESSION,
+        "request_id": REQUEST0,
+        "x_request_id": X0,
+        "case_id": "c1_in8_out4",
+        "phase": "measured",
+        "first_content_at_ns": T0 + WALL_OFFSET + 3 * SECOND,
+        "timestamp_ns": T0 + WALL_OFFSET + 3 * SECOND,
+    }
+    for stopped, placement in ((False, (2, 0)), (True, (1, 1))):
+        name = f"stopped-{stopped}"
+        artifact = _in_progress_artifact(tmp_path / f"{name}.jsonl", last)
+        engine_log(tmp_path / name, _records())
+
+        import_execution_into_artifact(
+            artifact, tmp_path / name, importer=HERE, server_stopped=stopped
+        )
+
+        # Without the option the run may still be under way; with it, the
+        # step at 40 s came after the client's end.
+        assert _placement(artifact) == placement, name
+
+
+def test_a_phase_begun_after_the_session_ended_has_no_window(tmp_path: Path) -> None:
+    ended = {
+        "schema_version": 1,
+        "event_type": "infer.session",
+        "session_id": SESSION,
+        "timestamp_ns": T0 + WALL_OFFSET - 2 * SECOND,
+        "status": "completed",
+    }
+    artifact = _in_progress_artifact(tmp_path / "infer.jsonl", ended)
+    facts = run_facts_from_records(load_inference_artifact(artifact), RUN, SESSION)
+    assert [w for w in facts.windows if w.kind == "phase"] == []
 
 
 def test_cli_imports_and_reports_the_epochs(

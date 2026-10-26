@@ -1158,3 +1158,13 @@ def test_bounded_mode_settings_are_validated(tmp_path: Path) -> None:
             failure_backoff_seconds=2.0,
             failure_backoff_max_seconds=1.0,
         )
+
+
+def test_loading_a_sink_without_segments_says_so(tmp_path: Path) -> None:
+    sink_dir = tmp_path / "sink"
+    sink = AppendOnlyTelemetrySink(TelemetrySinkConfig(sink_dir, write_rollups=False))
+    sink.start_session()
+    sink.close()
+    for path in (sink_dir, sink_dir / "manifest.json"):
+        with pytest.raises(ValueError, match="retained no segments"):
+            load_telemetry_sessions(path)

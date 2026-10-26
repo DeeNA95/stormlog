@@ -145,6 +145,15 @@ def test_rank_timeline_empty_rendering(
             "Allocated (max 0.00 MB, latest 0.00 MB)\n[ ]\n\n"
             "Reserved (max 1.00 MB, latest 1.00 MB)\n[@]",
         ),
+        (
+            {
+                "timestamps": [1, 2, 3, 4],
+                "allocated": [1048576, 2097152, 3145728, 4194304],
+                "reserved": [2097152, None, 4194304, None],
+            },
+            "Allocated (max 4.00 MB, latest 4.00 MB)\n[:=*@]\n\n"
+            "Reserved (max 4.00 MB, latest 4.00 MB)\n[=@]",
+        ),
         ({"device_used": [None]}, "Device Used: no samples"),
         (
             {"allocated": [None]},

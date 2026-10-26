@@ -7,6 +7,67 @@ v2 records in `stormlog.infer.correlation_events` add server-side evidence to
 the same JSONL stream. The schema is
 [`inference_correlation_v2.schema.json`](schemas/inference_correlation_v2.schema.json).
 
+## Compact artifact storage (wire v4)
+
+New artifacts store each distinct full correlation context once, immediately
+before its first use. The public
+[`inference_correlation_v4.schema.json`](schemas/inference_correlation_v4.schema.json)
+validates individual physical records. For example:
+
+```json
+{"schema_version":4,"event_type":"infer.context","context_id":"example","context":{"run_id":"run-1","session_id":"session-1","producer_id":"engine-0","source":"example","clock_domain":"host/monotonic","clock_kind":"monotonic","collection_mode":"imported","provenance":"observed"}}
+{"schema_version":4,"event_type":"infer.iteration","context_id":"example","event_id":"iteration-1","metadata":{},"iteration_ref":{"producer_id":"engine-0","id":"1"},"batch_ref":null,"start_ns":100,"end_ns":200}
+```
+
+Writers include optional context fields with their null defaults and name each
+context `ctx-` followed by the first 16 hexadecimal digits of the SHA-256 digest
+of its canonical JSON. If two different contexts ever received the same name,
+writing or reading would fail with a conflicting definition; the contexts are
+never merged. Readers accept any nonempty ID. Every context field participates in sharing;
+per-event metadata stays on its event. Different producers, devices, clocks,
+processes, ranks, or provenance therefore retain their separate identities.
+
+`load_inference_artifact(path)` consumes definition rows and returns the same
+complete typed event sequence as before. `read_inference_records(path)` in
+`stormlog.infer.correlation_codec` returns expanded dictionaries; direct sequence
+consumers can use `expand_inference_records(records)`. Expansion is idempotent.
+`CorrelationEvent.to_record()` still returns embedded v2, or v3 for an activity
+with busy intervals. Wire v4 changes storage only: interval union, attribution,
+request totals, deduplication, and clock alignment retain their meanings.
+
+Comparison summaries and manifest attachment expand contexts before reading
+run identity or clocks. Diagnosis keeps a decoder for each file while retaining
+the original physical line numbers, record IDs and hashes used to cite evidence.
+The qualification victim's append probe likewise records every physical line,
+including context definitions, with the flush time of the append that emitted
+it. Qualification checks read expanded artifact identities; incremental client
+request signals continue to use the unchanged v1 request records.
+
+| Representation | Current readers | Older readers |
+| --- | --- | --- |
+| Legacy v1 and embedded v2/v3 | Supported unchanged | Supported as before |
+| Compact v4 | Expanded to complete semantic records | Expected to reject |
+| Mixed v1/v2/v3/v4 artifact | Supported in original semantic order | Expected to reject v4 |
+
+Definitions are storage metadata, without event IDs; they do not count as
+requests or activities. They must precede their references in the same file.
+Unknown/forward IDs and conflicting definitions fail explicitly with a physical
+line number. Equal repeated definitions are accepted. Registry state never
+crosses artifact boundaries. JSON Schema alone cannot check stream ordering.
+
+Appending reuses the first existing definition for an equal context. Appending
+to an embedded-only artifact emits new definitions and retains the old bytes
+unchanged. Serialization completes before capture files are mutated; this does
+not create a transaction spanning the artifact and its run envelope.
+
+On the #216 audit workload, compact files are 32.6% smaller at launch detail
+and 32.2% smaller at kernel detail, with the same records and the same GPU busy
+time ([audit results](benchmarks/issue-259-audit-results.json)). An earlier
+Qwen3-0.6B measurement ([results](benchmarks/issue-259-modal-results.json)) used
+64-digit context IDs, which made every compact line 48 bytes longer. A context
+used only once may increase file size. Smaller files do not guarantee lower
+peak reader memory.
+
 ## Identity and relationships
 
 Every v2 event has a `run_id`, `session_id`, `producer_id`, and `event_id`. An
@@ -53,7 +114,11 @@ durations merely because they are numbers in nanoseconds.
 Clock domains must identify comparable timestamps, for example a monotonic
 clock on one host and boot. Cross-host ordering requires a clock alignment
 event: add its `offset_ns` to a timestamp in `from_clock_domain` to express it
-in `to_clock_domain`, carrying `uncertainty_ns` with the result. An alignment
+in `to_clock_domain`, carrying `uncertainty_ns` with the result. The one
+exception is an alignment an earlier `infer import-execution` wrote without
+`metadata.alignment_basis`: its offset is the lower end of the measured
+interval, which is `metadata.gap_ns` wide, and `align_timestamp` places a
+timestamp at that interval's middle. An alignment
 may have a validity range. Without a valid alignment, cross-domain subtraction
 is undefined.
 
@@ -271,9 +336,15 @@ time is the same at both details.
 
 The last column is what a consumer that ignored `metadata.intervals` and used
 the spans would overcount. The import summary reports `busy_ns` and
-`launch_span_ns` per device. Each record is about 1.3 KB of JSONL, most of it
-the repeated context, so a 30-second vLLM trace at kernel detail adds roughly
-280 MB to the artifact and about 45 MB at launch detail. Capture short windows.
+`launch_span_ns` per device. Embedded records repeat their full context: on the
+audit trace above, about 1.3 KB per record, roughly 280 MB at kernel detail and
+45 MB at launch detail. Compact (wire v4) artifacts store each context once.
+The same workload re-run on one NVIDIA L4, profiled for 61 seconds, gave 48,494
+launch records (80.3 MB embedded, 54.1 MB compact) and 342,610 kernel records
+(574.7 MB embedded, 389.7 MB compact), with identical GPU busy time in both
+encodings and about the same load time
+([audit results](benchmarks/issue-259-audit-results.json),
+`examples/scenarios/modal_audit_compaction.py`). Capture short windows.
 
 `examples/scenarios/trace_import_scenario.py` checks the import on a CUDA
 device. On an NVIDIA A30 it linked every GPU event launched inside an

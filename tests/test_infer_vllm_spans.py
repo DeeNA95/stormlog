@@ -1406,6 +1406,7 @@ class TestReceiverAdmission:
                     _post(url, body, "application/json", timeout=TRACED_POST_TIMEOUT_S)
                     == 200
                 )
+                assert receiver._server.wait_idle(timeout=TRACED_POST_TIMEOUT_S)
                 retained, _peak = tracemalloc.get_traced_memory()
             finally:
                 tracemalloc.stop()
@@ -1417,12 +1418,25 @@ class TestReceiverAdmission:
         assert retained < 4 * 1024 * 1024
         assert retained <= charged
 
-    def test_a_span_s_request_id_and_status_are_charged_too(self) -> None:
+    @pytest.mark.parametrize("cleanup_delay", [0.0, 0.25], ids=["normal", "delayed"])
+    def test_a_span_s_request_id_and_status_are_charged_too(
+        self, monkeypatch: pytest.MonkeyPatch, cleanup_delay: float
+    ) -> None:
         """A record keeps its request ID apart from the attribute it came
         from, and its status: 200 spans with 50 KB IDs held 1.92 times
         their queue charge."""
         import tracemalloc
 
+        respond = vllm_spans._respond
+
+        def delayed_response(
+            handler: BaseHTTPRequestHandler, status: int, body: bytes, media: str
+        ) -> None:
+            respond(handler, status, body, media)
+            if cleanup_delay:
+                time.sleep(cleanup_delay)
+
+        monkeypatch.setattr(vllm_spans, "_respond", delayed_response)
         spans = [
             {
                 "name": "s",
@@ -1447,6 +1461,10 @@ class TestReceiverAdmission:
                     _post(url, body, "application/json", timeout=TRACED_POST_TIMEOUT_S)
                     == 200
                 )
+                # HTTP 200 precedes the handler returning and releasing its
+                # request body. Measure the queue after that temporary memory
+                # is gone, including when cleanup is deliberately delayed.
+                assert receiver._server.wait_idle(timeout=TRACED_POST_TIMEOUT_S)
                 retained, _peak = tracemalloc.get_traced_memory()
             finally:
                 tracemalloc.stop()
@@ -1839,3 +1857,18 @@ class TestProfileReceiver:
         assert "OSError" in capability["metadata"]["error"]
         warnings = records[-1]["warnings"]
         assert len(warnings) == 1 and "could not listen" in warnings[0]
+
+
+def test_the_reply_names_its_media_type_with_the_receivers_own_constant() -> None:
+    body = JSON_EXPORT
+    request = (
+        b"POST /v1/traces HTTP/1.1\r\nHost: collector\r\n"
+        b"Content-Type: application/json; charset=utf-8\r\n"
+        b"Content-Length: %d\r\n\r\n" % len(body)
+    ) + body
+    with _receiver() as receiver:
+        reply = _raw_post(receiver.listen, request)
+    head, _, content = reply.partition(b"\r\n\r\n")
+    assert head.startswith(b"HTTP/1.0 200") or head.startswith(b"HTTP/1.1 200")
+    assert b"\r\nContent-Type: application/json\r\n" in head + b"\r\n"
+    assert content == b"{}"

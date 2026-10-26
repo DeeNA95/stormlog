@@ -3,11 +3,30 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Optional, TextIO
+
+from .correlation_codec import CorrelationRecordEncoder
 
 INFER_SCHEMA_VERSION = 1
+
+# Every status an infer.request record can have. Exporters pre-create one
+# series per status, so a new status is added here, not only where it is set.
+REQUEST_STATUSES: tuple[str, ...] = (
+    "ok",
+    "timeout",
+    "rejected",
+    "error",
+    "dropped",
+    "cancelled",
+    # The request never reached the server, or may have: see classify_failure.
+    "unreachable",
+    "delivery_unknown",
+)
+# The phases a request runs in.
+REQUEST_PHASES: tuple[str, ...] = ("warmup", "measured")
 
 
 @dataclass(frozen=True)
@@ -59,6 +78,13 @@ class InferenceRequestEvent:
     prompt_digest: str | None = None
     # The X-Request-Id header sent, as recorded; None for a request never sent.
     x_request_id: str | None = None
+    engine: str = "generic"
+    task: str = "chat"
+    response_id: str | None = None
+    system_fingerprint: str | None = None
+    # The traceparent IDs it was sent with, as hex; None without --trace-context.
+    trace_id: str | None = None
+    span_id: str | None = None
 
     def to_record(self) -> dict[str, Any]:
         record = asdict(self)
@@ -66,6 +92,78 @@ class InferenceRequestEvent:
             {
                 "schema_version": INFER_SCHEMA_VERSION,
                 "event_type": "infer.request",
+                "timestamp_ns": self.started_at_ns,
+            }
+        )
+        return record
+
+
+@dataclass(frozen=True)
+class InferenceDispatchEvent:
+    """A request leaving the client: written when it is sent, before any
+    outcome, so a reader of a growing artifact sees requests in flight."""
+
+    session_id: str
+    request_id: str
+    x_request_id: str | None
+    case_id: str
+    phase: str
+    intended_at_ns: int | None
+    started_at_ns: int
+
+    def to_record(self) -> dict[str, Any]:
+        record = asdict(self)
+        record.update(
+            {
+                "schema_version": INFER_SCHEMA_VERSION,
+                "event_type": "infer.dispatch",
+                "timestamp_ns": self.started_at_ns,
+            }
+        )
+        return record
+
+
+@dataclass(frozen=True)
+class InferenceFirstContentEvent:
+    """A streamed request's first content piece reaching the client, written
+    when it arrives, so its time to first token is known before it ends."""
+
+    session_id: str
+    request_id: str
+    x_request_id: str | None
+    case_id: str
+    phase: str
+    first_content_at_ns: int
+
+    def to_record(self) -> dict[str, Any]:
+        record = asdict(self)
+        record.update(
+            {
+                "schema_version": INFER_SCHEMA_VERSION,
+                "event_type": "infer.first_content",
+                "timestamp_ns": self.first_content_at_ns,
+            }
+        )
+        return record
+
+
+@dataclass(frozen=True)
+class InferencePhaseStartEvent:
+    """A phase beginning to send: written at its start, while the phase's
+    ``infer.phase_window`` record is written only once it has drained."""
+
+    session_id: str
+    case_id: str
+    phase: str
+    arrival_mode: str
+    started_at_ns: int
+
+    def to_record(self) -> dict[str, Any]:
+        record = asdict(self)
+        record.update(
+            {
+                "schema_version": INFER_SCHEMA_VERSION,
+                "event_type": "infer.phase_start",
                 "timestamp_ns": self.started_at_ns,
             }
         )
@@ -118,15 +216,32 @@ class InferenceSummaryEvent:
         }
 
 
-class JsonlEventWriter:
-    """Append inference profiling records to a JSONL artifact."""
+# Told about each record after it is written, with anything the record does
+# not hold that the observer may use, such as a summary computed elsewhere.
+RecordObserver = Callable[[dict[str, Any], Optional[Mapping[str, Any]]], None]
 
-    def __init__(self, path: str | Path) -> None:
+
+class JsonlEventWriter:
+    """Append inference profiling records to a JSONL artifact.
+
+    An ``observer``, such as an exporter, sees each record once it is
+    written. Its failures are counted in ``observer_errors`` and never
+    reach the artifact or the run.
+    """
+
+    def __init__(
+        self, path: str | Path, *, observer: RecordObserver | None = None
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._handle: TextIO | None = None
+        self._encoder = CorrelationRecordEncoder()
+        self._observer = observer
+        self.observer_errors = 0
 
     def __enter__(self) -> "JsonlEventWriter":
+        # Entering rewrites the file, so its context definitions start over.
+        self._encoder = CorrelationRecordEncoder()
         self._handle = self.path.open("w", encoding="utf-8")
         return self
 
@@ -135,8 +250,22 @@ class JsonlEventWriter:
             self._handle.close()
             self._handle = None
 
-    def append(self, record: dict[str, Any]) -> None:
+    @property
+    def is_open(self) -> bool:
+        return self._handle is not None
+
+    def append(
+        self, record: dict[str, Any], extras: Mapping[str, Any] | None = None
+    ) -> None:
         if self._handle is None:
             raise RuntimeError("JsonlEventWriter is not open")
-        self._handle.write(json.dumps(record, sort_keys=True) + "\n")
+        rows = self._encoder.prepare(record)
+        text = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+        self._handle.write(text)
+        self._encoder.commit(rows)
         self._handle.flush()
+        if self._observer is not None:
+            try:
+                self._observer(record, extras)
+            except Exception:
+                self.observer_errors += 1
