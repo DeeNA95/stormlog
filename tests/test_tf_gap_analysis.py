@@ -155,28 +155,47 @@ class TestTransientSpike:
 
 
 class TestFragmentationLike:
-    def test_fragmentation_like_detected(self) -> None:
-        """High (reserved - allocated) / reserved ratio -> fragmentation_like."""
+    def test_a_large_cache_alone_is_not_fragmentation(self) -> None:
+        """Reserved far above allocated with no split-block counter, as
+        TensorFlow reports it, is the allocator's cache, not fragmentation."""
         events = []
         for i in range(20):
-            alloc = 1_000_000_000
             reserved = 3_000_000_000 + i * 50_000_000
             # gap must exceed gap_ratio_threshold (5% of 16 GiB ~ 858 MB)
-            device_used = reserved + 1_500_000_000
-            events.append(_make_event(i, alloc, reserved, device_used))
+            events.append(
+                _make_event(i, 1_000_000_000, reserved, reserved + 1_500_000_000)
+            )
 
-        analyzer = MemoryAnalyzer()
-        findings = analyzer.analyze_memory_gaps(events)
+        findings = MemoryAnalyzer().analyze_memory_gaps(events)
+
+        assert not [f for f in findings if f.classification == "fragmentation_like"]
+
+    def test_inactive_split_blocks_are_fragmentation_like(self) -> None:
+        """Events that report inactive split blocks are judged by them."""
+        events = []
+        for i in range(20):
+            reserved = 3_000_000_000 + i * 50_000_000
+            events.append(
+                build_gap_event(
+                    index=i,
+                    allocator_allocated=1_000_000_000,
+                    allocator_reserved=reserved,
+                    device_used=reserved + 1_500_000_000,
+                    collector="stormlog.tensorflow.memory_tracker",
+                    allocator_inactive=int(reserved * 0.4),
+                )
+            )
+
+        findings = MemoryAnalyzer().analyze_memory_gaps(events)
 
         frag_findings = [
             f for f in findings if f.classification == "fragmentation_like"
         ]
         assert len(frag_findings) == 1
-
         finding = frag_findings[0]
         assert finding.confidence > 0
         assert finding.evidence["avg_fragmentation_ratio"] >= 0.3
-        assert len(finding.remediation) > 0
+        assert finding.remediation
         assert finding.description
 
 
