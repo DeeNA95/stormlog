@@ -156,7 +156,7 @@ class InferenceProfiler:
         self._check_schedules()
         # The repeated prompt by (seed, length): it is the same in every phase.
         self._repeated_prompts: dict[tuple[int, int], Prompt] = {}
-        client_type = (
+        client_type: type[OpenAIChatCompletionsClient] = (
             OpenAICompletionsClient
             if config.task == "completion"
             else OpenAIChatCompletionsClient
