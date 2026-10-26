@@ -9,21 +9,21 @@ from stormlog.mlx.context_profiler import (
 from tests.mlx_fakes import make_runtime
 
 
-def test_decorator_preserves_metadata_and_kwargs():
+def test_decorator_preserves_metadata_and_kwargs() -> None:
     profiler = MLXMemoryProfiler(runtime=make_runtime())
 
     @profile_function(profiler=profiler)
-    def workload(name, state_getter=3):
+    def workload(name: str, state_getter: int = 3) -> tuple[str, int]:
         """A workload with kwargs resembling profiler options."""
         return name, state_getter
 
     assert workload(name="user", state_getter=7) == ("user", 7)
     assert workload.__name__ == "workload"
-    assert workload.__doc__.startswith("A workload")
+    assert (workload.__doc__ or "").startswith("A workload")
     assert profiler.get_results()[0].name == "workload"
 
 
-def test_global_helpers_lifecycle():
+def test_global_helpers_lifecycle() -> None:
     profiler = MLXMemoryProfiler(runtime=make_runtime())
     set_global_profiler(profiler)
     try:

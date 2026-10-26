@@ -10,7 +10,7 @@ from stormlog.mlx.profiler import MLXMemoryProfiler
 from tests.mlx_fakes import make_runtime
 
 
-def test_profile_schema_and_validator_agree(tmp_path):
+def test_profile_schema_and_validator_agree(tmp_path: Path) -> None:
     profiler = MLXMemoryProfiler(runtime=make_runtime())
     profiler.profile_function(lambda: None, name="schema")
     path = tmp_path / "profile.json"
@@ -43,7 +43,7 @@ def test_profile_schema_and_validator_agree(tmp_path):
         jsonschema.validate(invalid, schema)
 
 
-def test_nested_artifact_validation_matches_schema(tmp_path):
+def test_nested_artifact_validation_matches_schema(tmp_path: Path) -> None:
     profiler = MLXMemoryProfiler(runtime=make_runtime())
     profiler.profile_function(lambda: None)
     path = tmp_path / "profile.json"
