@@ -346,9 +346,14 @@ class BoundedResponse:
         read = getattr(self.response, "read1", self.response.read)
         try:
             data = self._checked(read(remaining))
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
+            # A deadline that shuts a chunked body mid-read surfaces as
+            # IncompleteRead rather than OSError; it is still the deadline.
             if self._expired():
                 raise RequestDeadlineExceeded(self.status) from exc
+            # A body cut short or reset after the status line is that answer.
+            if isinstance(exc, (http.client.IncompleteRead, ConnectionError)):
+                raise CutResponseError(self.status or 200, exc) from exc
             raise
         if not data:
             self._validate_length()

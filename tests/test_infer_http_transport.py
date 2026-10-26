@@ -1,7 +1,9 @@
 """Total request deadlines include DNS, headers, body and error-body reads."""
 
 import contextlib
+import json
 import socket
+import struct
 import threading
 import time
 import urllib.error
@@ -12,6 +14,7 @@ import pytest
 from stormlog.infer.completions_client import OpenAICompletionsClient
 from stormlog.infer.http_transport import (
     ConnectError,
+    CutResponseError,
     EndpointHTTPError,
     RequestDeadlineExceeded,
 )
@@ -146,3 +149,81 @@ def test_a_response_that_keeps_arriving_outlives_the_read_timeout() -> None:
 def test_a_request_deadline_must_be_positive_and_finite(value: float) -> None:
     with pytest.raises(ValueError, match="request deadline"):
         client("http://127.0.0.1:1/v1/chat/completions", request_deadline_seconds=value)
+
+
+def _sse(text: str) -> bytes:
+    choice = {"delta": {"content": text}, "finish_reason": None}
+    return b"data: " + json.dumps({"choices": [choice]}).encode() + b"\n\n"
+
+
+def _read_request(connection: socket.socket) -> None:
+    """Read the whole request, so closing sends FIN rather than RST."""
+    data = b""
+    while b"\r\n\r\n" not in data:
+        data += connection.recv(65536)
+    head, _, body = data.partition(b"\r\n\r\n")
+    length = int(head.lower().split(b"content-length:")[1].split(b"\r\n")[0])
+    while len(body) < length:
+        body += connection.recv(65536)
+
+
+@contextlib.contextmanager
+def chunked_stream(pieces: int, *, delay: float, end: str) -> Iterator[str]:
+    """A chunked SSE stream like vLLM's that ends ``done``, ``eof`` or ``reset``."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def serve() -> None:
+        connection, _ = listener.accept()
+        with connection:
+            _read_request(connection)
+            try:
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                    b"Transfer-Encoding: chunked\r\n\r\n"
+                )
+                for index in range(pieces):
+                    piece = _sse(f"t{index} ")
+                    connection.sendall(b"%x\r\n%s\r\n" % (len(piece), piece))
+                    time.sleep(delay)
+                if end == "done":
+                    connection.sendall(b"0\r\n\r\n")
+                    return
+                connection.sendall(b"40\r\npartial")
+                if end == "reset":
+                    time.sleep(0.05)
+                    linger = struct.pack("ii", 1, 0)
+                    connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}/v1/chat/completions"
+    finally:
+        listener.close()
+        thread.join(3)
+
+
+def stream(value: OpenAIChatCompletionsClient) -> Any:
+    return value.complete(
+        prompt="input", output_tokens=8, stream=True, stream_include_usage=False
+    )
+
+
+def test_a_deadline_during_a_chunked_stream_is_a_timeout() -> None:
+    with chunked_stream(20, delay=0.05, end="done") as url:
+        with pytest.raises(RequestDeadlineExceeded) as raised:
+            stream(client(url, request_deadline_seconds=0.3))
+    assert classify_failure(raised.value) == ("timeout", 200)
+
+
+@pytest.mark.parametrize("end", ["eof", "reset"])
+def test_a_chunked_stream_cut_short_keeps_its_status(end: str) -> None:
+    with chunked_stream(2, delay=0.0, end=end) as url:
+        with pytest.raises(CutResponseError) as raised:
+            stream(client(url))
+    assert classify_failure(raised.value) == ("error", 200)
