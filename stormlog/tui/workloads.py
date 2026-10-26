@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, cast
 
 from stormlog.formatting import format_bytes
@@ -16,7 +17,15 @@ def run_pytorch_sample_workload(profiler_cls: Any, torch_module: Any) -> dict[st
         return y.sum()
 
     profiler.profile_function(workload)
-    return cast(dict[str, Any], profiler.get_summary())
+    # The profiler may be the shared one, whose summary spans every run; the
+    # log reports this run alone.
+    result = profiler.results[-1]
+    return {
+        "total_functions_profiled": 1,
+        "total_function_calls": 1,
+        "peak_memory_usage": result.peak_memory_usage(),
+        "memory_change_from_baseline": result.memory_diff(),
+    }
 
 
 def run_tensorflow_sample_workload(profiler_cls: Any, tf_module: Any) -> Any:
@@ -25,7 +34,16 @@ def run_tensorflow_sample_workload(profiler_cls: Any, tf_module: Any) -> Any:
         tensor = tf_module.random.normal((2048, 2048))
         product = tf_module.matmul(tensor, tensor)
         tf_module.reduce_sum(product)
-    return profiler.get_results()
+    # This run's own start and end snapshots, not the shared profiler's whole
+    # history, which get_results() would span.
+    before, after = profiler.function_profiles["tf_sample"]["snapshots"][-2:]
+    memory = (before.gpu_memory_mb, after.gpu_memory_mb)
+    return SimpleNamespace(
+        duration=after.timestamp - before.timestamp,
+        peak_memory_mb=max(memory),
+        average_memory_mb=sum(memory) / 2,
+        snapshots=[before, after],
+    )
 
 
 def run_cpu_sample_workload(profiler_cls: Any) -> dict[str, Any]:

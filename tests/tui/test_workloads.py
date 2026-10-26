@@ -75,12 +75,16 @@ def test_the_pytorch_sample_records_into_the_profiler_the_tab_lists(
     class FakeProfiler:
         def __init__(self) -> None:
             self.profiled: list[Any] = []
+            self.results: list[Any] = []
 
         def profile_function(self, workload: Any) -> None:
             self.profiled.append(workload)
-
-        def get_summary(self) -> dict[str, Any]:
-            return {"calls": len(self.profiled)}
+            size = 100 * len(self.profiled)
+            self.results.append(
+                SimpleNamespace(
+                    peak_memory_usage=lambda: size, memory_diff=lambda: size // 10
+                )
+            )
 
     fake = FakeProfiler()
     fake_torch = SimpleNamespace(
@@ -90,10 +94,14 @@ def test_the_pytorch_sample_records_into_the_profiler_the_tab_lists(
     monkeypatch.setattr(appmod, "GPUMemoryProfiler", object())
     monkeypatch.setattr(appmod, "torch", fake_torch)
 
-    summary = appmod.GPUMemoryProfilerTUI._pytorch_sample_workload()
+    first = appmod.GPUMemoryProfilerTUI._pytorch_sample_workload()
+    second = appmod.GPUMemoryProfilerTUI._pytorch_sample_workload()
 
-    assert summary == {"calls": 1}
-    assert len(fake.profiled) == 1
+    # Each summary is its own run, though the profiler is shared.
+    assert len(fake.profiled) == 2
+    assert first["peak_memory_usage"] == 100 and second["peak_memory_usage"] == 200
+    assert second["total_function_calls"] == 1
+    assert second["memory_change_from_baseline"] == 20
 
 
 def test_the_tensorflow_sample_shows_in_the_tensorflow_tab(
@@ -108,5 +116,9 @@ def test_the_tensorflow_sample_shows_in_the_tensorflow_tab(
     appmod._ensure_tensorflow_runtime()
 
     appmod.GPUMemoryProfilerTUI._tensorflow_sample_workload()
+    second = appmod.GPUMemoryProfilerTUI._tensorflow_sample_workload()
 
     assert [row.name for row in fetch_tensorflow_profiles()] == ["tf_sample"]
+    # The second run reports its own two snapshots, not both runs'.
+    assert len(second.snapshots) == 2
+    assert second.duration < 5
