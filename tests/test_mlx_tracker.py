@@ -307,3 +307,9 @@ def test_phase_closed_after_tracking_stops_still_raises() -> None:
     with pytest.raises(RuntimeError, match="tracking stops"):
         with tracker.phase("p"):
             tracker.stop_tracking()
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), True])
+def test_invalid_alert_threshold_names_itself(value: Any) -> None:
+    with pytest.raises(ValueError, match="alert_threshold_mb must be positive"):
+        MemoryTracker(runtime=make_runtime(), alert_threshold_mb=value)

@@ -60,7 +60,7 @@ class MemoryTracker:
         if type(device_id) is not int or device_id != 0:
             raise ValueError("MLX supports only device_id=0")
         if alert_threshold_mb is not None:
-            positive_interval(alert_threshold_mb)
+            positive_interval(alert_threshold_mb, "alert_threshold_mb")
         self.runtime = runtime if runtime is not None else MLXRuntime(device_id)
         self.collector = MLXCollector(self.runtime)
         self.max_history = max_history

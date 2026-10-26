@@ -11,9 +11,9 @@ from typing import Callable
 from .models import MemorySnapshot
 
 
-def positive_interval(value: float) -> float:
+def positive_interval(value: float, name: str = "sampling_interval") -> float:
     if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
-        raise ValueError("sampling_interval must be positive and finite")
+        raise ValueError(f"{name} must be positive and finite")
     return value
 
 
