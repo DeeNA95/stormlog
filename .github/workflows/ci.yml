@@ -26,6 +26,9 @@ jobs:
                 exclude:
                     - python-version: "3.12"
                       framework: tensorflow
+                # The three framework-only entries pin the legacy runtimes for
+                # every base python-version (3.10-3.12). A new interpreter needs
+                # its own entries below: the legacy pins have no wheels past 3.12.
                 include:
                     - framework: pytorch
                       framework-version: "2.2.2"
