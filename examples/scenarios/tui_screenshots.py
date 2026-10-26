@@ -21,7 +21,7 @@ from typing import Any, Sequence
 
 SIZE = (140, 44)
 
-# Tab title, file stem. MLX needs native Apple Silicon and is captured there.
+# Tab title, file stem. The MLX tab needs native MLX: see ``--mlx``.
 TABS = (
     ("Overview", "tui-overview-current"),
     ("PyTorch", "tui-pytorch-current"),
@@ -160,6 +160,27 @@ async def _capture(output: Path, track_seconds: float) -> list[Path]:
     return [saved[title] for title, _ in TABS]
 
 
+async def _capture_mlx(output: Path) -> Path:
+    """The MLX tab after Runtime Info and a native sample (Apple Silicon only)."""
+    from stormlog.tui.app import GPUMemoryProfilerTUI
+
+    output.mkdir(parents=True, exist_ok=True)
+    app = GPUMemoryProfilerTUI(framework="mlx")
+    path = output / "tui-mlx-current.svg"
+    async with app.run_test(headless=True, size=SIZE) as pilot:
+        await pilot.pause(1.0)
+        await _show(app, pilot, "MLX")
+        await _press(app, pilot, "btn-mlx-info", 2.0)
+        await _press(app, pilot, "btn-run-mlx", 6.0)
+        app.save_screenshot(filename=path.name, path=str(output))
+    return path
+
+
+def capture_mlx(output: Path) -> Path:
+    """Save the MLX tab under ``output``; needs native MLX on Apple Silicon."""
+    return asyncio.run(_capture_mlx(output))
+
+
 def capture(output: Path, track_seconds: float = 30.0) -> list[Path]:
     """Save one SVG per tab under ``output`` and return their paths."""
     return asyncio.run(_capture(output, track_seconds))
@@ -169,7 +190,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--output", type=Path, default=Path("docs"))
     parser.add_argument("--track-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--mlx",
+        action="store_true",
+        help="Capture only the MLX tab, with a native sample (Apple Silicon)",
+    )
     args = parser.parse_args(argv)
+    if args.mlx:
+        print(capture_mlx(args.output))
+        return 0
     for path in capture(args.output, args.track_seconds):
         print(path)
     return 0
