@@ -47,8 +47,11 @@ or a supported oMLX/model combination.
 
 - Cancelling after a real phase-start GET completed returned in about 0.11 ms
   and issued no phase-end GET, despite a one-second delay armed for that marker.
-  A real SIGINT check against the same route propagated `KeyboardInterrupt`
-  in about 0.33 ms after signal delivery and likewise started no final GET.
+  Ten additional real SIGINT checks against the same route each ran in a fresh
+  subprocess with a 15-second parent timeout. All ten propagated
+  `KeyboardInterrupt`, exited successfully, and started no final GET. Signal to
+  interrupt propagation took 0.306 to 0.401 ms; no hangs or timeouts occurred.
+  The earlier single SIGINT check also passed, for eleven successful runs total.
 - Two real GETs, each wrapped with an injected one-second backwards wall-clock
   step in the client sampler, produced valid error records with conservative
   clock uncertainty. A complete client artifact remained readable by offline
