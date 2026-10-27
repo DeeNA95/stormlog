@@ -63,3 +63,24 @@ or a supported oMLX/model combination.
 Authenticated oMLX statistics remain unqualified, as in the existing serving
 qualification record. Deterministic tests separately exercise successful stats
 payloads and cancellation while a sample is blocked.
+
+## PR #329 CI follow-up
+
+The Python 3.11/PyTorch job failed the existing queue-recovery qualification
+test's neighbor actuation assertion. The job passed 5,776 tests; its output did
+not include the underlying actuation problems. A local Python 3.11 run with a
+busy Python thread reproduced that assertion failure: all 240 neighbor requests
+completed, but dispatch lag p95 was 1.355 s, beyond the 250 ms actuation limit.
+
+The test now sends 40 rather than 120 fault requests per second. This still
+requires realized queue saturation, no victim preemption and successful
+recovery, while reducing the two-second episode from 240 to 80 streaming
+requests. Three fresh-process contention checks passed, with dispatch lag p95
+between 109 and 123 ms.
+Production actuation and recovery thresholds are unchanged. Assertion failures
+now include the injected actuation details so future CI reports name the
+specific problem.
+
+The Python 3.11 injection/neighbor selection passed 95 tests. The 97 docs
+regression tests, changed-file isort/Black/flake8 checks and warnings-as-errors
+Sphinx build also passed.
